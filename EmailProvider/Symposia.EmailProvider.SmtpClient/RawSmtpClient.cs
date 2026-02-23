@@ -29,6 +29,24 @@ public class RawSmtpClient : IDisposable
 
         await ExpectAsync("220");  // greeting from server
     }
+/*
+// ... after ConnectAsync and first EHLO ...
+
+Console.WriteLine("Server supports STARTTLS — upgrading now...");
+await smtp.StartTlsAsync();  // or await smtp.StartTlsAsync("smtp.gmail.com");
+
+Console.WriteLine("Re-sending EHLO after TLS upgrade (recommended)...");
+await smtp.SendCommandAsync("EHLO test.localhost");
+await smtp.ExpectAsync("250");
+
+Console.WriteLine("TLS established — connection is now secure.");
+
+// ────────────────────────────────────────────────
+// STOP HERE FOR NOW — test this much first!
+// Once this works (you'll see TLS success + new EHLO 250s),
+// add authentication next (very important for Gmail)
+// ────────────────────────────────────────────────
+*/
 
     public async Task SendEmailAsync(
         string from,
@@ -37,7 +55,15 @@ public class RawSmtpClient : IDisposable
         string body,
         bool html = false)
     {
+        
         await SendCommandAsync("EHLO localhost");           // or HELO
+        await ExpectAsync("250");
+        
+        Console.WriteLine("Server supports STARTTLS — upgrading now...");
+        await StartTlsAsync();  // or await smtp.StartTlsAsync("smtp.gmail.com");
+
+        Console.WriteLine("Re-sending EHLO after TLS upgrade (recommended)...");
+        await SendCommandAsync("EHLO test.localhost");
         await ExpectAsync("250");
 
         await SendCommandAsync($"MAIL FROM:<{from}>");
@@ -111,6 +137,44 @@ public class RawSmtpClient : IDisposable
             response = await _reader.ReadLineAsync() ?? throw new Exception("Connection closed");
             Console.WriteLine($"< {response}");
         }
+    }
+
+    public async Task StartTlsAsync(string serverName = "smtp.gmail.com")
+    {
+        if (_writer == null || _reader == null || _stream == null)
+            throw new InvalidOperationException("Not connected");
+
+        // Tell the server we want to upgrade
+        await SendCommandAsync("STARTTLS");
+
+        // Expect 220 Ready to start TLS
+        string response = await _reader.ReadLineAsync() ?? throw new Exception("Connection closed");
+        Console.WriteLine($"< {response}");
+
+        if (!response.StartsWith("220"))
+        {
+            throw new Exception($"STARTTLS refused: {response}");
+        }
+
+        // Handle possible multi-line (rare for STARTTLS)
+        while (response.Length >= 4 && response[3] == '-')
+        {
+            response = await _reader.ReadLineAsync() ?? throw new Exception("Connection closed");
+            Console.WriteLine($"< {response}");
+        }
+
+        // Now upgrade the underlying stream to TLS
+        var sslStream = new SslStream(_stream, false);  // leaveAsTcpStream: false
+
+        // Authenticate as client — pass the exact server hostname for cert validation
+        await sslStream.AuthenticateAsClientAsync(serverName);
+
+        // Replace the old plain stream with the secure one
+        _stream = sslStream;
+        _reader = new StreamReader(_stream, Encoding.ASCII);
+        _writer = new StreamWriter(_stream, Encoding.ASCII) { AutoFlush = true };
+
+        Console.WriteLine("STARTTLS upgrade successful — now using TLS.");
     }
 
     public void Dispose()

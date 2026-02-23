@@ -66,6 +66,9 @@ nunit-*.xml
 [Rr]eleasePS/
 dlldata.c
 
+# MAC
+.DS_Store
+
 # Benchmark Results
 BenchmarkDotNet.Artifacts/
 
