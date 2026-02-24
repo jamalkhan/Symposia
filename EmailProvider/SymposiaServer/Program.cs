@@ -2,6 +2,140 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace NativeSmtpReceiver
+{
+    // ────────────────────────────────────────────────
+    // Main program with command dispatching
+    // ────────────────────────────────────────────────
+    class Program
+    {
+        private const int Port = 2525;
+        private static readonly IPEndPoint ListenEndpoint = new(IPAddress.Any, Port);
+
+        private static readonly Dictionary<string, ISmtpCommand> CommandMap = BuildCommandMap();
+
+        private static Dictionary<string, ISmtpCommand> BuildCommandMap()
+        {
+            var map = new Dictionary<string, ISmtpCommand>(StringComparer.OrdinalIgnoreCase);
+            var commands = new ISmtpCommand[]
+            {
+                new EhloCommand(),
+                new MailFromCommand(),
+                new RcptToCommand(),
+                new DataCommand(),
+                new QuitCommand(),
+                new RsetCommand(),
+                new NoopCommand(),
+                // Add more later: AuthLoginCommand, StartTlsCommand, VrfyCommand, etc.
+            };
+
+            foreach (var cmd in commands)
+            {
+                foreach (var verb in cmd.SupportedVerbs)
+                {
+                    map[verb] = cmd;
+                }
+            }
+
+            return map;
+        }
+
+        static async Task Main(string[] args)
+        {
+            Console.WriteLine($"Starting minimal SMTP receiver on port {Port} ...");
+
+            var listener = new TcpListener(ListenEndpoint);
+            listener.Start();
+
+            while (true)
+            {
+                try
+                {
+                    var client = await listener.AcceptTcpClientAsync();
+                    _ = HandleClientAsync(client);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Accept error: {ex.Message}");
+                }
+            }
+        }
+
+        private static async Task HandleClientAsync(TcpClient client)
+        {
+            try
+            {
+                // IMPORTANT: Disable Nagle's algorithm for low-latency protocol responses
+                client.NoDelay = true;  // ← This helps A LOT with pipelining
+
+                using var stream = client.GetStream();
+                using var reader = new StreamReader(stream, Encoding.ASCII);
+                using var writer = new StreamWriter(stream, Encoding.ASCII) 
+                { 
+                    AutoFlush = true,
+                    NewLine = "\r\n" 
+                };
+
+                // Greeting + immediate flush
+                await writer.WriteLineAsync("220 native-smtp.local ESMTP Ready");
+                await writer.FlushAsync();
+
+                var session = new SmtpSession();
+                var dataLineHandler = new DataLineCommand();
+
+                while (true)
+                {
+                    string? line = await reader.ReadLineAsync();
+                    if (line == null) break;
+
+                    Console.WriteLine($"> {line}");
+
+                    string trimmed = line.Trim();
+                    string upper = trimmed.ToUpperInvariant();
+
+                    if (session.InDataMode)
+                    {
+                        await dataLineHandler.ExecuteAsync(line, null, session, writer);
+                    }
+                    else
+                    {
+                        string verb = upper.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+                        string? arg = trimmed.Length > verb.Length ? trimmed[(verb.Length + 1)..].Trim() : null;
+
+                        if (CommandMap.TryGetValue(verb, out var command))
+                        {
+                            await command.ExecuteAsync(trimmed, arg, session, writer);
+                        }
+                        else
+                        {
+                            await new UnknownCommand().ExecuteAsync(trimmed, arg, session, writer);
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { /* QUIT */ }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Client error: {ex.Message}");
+            }
+            finally
+            {
+                client.Close();
+            }
+        }
+    }
+}
+
+
+
+/*using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
@@ -270,4 +404,4 @@ namespace SymposiaServer
             return sb.ToString();
         }
     }
-}
+}*/
