@@ -237,7 +237,24 @@ internal sealed class Program
             ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@domain1.com>"), "250 2.1.5 Ok");
             ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@domain2.com>"), "250 2.1.5 Ok");
             ExpectSingle(await client.SendCommandAsync("DATA"), "354 End data with <CR><LF>.<CR><LF>");
-            ExpectSingle(await client.SendDataAsync(["Subject: Mailbox Read", "", "Logical mailbox storage."]), "250 2.0.0 Ok: queued");
+            ExpectSingle(await client.SendDataAsync(
+            [
+                "From: Sender Example <sender@example.com>",
+                "To: Jamal One <jamal@domain1.com>, Jamal Two <jamal@domain2.com>",
+                "Subject: Mailbox Read",
+                "MIME-Version: 1.0",
+                "Content-Type: multipart/alternative; boundary=\"symposia-boundary\"",
+                "",
+                "--symposia-boundary",
+                "Content-Type: text/plain; charset=utf-8",
+                "",
+                "Logical mailbox storage.",
+                "--symposia-boundary",
+                "Content-Type: text/html; charset=utf-8",
+                "",
+                "<p><strong>Logical</strong> mailbox storage.</p>",
+                "--symposia-boundary--"
+            ]), "250 2.0.0 Ok: queued");
             ExpectSingle(await client.SendCommandAsync("QUIT"), "221 2.0.0 Bye");
         }
 
@@ -279,6 +296,24 @@ internal sealed class Program
             !string.Equals(storedMessage.Metadata.Subject, "Mailbox Read", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Stored mailbox message metadata did not match expected mailbox identity.");
+        }
+
+        if (!string.Equals(storedMessage.Metadata.HeaderFrom, "Sender Example <sender@example.com>", StringComparison.Ordinal) ||
+            !string.Equals(storedMessage.Metadata.HeaderTo, "Jamal One <jamal@domain1.com>, Jamal Two <jamal@domain2.com>", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Stored mailbox message metadata did not parse From/To headers as expected.");
+        }
+
+        if (!string.Equals(storedMessage.Metadata.PlainTextBody, "Logical mailbox storage.", StringComparison.Ordinal) ||
+            !string.Equals(storedMessage.Metadata.HtmlBody, "<p><strong>Logical</strong> mailbox storage.</p>", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Stored mailbox message metadata did not parse plain text and HTML bodies as expected.");
+        }
+
+        if (!storedMessage.Metadata.Headers.Any(static header => string.Equals(header.Name, "Content-Type", StringComparison.OrdinalIgnoreCase)) ||
+            !storedMessage.Metadata.Headers.Any(static header => string.Equals(header.Name, "From", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException("Stored mailbox message metadata did not preserve the parsed header collection.");
         }
     }
 

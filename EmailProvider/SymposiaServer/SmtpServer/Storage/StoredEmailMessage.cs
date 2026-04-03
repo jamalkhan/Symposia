@@ -8,6 +8,18 @@ public sealed record StoredEmailMessage(
     string RawMessage,
     DateTimeOffset ReceivedAtUtc);
 
+public sealed record ParsedEmailHeader(
+    string Name,
+    string Value);
+
+public sealed record ParsedMailboxMessage(
+    string? HeaderFrom,
+    string? HeaderTo,
+    string? Subject,
+    IReadOnlyList<ParsedEmailHeader> Headers,
+    string? PlainTextBody,
+    string? HtmlBody);
+
 public sealed record MailboxStorageDelivery(
     string MailboxId,
     string StorageProviderName,
@@ -22,7 +34,12 @@ public sealed record StoredMailboxMessageMetadata(
     IReadOnlyList<string> EnvelopeRecipients,
     IReadOnlyList<string> DeliveredAddresses,
     IReadOnlyList<string> DeliveredDomains,
+    string? HeaderFrom,
+    string? HeaderTo,
     string? Subject,
+    IReadOnlyList<ParsedEmailHeader> Headers,
+    string? PlainTextBody,
+    string? HtmlBody,
     DateTimeOffset ReceivedAtUtc);
 
 public sealed record MailboxAddressPointer(

@@ -169,6 +169,7 @@ coverage*.info
 # Visual Studio code coverage results
 *.coverage
 *.coveragexml
+.dotnet-tools/
 
 # NCrunch
 _NCrunch_*

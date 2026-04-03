@@ -24,6 +24,7 @@ public sealed class FileSystemMailboxStorageProvider : IMailboxStorageProvider
 
     public async Task StoreAsync(MailboxStorageDelivery delivery, CancellationToken cancellationToken = default)
     {
+        var parsedMessage = EmailMessageParser.Parse(delivery.Message.DataLines);
         var mailboxIdSegment = SanitizePathSegment(delivery.MailboxId);
         var mailboxMessagesPath = Path.Combine(_options.RootPath, "mailboxes", mailboxIdSegment, "messages");
         Directory.CreateDirectory(mailboxMessagesPath);
@@ -54,7 +55,12 @@ public sealed class FileSystemMailboxStorageProvider : IMailboxStorageProvider
             delivery.Message.EnvelopeRecipients,
             delivery.Routes.Select(static route => route.Address).ToArray(),
             delivery.Routes.Select(static route => route.DomainName).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            GetHeaderValue(delivery.Message.DataLines, "Subject"),
+            parsedMessage.HeaderFrom,
+            parsedMessage.HeaderTo,
+            parsedMessage.Subject,
+            parsedMessage.Headers,
+            parsedMessage.PlainTextBody,
+            parsedMessage.HtmlBody,
             delivery.Message.ReceivedAtUtc);
         await File.WriteAllTextAsync(
             metadataPath,
@@ -158,24 +164,6 @@ public sealed class FileSystemMailboxStorageProvider : IMailboxStorageProvider
     private string GetMailboxMessagesPath(string mailboxId)
     {
         return Path.Combine(_options.RootPath, "mailboxes", SanitizePathSegment(mailboxId), "messages");
-    }
-
-    private static string? GetHeaderValue(IReadOnlyList<string> dataLines, string headerName)
-    {
-        foreach (var line in dataLines)
-        {
-            if (string.IsNullOrEmpty(line))
-            {
-                break;
-            }
-
-            if (line.StartsWith($"{headerName}:", StringComparison.OrdinalIgnoreCase))
-            {
-                return line[(headerName.Length + 1)..].Trim();
-            }
-        }
-
-        return null;
     }
 
     private static string SanitizePathSegment(string input)
