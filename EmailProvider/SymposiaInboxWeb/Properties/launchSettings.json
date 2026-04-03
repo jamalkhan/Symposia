@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "InboxWeb": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "SYMPOSIA_INBOX_HTTP_PORT": "5190",
+        "SYMPOSIA_INBOX_HTTPS_PORT": "5545",
+        "SYMPOSIA_INBOX_TLS_CERT_PATH": "EmailProvider/.dev/smtp/server.pfx",
+        "SYMPOSIA_INBOX_TLS_CERT_PASSWORD": "symposia-dev-pass",
+        "SYMPOSIA_SMTP_HOSTING_CONFIG": "../SymposiaServer/Config/mailboxes.json",
+        "SYMPOSIA_INBOX_ACCOUNT_STORE_PATH": "Config/accounts.json"
+      }
+    }
+  }
+}
