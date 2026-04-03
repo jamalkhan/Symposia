@@ -4,11 +4,13 @@ namespace NativeSmtpReceiver;
 public class RcptToCommand : SmtpCommandBase
 {
     private readonly HostingDirectory _hostingDirectory;
+    private readonly SmtpServerOptions _options;
     private readonly ILogger<RcptToCommand> _logger;
 
-    public RcptToCommand(HostingDirectory hostingDirectory, ILogger<RcptToCommand> logger)
+    public RcptToCommand(HostingDirectory hostingDirectory, SmtpServerOptions options, ILogger<RcptToCommand> logger)
     {
         _hostingDirectory = hostingDirectory;
+        _options = options;
         _logger = logger;
     }
 
@@ -45,8 +47,21 @@ public class RcptToCommand : SmtpCommandBase
 
         if (!_hostingDirectory.TryResolveRecipient(rcpt, out var route, out var rejectionResponse))
         {
+            if (string.Equals(rejectionResponse, "550 5.1.2 Domain not hosted here", StringComparison.Ordinal) &&
+                (!session.IsAuthenticated || !_options.AllowAuthenticatedRelay))
+            {
+                rejectionResponse = "554 5.7.1 Relay access denied";
+            }
+
             _logger.LogWarning("Rejected recipient {Recipient}: {Reason}", rcpt, rejectionResponse);
             await connection.WriteLineAsync(rejectionResponse);
+            return;
+        }
+
+        if (session.Recipients.Count >= _options.MaxRecipientsPerMessage)
+        {
+            _logger.LogWarning("Rejected recipient {Recipient}: recipient limit exceeded", rcpt);
+            await connection.WriteLineAsync("452 4.5.3 Too many recipients");
             return;
         }
 

@@ -18,7 +18,16 @@ public sealed record ParsedMailboxMessage(
     string? Subject,
     IReadOnlyList<ParsedEmailHeader> Headers,
     string? PlainTextBody,
-    string? HtmlBody);
+    string? HtmlBody,
+    MailAuthenticationAwareness AuthenticationAwareness);
+
+public sealed record MailAuthenticationAwareness(
+    string? SpfStatus,
+    string? DkimStatus,
+    string? DmarcStatus,
+    bool HasDkimSignature,
+    string? AuthenticationResultsHeader,
+    string? ReceivedSpfHeader);
 
 public sealed record MailboxStorageDelivery(
     string MailboxId,
@@ -40,6 +49,7 @@ public sealed record StoredMailboxMessageMetadata(
     IReadOnlyList<ParsedEmailHeader> Headers,
     string? PlainTextBody,
     string? HtmlBody,
+    MailAuthenticationAwareness AuthenticationAwareness,
     DateTimeOffset ReceivedAtUtc);
 
 public sealed record MailboxAddressPointer(

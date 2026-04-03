@@ -30,6 +30,7 @@ public sealed class SmtpSessionHandler
         client.NoDelay = true;
 
         var remoteEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
+        var remoteIp = (client.Client.RemoteEndPoint as System.Net.IPEndPoint)?.Address.ToString() ?? "unknown";
         _logger.LogInformation("Accepted SMTP client from {RemoteEndpoint}", remoteEndpoint);
 
         try
@@ -37,14 +38,39 @@ public sealed class SmtpSessionHandler
             using var connection = new SmtpConnectionContext(client, _options);
             await connection.WriteLineAsync($"220 {_options.ServerName} ESMTP Ready");
 
-            var session = new SmtpSession();
+            var session = new SmtpSession
+            {
+                RemoteIpAddress = remoteIp
+            };
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                var line = await connection.ReadLineAsync();
+                string? line;
+                try
+                {
+                    line = await connection.ReadLineAsync(_options.SessionIdleTimeout, cancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                    _logger.LogWarning(
+                        "SMTP session with {RemoteEndpoint} timed out after {TimeoutSeconds} seconds",
+                        remoteEndpoint,
+                        _options.SessionIdleTimeout.TotalSeconds);
+                    await connection.WriteLineAsync("421 4.4.2 Idle timeout exceeded");
+                    break;
+                }
+
                 if (line is null)
                 {
                     _logger.LogInformation("SMTP client {RemoteEndpoint} disconnected", remoteEndpoint);
+                    break;
+                }
+
+                session.CommandCount++;
+                if (session.CommandCount > _options.MaxCommandsPerSession)
+                {
+                    _logger.LogWarning("SMTP session with {RemoteEndpoint} exceeded command limit", remoteEndpoint);
+                    await connection.WriteLineAsync("421 4.7.0 Too many commands in session");
                     break;
                 }
 

@@ -26,6 +26,8 @@ internal sealed class Program
             RunDashboardHttpApiAsync,
             RunMixedRecipientHandlingAsync,
             RunCommandOrderingFailuresAsync,
+            RunMessageSizeLimitAsync,
+            RunConnectionRateLimitAsync,
             RunProtocolNegativeCasesAsync,
             RunAuthUnavailableAsync,
             RunStorageFailureAsync,
@@ -242,6 +244,9 @@ internal sealed class Program
                 "From: Sender Example <sender@example.com>",
                 "To: Jamal One <jamal@domain1.com>, Jamal Two <jamal@domain2.com>",
                 "Subject: Mailbox Read",
+                "Received-SPF: pass client-ip=127.0.0.1; envelope-from=sender@example.com;",
+                "Authentication-Results: mx.symposia.test; spf=pass smtp.mailfrom=sender@example.com; dkim=pass header.d=example.com; dmarc=pass action=none",
+                "DKIM-Signature: v=1; a=rsa-sha256; d=example.com; s=test; bh=abc; b=xyz;",
                 "MIME-Version: 1.0",
                 "Content-Type: multipart/alternative; boundary=\"symposia-boundary\"",
                 "",
@@ -259,7 +264,7 @@ internal sealed class Program
         }
 
         var directory = HostingDirectory.Load(hostingConfigPath);
-        var readService = new MailboxReadService(directory, NullLoggerFactory.Instance, NullLogger<MailboxReadService>.Instance);
+        var readService = new MailboxReadService(directory, new MailboxStorageProviderCatalog(directory, NullLoggerFactory.Instance), NullLogger<MailboxReadService>.Instance);
 
         var bindings = readService.GetMailboxBindings("jamal");
         if (bindings.Count != 2)
@@ -314,6 +319,14 @@ internal sealed class Program
             !storedMessage.Metadata.Headers.Any(static header => string.Equals(header.Name, "From", StringComparison.OrdinalIgnoreCase)))
         {
             throw new InvalidOperationException("Stored mailbox message metadata did not preserve the parsed header collection.");
+        }
+
+        if (!string.Equals(storedMessage.Metadata.AuthenticationAwareness.SpfStatus, "pass", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(storedMessage.Metadata.AuthenticationAwareness.DkimStatus, "pass", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(storedMessage.Metadata.AuthenticationAwareness.DmarcStatus, "pass", StringComparison.OrdinalIgnoreCase) ||
+            !storedMessage.Metadata.AuthenticationAwareness.HasDkimSignature)
+        {
+            throw new InvalidOperationException("Stored mailbox message metadata did not capture SPF/DKIM/DMARC awareness as expected.");
         }
     }
 
@@ -415,9 +428,77 @@ internal sealed class Program
         ExpectSingle(await client.SendCommandAsync("DATA"), "503 5.5.1 Need MAIL FROM before DATA");
         ExpectSingle(await client.SendCommandAsync("MAIL FROM:<sender@example.com>"), "250 2.1.0 Ok");
         ExpectSingle(await client.SendCommandAsync("RCPT TO:<unknown@symposia.com>"), "550 5.1.1 Mailbox unavailable");
-        ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@example.com>"), "550 5.1.2 Domain not hosted here");
+        ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@example.com>"), "554 5.7.1 Relay access denied");
         ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@symposia.com>"), "250 2.1.5 Ok");
         ExpectSingle(await client.SendCommandAsync("QUIT"), "221 2.0.0 Bye");
+    }
+
+    private static async Task RunMessageSizeLimitAsync()
+    {
+        var port = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var hostingConfigPath = Path.Combine(tempRoot, "mailboxes.json");
+        var mailRoot = Path.Combine(tempRoot, "maildrop");
+
+        await WriteHostingConfigAsync(
+            hostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, mailRoot)],
+            [new TestDomain("symposia.com", "local-default", [new TestMailbox("jamal@symposia.com", "jamal")])]);
+
+        await using var server = await RunningServer.StartAsync(port, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = hostingConfigPath,
+            ["SYMPOSIA_SMTP_MAX_MESSAGE_SIZE_BYTES"] = "1024"
+        });
+
+        using var client = await SmtpTestClient.ConnectAsync(port);
+        ExpectSingle(await client.ReadResponseAsync(), "220 localhost ESMTP Ready");
+        ExpectContains(await client.SendCommandAsync("EHLO localhost"), "250 HELP");
+        ExpectSingle(await client.SendCommandAsync("MAIL FROM:<sender@example.com>"), "250 2.1.0 Ok");
+        ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@symposia.com>"), "250 2.1.5 Ok");
+        ExpectSingle(await client.SendCommandAsync("DATA"), "354 End data with <CR><LF>.<CR><LF>");
+        ExpectSingle(await client.SendDataAsync(
+        [
+            "Subject: Too Large",
+            "",
+            new string('A', 2000)
+        ]), "552 5.3.4 Message size exceeds fixed maximum message size");
+        ExpectSingle(await client.SendCommandAsync("QUIT"), "221 2.0.0 Bye");
+        ExpectMailboxMessagePersisted(mailRoot, "jamal", 0);
+    }
+
+    private static async Task RunConnectionRateLimitAsync()
+    {
+        var port = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var hostingConfigPath = Path.Combine(tempRoot, "mailboxes.json");
+        await WriteHostingConfigAsync(
+            hostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "maildrop"))],
+            [new TestDomain("symposia.com", "local-default", [new TestMailbox("jamal@symposia.com", "jamal")])]);
+
+        await using var server = await RunningServer.StartAsync(port, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = hostingConfigPath,
+            ["SYMPOSIA_SMTP_MAX_CONNECTIONS_PER_IP_PER_MINUTE"] = "4"
+        });
+
+        using var client1 = await SmtpTestClient.ConnectAsync(port);
+        ExpectSingle(await client1.ReadResponseAsync(), "220 localhost ESMTP Ready");
+        ExpectSingle(await client1.SendCommandAsync("QUIT"), "221 2.0.0 Bye");
+
+        using var client2 = await SmtpTestClient.ConnectAsync(port);
+        ExpectSingle(await client2.ReadResponseAsync(), "220 localhost ESMTP Ready");
+        ExpectSingle(await client2.SendCommandAsync("QUIT"), "221 2.0.0 Bye");
+
+        using var client3 = await SmtpTestClient.ConnectAsync(port);
+        ExpectSingle(await client3.ReadResponseAsync(), "220 localhost ESMTP Ready");
+        ExpectSingle(await client3.SendCommandAsync("QUIT"), "221 2.0.0 Bye");
+
+        using var client4 = await SmtpTestClient.ConnectAsync(port);
+        ExpectSingle(await client4.ReadResponseAsync(), "421 4.7.0 Connection rate limit exceeded");
     }
 
     private static async Task RunProtocolNegativeCasesAsync()
@@ -567,12 +648,14 @@ internal sealed class Program
             [new TestStorageProvider("local-default", FileSystemStorageType, blockedRoot)],
             [new TestDomain("symposia.com", "local-default", [new TestMailbox("jamal@symposia.com", "jamal")])]);
 
+        var retryRoot = Path.Combine(tempRoot, "retry-queue");
         await using var server = await RunningServer.StartAsync(port, new Dictionary<string, string?>
         {
             ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
             ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = hostingConfigPath,
             ["SYMPOSIA_SMTP_TLS_CERT_PATH"] = certPath,
-            ["SYMPOSIA_SMTP_TLS_CERT_PASSWORD"] = "symposia-dev-pass"
+            ["SYMPOSIA_SMTP_TLS_CERT_PASSWORD"] = "symposia-dev-pass",
+            ["SYMPOSIA_SMTP_RETRY_QUEUE_ROOT"] = retryRoot
         });
 
         using var client = await SmtpTestClient.ConnectAsync(port);
@@ -581,7 +664,12 @@ internal sealed class Program
         ExpectSingle(await client.SendCommandAsync("MAIL FROM:<sender@example.com>"), "250 2.1.0 Ok");
         ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@symposia.com>"), "250 2.1.5 Ok");
         ExpectSingle(await client.SendCommandAsync("DATA"), "354 End data with <CR><LF>.<CR><LF>");
-        ExpectConnectionClosed(await client.SendDataAsync(["Subject: Failure", "", "filesystem should fail"]));
+        ExpectSingle(await client.SendDataAsync(["Subject: Failure", "", "filesystem should fail"]), "250 2.0.0 Ok: queued for retry");
+        var retryFiles = Directory.GetFiles(Path.Combine(retryRoot, "pending"), "*.json", SearchOption.TopDirectoryOnly);
+        if (retryFiles.Length != 1)
+        {
+            throw new InvalidOperationException($"Expected one retry queue file, found {retryFiles.Length}.");
+        }
     }
 
     private static async Task RunUnsupportedProviderFailureAsync()
@@ -607,7 +695,7 @@ internal sealed class Program
         ExpectSingle(await client.SendCommandAsync("MAIL FROM:<sender@example.com>"), "250 2.1.0 Ok");
         ExpectSingle(await client.SendCommandAsync("RCPT TO:<jamal@symposia.com>"), "250 2.1.5 Ok");
         ExpectSingle(await client.SendCommandAsync("DATA"), "354 End data with <CR><LF>.<CR><LF>");
-        ExpectConnectionClosed(await client.SendDataAsync(["Subject: Unsupported", "", "unsupported provider should fail"]));
+        ExpectSingle(await client.SendDataAsync(["Subject: Unsupported", "", "unsupported provider should fail"]), "554 5.3.0 Message rejected");
     }
 
     private static async Task RunConfigFailureCasesAsync()
@@ -737,6 +825,11 @@ internal sealed class Program
         var mailboxPath = Path.Combine(rootPath, "mailboxes", mailboxId, "messages");
         if (!Directory.Exists(mailboxPath))
         {
+            if (expectedCount == 0)
+            {
+                return;
+            }
+
             throw new InvalidOperationException($"Expected mailbox storage under '{mailboxPath}'.");
         }
 

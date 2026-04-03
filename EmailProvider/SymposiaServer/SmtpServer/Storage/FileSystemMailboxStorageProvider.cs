@@ -61,6 +61,7 @@ public sealed class FileSystemMailboxStorageProvider : IMailboxStorageProvider
             parsedMessage.Headers,
             parsedMessage.PlainTextBody,
             parsedMessage.HtmlBody,
+            parsedMessage.AuthenticationAwareness,
             delivery.Message.ReceivedAtUtc);
         await File.WriteAllTextAsync(
             metadataPath,

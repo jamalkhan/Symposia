@@ -8,11 +8,10 @@ public sealed class MailboxDeliveryService
     private readonly ILogger<MailboxDeliveryService> _logger;
 
     public MailboxDeliveryService(
-        HostingDirectory hostingDirectory,
-        ILoggerFactory loggerFactory,
+        MailboxStorageProviderCatalog providerCatalog,
         ILogger<MailboxDeliveryService> logger)
     {
-        _providers = MailboxStorageProviderFactory.CreateProviders(hostingDirectory, loggerFactory);
+        _providers = providerCatalog.Providers;
         _logger = logger;
     }
 
@@ -36,21 +35,54 @@ public sealed class MailboxDeliveryService
                 message))
             .ToArray();
 
+        await StorePreparedDeliveriesAsync(deliveries, cancellationToken);
+    }
+
+    public async Task StorePreparedDeliveriesAsync(IReadOnlyList<MailboxStorageDelivery> deliveries, CancellationToken cancellationToken = default)
+    {
         foreach (var delivery in deliveries)
         {
-            if (!_providers.TryGetValue(delivery.StorageProviderName, out var provider))
+            try
             {
-                throw new InvalidOperationException($"Storage provider '{delivery.StorageProviderName}' was not resolved for mailbox '{delivery.MailboxId}'.");
+                await StoreSingleDeliveryAsync(delivery, cancellationToken);
             }
-
-            _logger.LogInformation(
-                "Delivering message {MessageId} for mailbox {MailboxId} to {AddressCount} routed addresses via provider {ProviderName} ({ProviderType})",
-                message.MessageId,
-                delivery.MailboxId,
-                delivery.Routes.Count,
-                provider.Name,
-                provider.Type);
-            await provider.StoreAsync(delivery, cancellationToken);
+            catch (Exception ex) when (IsTransient(ex))
+            {
+                throw new TransientMailboxDeliveryException(
+                    $"Transient failure while delivering mailbox '{delivery.MailboxId}'.",
+                    deliveries,
+                    ex);
+            }
+            catch (NotSupportedException ex)
+            {
+                throw new PermanentMailboxDeliveryException(
+                    $"Permanent failure while delivering mailbox '{delivery.MailboxId}'.",
+                    ex);
+            }
         }
+    }
+
+    private async Task StoreSingleDeliveryAsync(MailboxStorageDelivery delivery, CancellationToken cancellationToken)
+    {
+        if (!_providers.TryGetValue(delivery.StorageProviderName, out var provider))
+        {
+            throw new PermanentMailboxDeliveryException(
+                $"Storage provider '{delivery.StorageProviderName}' was not resolved for mailbox '{delivery.MailboxId}'.",
+                new InvalidOperationException($"Storage provider '{delivery.StorageProviderName}' was not resolved for mailbox '{delivery.MailboxId}'."));
+        }
+
+        _logger.LogInformation(
+            "Delivering message {MessageId} for mailbox {MailboxId} to {AddressCount} routed addresses via provider {ProviderName} ({ProviderType})",
+            delivery.Message.MessageId,
+            delivery.MailboxId,
+            delivery.Routes.Count,
+            provider.Name,
+            provider.Type);
+        await provider.StoreAsync(delivery, cancellationToken);
+    }
+
+    private static bool IsTransient(Exception ex)
+    {
+        return ex is IOException or UnauthorizedAccessException or TimeoutException;
     }
 }

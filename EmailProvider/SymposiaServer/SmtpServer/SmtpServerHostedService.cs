@@ -10,16 +10,19 @@ public sealed class SmtpServerHostedService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly SmtpServerOptions _options;
+    private readonly SmtpConnectionGuard _connectionGuard;
     private readonly ILogger<SmtpServerHostedService> _logger;
     private TcpListener? _listener;
 
     public SmtpServerHostedService(
         IServiceScopeFactory scopeFactory,
         SmtpServerOptions options,
+        SmtpConnectionGuard connectionGuard,
         ILogger<SmtpServerHostedService> logger)
     {
         _scopeFactory = scopeFactory;
         _options = options;
+        _connectionGuard = connectionGuard;
         _logger = logger;
     }
 
@@ -49,7 +52,17 @@ public sealed class SmtpServerHostedService : BackgroundService
                     continue;
                 }
 
-                _ = HandleClientAsync(client, stoppingToken);
+                if (!_connectionGuard.TryAcquire(client, out var lease, out var rejectionResponse))
+                {
+                    _logger.LogWarning(
+                        "Rejected SMTP client {RemoteEndpoint}: {Reason}",
+                        client.Client.RemoteEndPoint,
+                        rejectionResponse);
+                    _ = RejectClientAsync(client, rejectionResponse);
+                    continue;
+                }
+
+                _ = HandleClientAsync(client, lease!, stoppingToken);
             }
         }
         finally
@@ -59,8 +72,9 @@ public sealed class SmtpServerHostedService : BackgroundService
         }
     }
 
-    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+    private async Task HandleClientAsync(TcpClient client, SmtpConnectionGuard.SmtpConnectionLease lease, CancellationToken cancellationToken)
     {
+        using var _ = lease;
         using var scope = _scopeFactory.CreateScope();
         var handler = scope.ServiceProvider.GetRequiredService<SmtpSessionHandler>();
 
@@ -71,6 +85,24 @@ public sealed class SmtpServerHostedService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unhandled failure while processing SMTP client");
+            client.Dispose();
+        }
+    }
+
+    private static async Task RejectClientAsync(TcpClient client, string rejectionResponse)
+    {
+        try
+        {
+            await using var stream = client.GetStream();
+            await using var writer = new StreamWriter(stream, leaveOpen: true) { AutoFlush = true, NewLine = "\r\n" };
+            await writer.WriteLineAsync(rejectionResponse);
+        }
+        catch
+        {
+            // Best effort only.
+        }
+        finally
+        {
             client.Dispose();
         }
     }

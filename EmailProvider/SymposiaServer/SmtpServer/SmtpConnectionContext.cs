@@ -38,6 +38,22 @@ public sealed class SmtpConnectionContext : IDisposable
         return await Reader.ReadLineAsync();
     }
 
+    public async Task<string?> ReadLineAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var readTask = Reader.ReadLineAsync();
+        var delayTask = Task.Delay(timeout, timeoutCts.Token);
+        var completed = await Task.WhenAny(readTask, delayTask);
+
+        if (completed == readTask)
+        {
+            timeoutCts.Cancel();
+            return await readTask;
+        }
+
+        throw new TimeoutException($"SMTP session idle timeout exceeded after {timeout.TotalSeconds} seconds.");
+    }
+
     public async Task WriteLineAsync(string response)
     {
         await Writer.WriteLineAsync(response);

@@ -20,7 +20,8 @@ public static class EmailMessageParser
             GetHeaderValue(headerLookup, "Subject"),
             headers,
             body.PlainTextBody,
-            body.HtmlBody);
+            body.HtmlBody,
+            ParseAuthenticationAwareness(headers, headerLookup));
     }
 
     private static (IReadOnlyList<ParsedEmailHeader> Headers, IReadOnlyList<string> BodyLines) SplitHeadersAndBody(IReadOnlyList<string> dataLines)
@@ -282,6 +283,42 @@ public static class EmailMessageParser
     private static string? GetHeaderValue(IReadOnlyDictionary<string, string> headers, string headerName)
     {
         return headers.TryGetValue(headerName, out var value) ? value : null;
+    }
+
+    private static MailAuthenticationAwareness ParseAuthenticationAwareness(
+        IReadOnlyList<ParsedEmailHeader> headers,
+        IReadOnlyDictionary<string, string> headerLookup)
+    {
+        var authenticationResults = GetHeaderValue(headerLookup, "Authentication-Results");
+        var receivedSpf = GetHeaderValue(headerLookup, "Received-SPF");
+        var hasDkimSignature = headers.Any(static header => string.Equals(header.Name, "DKIM-Signature", StringComparison.OrdinalIgnoreCase));
+
+        return new MailAuthenticationAwareness(
+            ExtractAuthenticationResult(authenticationResults, "spf"),
+            ExtractAuthenticationResult(authenticationResults, "dkim"),
+            ExtractAuthenticationResult(authenticationResults, "dmarc"),
+            hasDkimSignature,
+            authenticationResults,
+            receivedSpf);
+    }
+
+    private static string? ExtractAuthenticationResult(string? headerValue, string mechanism)
+    {
+        if (string.IsNullOrWhiteSpace(headerValue))
+        {
+            return null;
+        }
+
+        var marker = $"{mechanism}=";
+        var markerIndex = headerValue.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
+        {
+            return null;
+        }
+
+        var remainder = headerValue[(markerIndex + marker.Length)..];
+        var token = remainder.Split([' ', ';', '\t'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        return string.IsNullOrWhiteSpace(token) ? null : token.Trim();
     }
 
     private sealed record ParsedBodyPart(string? PlainTextBody, string? HtmlBody);

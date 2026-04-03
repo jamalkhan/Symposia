@@ -58,8 +58,11 @@ internal static class Program
         });
         builder.Services.AddControllers();
 
+        builder.Services.AddSingleton<SmtpConnectionGuard>();
+        builder.Services.AddSingleton<MailboxStorageProviderCatalog>();
         builder.Services.AddSingleton<MailboxDeliveryService>();
         builder.Services.AddSingleton<MailboxReadService>();
+        builder.Services.AddSingleton<MailboxRetryQueueService>();
         builder.Services.AddSingleton<DashboardSummaryService>();
         builder.Services.AddSingleton<ISmtpCommand, EhloCommand>();
         builder.Services.AddSingleton<ISmtpCommand, HelpCommand>();
@@ -78,6 +81,7 @@ internal static class Program
         builder.Services.AddSingleton<SmtpCommandRegistry>();
         builder.Services.AddTransient<SmtpSessionHandler>();
         builder.Services.AddHostedService<SmtpServerHostedService>();
+        builder.Services.AddHostedService<MailboxRetryWorker>();
 
         var app = builder.Build();
         var webRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot");

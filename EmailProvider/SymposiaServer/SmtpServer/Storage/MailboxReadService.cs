@@ -10,11 +10,11 @@ public sealed class MailboxReadService
 
     public MailboxReadService(
         HostingDirectory hostingDirectory,
-        ILoggerFactory loggerFactory,
+        MailboxStorageProviderCatalog providerCatalog,
         ILogger<MailboxReadService> logger)
     {
         _hostingDirectory = hostingDirectory;
-        _providers = MailboxStorageProviderFactory.CreateProviders(hostingDirectory, loggerFactory);
+        _providers = providerCatalog.Providers;
         _logger = logger;
     }
 
