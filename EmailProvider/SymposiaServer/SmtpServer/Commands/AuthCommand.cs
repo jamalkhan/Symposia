@@ -1,7 +1,18 @@
+using Microsoft.Extensions.Logging;
+
 namespace NativeSmtpReceiver;
 
 public sealed class AuthCommand : SmtpCommandBase
 {
+    private readonly SmtpServerOptions _options;
+    private readonly ILogger<AuthCommand> _logger;
+
+    public AuthCommand(SmtpServerOptions options, ILogger<AuthCommand> logger)
+    {
+        _options = options;
+        _logger = logger;
+    }
+
     public override string[] SupportedVerbs => new[] { "AUTH" };
 
     public override async Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, SmtpConnectionContext connection)
@@ -12,11 +23,12 @@ public sealed class AuthCommand : SmtpCommandBase
             return;
         }
 
-        var configuredUser = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_AUTH_USERNAME");
-        var configuredPassword = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_AUTH_PASSWORD");
+        var configuredUser = _options.AuthUsername;
+        var configuredPassword = _options.AuthPassword;
 
         if (string.IsNullOrWhiteSpace(configuredUser) || string.IsNullOrWhiteSpace(configuredPassword))
         {
+            _logger.LogWarning("AUTH requested but SMTP authentication is not configured");
             await connection.WriteLineAsync("454 4.7.0 Authentication unavailable");
             return;
         }
@@ -40,18 +52,21 @@ public sealed class AuthCommand : SmtpCommandBase
         switch (mechanism)
         {
             case "PLAIN":
+                _logger.LogDebug("Processing AUTH PLAIN request");
                 await HandlePlainAsync(initialResponse, configuredUser, configuredPassword, session, connection);
                 break;
             case "LOGIN":
+                _logger.LogDebug("Processing AUTH LOGIN request");
                 await HandleLoginAsync(initialResponse, configuredUser, configuredPassword, session, connection);
                 break;
             default:
+                _logger.LogWarning("Unsupported authentication mechanism {Mechanism}", mechanism);
                 await connection.WriteLineAsync("504 5.5.4 Unrecognized authentication type");
                 break;
         }
     }
 
-    private static async Task HandlePlainAsync(
+    private async Task HandlePlainAsync(
         string? initialResponse,
         string configuredUser,
         string configuredPassword,
@@ -88,7 +103,7 @@ public sealed class AuthCommand : SmtpCommandBase
         }
     }
 
-    private static async Task HandleLoginAsync(
+    private async Task HandleLoginAsync(
         string? initialResponse,
         string configuredUser,
         string configuredPassword,
@@ -129,7 +144,7 @@ public sealed class AuthCommand : SmtpCommandBase
         }
     }
 
-    private static async Task CompleteAuthenticationAsync(
+    private async Task CompleteAuthenticationAsync(
         string username,
         string password,
         string configuredUser,
@@ -140,12 +155,14 @@ public sealed class AuthCommand : SmtpCommandBase
         if (!string.Equals(username, configuredUser, StringComparison.Ordinal) ||
             !string.Equals(password, configuredPassword, StringComparison.Ordinal))
         {
+            _logger.LogWarning("SMTP authentication failed for user {Username}", username);
             await connection.WriteLineAsync("535 5.7.8 Authentication credentials invalid");
             return;
         }
 
         session.IsAuthenticated = true;
         session.AuthenticatedUser = username;
+        _logger.LogInformation("SMTP authentication succeeded for user {Username}", username);
         await connection.WriteLineAsync("235 2.7.0 Authentication successful");
     }
 }

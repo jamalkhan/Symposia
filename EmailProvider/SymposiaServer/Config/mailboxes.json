@@ -1,0 +1,70 @@
+{
+  "storageProviders": [
+    {
+      "name": "local-default",
+      "type": "fileSystem",
+      "fileSystem": {
+        "rootPath": "EmailProvider/.dev/maildrop"
+      }
+    },
+    {
+      "name": "aws-archive",
+      "type": "awsS3",
+      "awsS3": {
+        "bucketName": "symposia-mail",
+        "prefix": "inbound/"
+      }
+    },
+    {
+      "name": "azure-files",
+      "type": "azureFiles",
+      "azureFiles": {
+        "shareName": "symposia-mail"
+      }
+    },
+    {
+      "name": "gcp-storage",
+      "type": "gcp",
+      "gcp": {
+        "bucketName": "symposia-mail"
+      }
+    },
+    {
+      "name": "snowflake-mail",
+      "type": "snowflake",
+      "snowflake": {
+        "accountIdentifier": "example-account",
+        "database": "SYMPOSIA",
+        "schema": "MAIL",
+        "warehouse": "COMPUTE_WH",
+        "tableName": "MAILBOX_MESSAGES"
+      }
+    }
+  ],
+  "domains": [
+    {
+      "name": "symposia.com",
+      "defaultStorageProvider": "local-default",
+      "mailboxes": [
+        {
+          "address": "jamal@symposia.com",
+          "mailboxId": "jamal"
+        },
+        {
+          "address": "admin@symposia.com",
+          "mailboxId": "admin"
+        }
+      ]
+    },
+    {
+      "name": "symposia.net",
+      "defaultStorageProvider": "local-default",
+      "mailboxes": [
+        {
+          "address": "jamal@symposia.net",
+          "mailboxId": "jamal"
+        }
+      ]
+    }
+  ]
+}

@@ -11,16 +11,18 @@ public sealed class SmtpConnectionContext : IDisposable
 {
     private readonly TcpClient _client;
     private Stream _stream;
+    private readonly SmtpServerOptions _options;
 
-    public SmtpConnectionContext(TcpClient client)
+    public SmtpConnectionContext(TcpClient client, SmtpServerOptions options)
     {
         _client = client;
+        _options = options;
         _stream = client.GetStream();
         Reader = CreateReader(_stream);
         Writer = CreateWriter(_stream);
-        ServerName = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_SERVER_NAME") ?? "native-smtp.local";
-        TlsCertificatePath = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_TLS_CERT_PATH");
-        TlsCertificatePassword = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_TLS_CERT_PASSWORD");
+        ServerName = options.ServerName;
+        TlsCertificatePath = options.TlsCertificatePath;
+        TlsCertificatePassword = options.TlsCertificatePassword;
     }
 
     public StreamReader Reader { get; private set; }

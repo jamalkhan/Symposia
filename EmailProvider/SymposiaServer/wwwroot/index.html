@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Symposia Mail Dashboard</title>
+  <style>
+    :root {
+      --bg: #f3efe5;
+      --panel: rgba(255, 252, 245, 0.88);
+      --panel-border: rgba(61, 52, 41, 0.12);
+      --ink: #2b241d;
+      --muted: #6a5d51;
+      --accent: #9f4f2d;
+      --accent-soft: #e7c8b5;
+      --good: #295f49;
+      --shadow: 0 24px 60px rgba(68, 45, 27, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(159, 79, 45, 0.18), transparent 36%),
+        radial-gradient(circle at bottom right, rgba(41, 95, 73, 0.18), transparent 34%),
+        linear-gradient(180deg, #f8f2e8 0%, var(--bg) 100%);
+    }
+
+    .shell {
+      width: min(1120px, calc(100% - 32px));
+      margin: 32px auto 48px;
+    }
+
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+
+    .hero {
+      padding: 28px 28px 24px;
+      margin-bottom: 20px;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 3.6vw, 3.6rem);
+      line-height: 0.98;
+      font-weight: 800;
+    }
+
+    .subtitle {
+      margin: 0;
+      max-width: 62ch;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      margin-top: 24px;
+    }
+
+    .slider-block {
+      padding: 18px 20px;
+      background: rgba(255, 255, 255, 0.65);
+      border-radius: 18px;
+      border: 1px solid rgba(61, 52, 41, 0.08);
+    }
+
+    .slider-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: baseline;
+      margin-bottom: 12px;
+    }
+
+    .slider-label {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .slider-value {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      justify-content: flex-end;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .meta strong {
+      color: var(--ink);
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .domain-card {
+      padding: 22px;
+    }
+
+    .domain-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .domain-name {
+      font-size: 1.3rem;
+      font-weight: 700;
+    }
+
+    .pill {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 0.9rem;
+      white-space: nowrap;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 12px 10px;
+      text-align: left;
+      border-top: 1px solid rgba(61, 52, 41, 0.08);
+      font-size: 0.95rem;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .empty {
+      padding: 28px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .status-ok { color: var(--good); }
+    .status-bad { color: #a23030; }
+
+    @media (max-width: 720px) {
+      .toolbar {
+        grid-template-columns: 1fr;
+      }
+
+      .meta {
+        justify-content: flex-start;
+      }
+
+      .domain-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">Symposia Mail</div>
+      <h1>Mailbox Delivery Dashboard</h1>
+      <p class="subtitle">
+        Live delivery totals by hosted domain and mailbox address. The page polls the REST API every 5 seconds by default, and you can tune the interval below.
+      </p>
+
+      <div class="toolbar">
+        <div class="slider-block">
+          <div class="slider-head">
+            <span class="slider-label">Polling interval</span>
+            <span id="pollValue" class="slider-value">5s</span>
+          </div>
+          <input id="pollSlider" type="range" min="1" max="120" value="5" step="1">
+        </div>
+
+        <div class="meta">
+          <span>Status: <strong id="status" class="status-ok">Connected</strong></span>
+          <span>Last refresh: <strong id="lastRefresh">Waiting...</strong></span>
+          <span>Total domains: <strong id="domainCount">0</strong></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="dashboardGrid" class="grid"></section>
+  </main>
+
+  <script>
+    const pollSlider = document.getElementById("pollSlider");
+    const pollValue = document.getElementById("pollValue");
+    const lastRefresh = document.getElementById("lastRefresh");
+    const statusEl = document.getElementById("status");
+    const domainCountEl = document.getElementById("domainCount");
+    const dashboardGrid = document.getElementById("dashboardGrid");
+    const storageKey = "symposia.dashboard.pollSeconds";
+
+    let timerId = null;
+    let currentPollSeconds = Number(localStorage.getItem(storageKey) || "5");
+
+    if (!Number.isFinite(currentPollSeconds) || currentPollSeconds < 1 || currentPollSeconds > 120) {
+      currentPollSeconds = 5;
+    }
+
+    pollSlider.value = String(currentPollSeconds);
+    updatePollLabel();
+
+    pollSlider.addEventListener("input", () => {
+      currentPollSeconds = Number(pollSlider.value);
+      localStorage.setItem(storageKey, String(currentPollSeconds));
+      updatePollLabel();
+      schedulePolling();
+    });
+
+    async function refreshDashboard() {
+      try {
+        const response = await fetch("/api/dashboard/summary", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const payload = await response.json();
+        renderDashboard(payload);
+        setStatus(true, "Connected");
+        lastRefresh.textContent = new Date(payload.generatedAtUtc).toLocaleTimeString();
+      } catch (error) {
+        setStatus(false, `Retrying (${error.message})`);
+      }
+    }
+
+    function renderDashboard(payload) {
+      domainCountEl.textContent = String(payload.domains.length);
+
+      if (payload.domains.length === 0) {
+        dashboardGrid.innerHTML = `
+          <section class="panel empty">
+            No hosted domains are configured yet.
+          </section>
+        `;
+        return;
+      }
+
+      dashboardGrid.innerHTML = payload.domains.map(domain => `
+        <section class="panel domain-card">
+          <div class="domain-head">
+            <div class="domain-name">${escapeHtml(domain.domainName)}</div>
+            <div class="pill">${domain.messageCount} received</div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Mailbox</th>
+                <th>Logical Mailbox</th>
+                <th>Provider</th>
+                <th>Received</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${domain.mailboxes.map(mailbox => `
+                <tr>
+                  <td>${escapeHtml(mailbox.address)}</td>
+                  <td>${escapeHtml(mailbox.mailboxId)}</td>
+                  <td>${escapeHtml(mailbox.storageProviderName)}</td>
+                  <td>${mailbox.messageCount}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </section>
+      `).join("");
+    }
+
+    function schedulePolling() {
+      if (timerId !== null) {
+        clearInterval(timerId);
+      }
+
+      timerId = setInterval(refreshDashboard, currentPollSeconds * 1000);
+    }
+
+    function updatePollLabel() {
+      pollValue.textContent = currentPollSeconds >= 60
+        ? `${(currentPollSeconds / 60).toFixed(currentPollSeconds % 60 === 0 ? 0 : 1)}m`
+        : `${currentPollSeconds}s`;
+    }
+
+    function setStatus(ok, text) {
+      statusEl.textContent = text;
+      statusEl.className = ok ? "status-ok" : "status-bad";
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    refreshDashboard();
+    schedulePolling();
+  </script>
+</body>
+</html>

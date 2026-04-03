@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace NativeSmtpReceiver;
 
 
@@ -7,6 +9,15 @@ namespace NativeSmtpReceiver;
 
 public class EhloCommand : SmtpCommandBase
 {
+    private readonly SmtpServerOptions _options;
+    private readonly ILogger<EhloCommand> _logger;
+
+    public EhloCommand(SmtpServerOptions options, ILogger<EhloCommand> logger)
+    {
+        _options = options;
+        _logger = logger;
+    }
+
     public override string[] SupportedVerbs => new[] { "EHLO", "HELO" };
 
     public override async Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, SmtpConnectionContext connection)
@@ -14,9 +25,7 @@ public class EhloCommand : SmtpCommandBase
         session.HasGreeted = true;
         session.ResetTransaction();
 
-        var authConfigured =
-            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_AUTH_USERNAME")) &&
-            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_AUTH_PASSWORD"));
+        _logger.LogDebug("Advertising SMTP capabilities for server {ServerName}", connection.ServerName);
 
         await connection.WriteLineAsync($"250-{connection.ServerName} Hello");
         await connection.WriteLineAsync("250-8BITMIME");
@@ -27,7 +36,7 @@ public class EhloCommand : SmtpCommandBase
             await connection.WriteLineAsync("250-STARTTLS");
         }
 
-        if (authConfigured)
+        if (_options.IsAuthConfigured)
         {
             await connection.WriteLineAsync("250-AUTH PLAIN LOGIN");
         }

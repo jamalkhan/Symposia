@@ -75,21 +75,28 @@ Console.WriteLine("TLS established — connection is now secure.");
         await SendCommandAsync("DATA");
         await ExpectAsync("354");
 
+        if (_writer is null)
+        {
+            throw new InvalidOperationException("Not connected");
+        }
+
+        var writer = _writer;
+
         // Headers
-        await _writer.WriteLineAsync($"From: <{from}>");
-        await _writer.WriteLineAsync($"To: <{to}>");
-        await _writer.WriteLineAsync($"Subject: {subject}");
+        await writer.WriteLineAsync($"From: <{from}>");
+        await writer.WriteLineAsync($"To: <{to}>");
+        await writer.WriteLineAsync($"Subject: {subject}");
 
         if (html)
         {
-            await _writer.WriteLineAsync("Content-Type: text/html; charset=utf-8");
+            await writer.WriteLineAsync("Content-Type: text/html; charset=utf-8");
         }
         else
         {
-            await _writer.WriteLineAsync("Content-Type: text/plain; charset=utf-8");
+            await writer.WriteLineAsync("Content-Type: text/plain; charset=utf-8");
         }
 
-        await _writer.WriteLineAsync(); // empty line after headers
+        await writer.WriteLineAsync(); // empty line after headers
 
         // Body
         using var reader = new StringReader(body);
@@ -100,11 +107,11 @@ Console.WriteLine("TLS established — connection is now secure.");
             if (line.StartsWith("."))
                 line = "." + line;
 
-            await _writer.WriteLineAsync(line);
+            await writer.WriteLineAsync(line);
         }
 
-        await _writer.WriteLineAsync(".");  // end of data
-        await _writer.FlushAsync();
+        await writer.WriteLineAsync(".");  // end of data
+        await writer.FlushAsync();
 
         await ExpectAsync("250");
     }

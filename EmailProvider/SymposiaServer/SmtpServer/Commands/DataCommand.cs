@@ -1,7 +1,16 @@
+using Microsoft.Extensions.Logging;
+
 namespace NativeSmtpReceiver;
 
 public class DataCommand : SmtpCommandBase
 {
+    private readonly ILogger<DataCommand> _logger;
+
+    public DataCommand(ILogger<DataCommand> logger)
+    {
+        _logger = logger;
+    }
+
     public override string[] SupportedVerbs => new[] { "DATA" };
 
     public override async Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, SmtpConnectionContext connection)
@@ -26,6 +35,7 @@ public class DataCommand : SmtpCommandBase
 
         session.InDataMode = true;
         session.DataLines.Clear();
+        _logger.LogDebug("Entering DATA mode for sender {MailFrom} with {RecipientCount} recipients", session.MailFrom, session.Recipients.Count);
 
         await connection.WriteLineAsync("354 End data with <CR><LF>.<CR><LF>");
     }

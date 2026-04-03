@@ -10,7 +10,7 @@ public class SmtpSession
     public bool IsAuthenticated { get; set; }
     public string? MailFrom { get; set; }
     public string? AuthenticatedUser { get; set; }
-    public List<string> Recipients { get; } = new();
+    public List<MailboxRoute> Recipients { get; } = new();
     public List<string> DataLines { get; } = new();
     public bool InDataMode { get; set; }
 

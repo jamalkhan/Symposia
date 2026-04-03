@@ -1,4 +1,6 @@
-   namespace NativeSmtpReceiver;
+using Microsoft.Extensions.Logging;
+
+namespace NativeSmtpReceiver;
    
 public class RsetCommand : SmtpCommandBase
 {
@@ -23,10 +25,18 @@ public class NoopCommand : SmtpCommandBase
 
 public class UnknownCommand : ISmtpCommand
 {
+    private readonly ILogger<UnknownCommand> _logger;
+
+    public UnknownCommand(ILogger<UnknownCommand> logger)
+    {
+        _logger = logger;
+    }
+
     public string[] SupportedVerbs => Array.Empty<string>();
 
     public async Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, SmtpConnectionContext connection)
     {
+        _logger.LogWarning("Unknown SMTP command received: {CommandLine}", fullLine);
         await connection.WriteLineAsync("502 5.5.1 Command not implemented");
     }
 }
