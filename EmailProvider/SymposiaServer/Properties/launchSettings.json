@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "DevSmtp": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "SYMPOSIA_SMTP_PORT": "2525",
+        "SYMPOSIA_SMTP_SERVER_NAME": "localhost",
+        "SYMPOSIA_SMTP_TLS_CERT_PATH": "EmailProvider/.dev/smtp/server.pfx",
+        "SYMPOSIA_SMTP_TLS_CERT_PASSWORD": "symposia-dev-pass",
+        "SYMPOSIA_SMTP_AUTH_USERNAME": "devuser",
+        "SYMPOSIA_SMTP_AUTH_PASSWORD": "devpass",
+        "SYMPOSIA_SMTP_MAIL_ROOT": "EmailProvider/.dev/maildrop"
+      }
+    }
+  }
+}

@@ -1,9 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace NativeSmtpReceiver
@@ -13,9 +11,6 @@ namespace NativeSmtpReceiver
     // ────────────────────────────────────────────────
     class Program
     {
-        private const int Port = 2525;
-        private static readonly IPEndPoint ListenEndpoint = new(IPAddress.Any, Port);
-
         private static readonly Dictionary<string, ISmtpCommand> CommandMap = BuildCommandMap();
 
         private static Dictionary<string, ISmtpCommand> BuildCommandMap()
@@ -24,13 +19,17 @@ namespace NativeSmtpReceiver
             var commands = new ISmtpCommand[]
             {
                 new EhloCommand(),
+                new HelpCommand(),
                 new MailFromCommand(),
                 new RcptToCommand(),
                 new DataCommand(),
+                new StartTlsCommand(),
+                new AuthCommand(),
+                new VrfyCommand(),
+                new ExpnCommand(),
                 new QuitCommand(),
                 new RsetCommand(),
                 new NoopCommand(),
-                // Add more later: AuthLoginCommand, StartTlsCommand, VrfyCommand, etc.
             };
 
             foreach (var cmd in commands)
@@ -46,9 +45,12 @@ namespace NativeSmtpReceiver
 
         static async Task Main(string[] args)
         {
-            Console.WriteLine($"Starting minimal SMTP receiver on port {Port} ...");
+            var port = GetPort();
+            var listenEndpoint = new IPEndPoint(IPAddress.Any, port);
 
-            var listener = new TcpListener(ListenEndpoint);
+            Console.WriteLine($"Starting minimal SMTP receiver on port {port} ...");
+
+            var listener = new TcpListener(listenEndpoint);
             listener.Start();
 
             while (true)
@@ -72,24 +74,17 @@ namespace NativeSmtpReceiver
                 // IMPORTANT: Disable Nagle's algorithm for low-latency protocol responses
                 client.NoDelay = true;  // ← This helps A LOT with pipelining
 
-                using var stream = client.GetStream();
-                using var reader = new StreamReader(stream, Encoding.ASCII);
-                using var writer = new StreamWriter(stream, Encoding.ASCII) 
-                { 
-                    AutoFlush = true,
-                    NewLine = "\r\n" 
-                };
+                using var connection = new SmtpConnectionContext(client);
 
                 // Greeting + immediate flush
-                await writer.WriteLineAsync("220 native-smtp.local ESMTP Ready");
-                await writer.FlushAsync();
+                await connection.WriteLineAsync($"220 {connection.ServerName} ESMTP Ready");
 
                 var session = new SmtpSession();
                 var dataLineHandler = new DataLineCommand();
 
                 while (true)
                 {
-                    string? line = await reader.ReadLineAsync();
+                    string? line = await connection.ReadLineAsync();
                     if (line == null) break;
 
                     Console.WriteLine($"> {line}");
@@ -99,25 +94,35 @@ namespace NativeSmtpReceiver
 
                     if (session.InDataMode)
                     {
-                        await dataLineHandler.ExecuteAsync(line, null, session, writer);
+                        await dataLineHandler.ExecuteAsync(line, null, session, connection);
                     }
                     else
                     {
+                        if (string.IsNullOrWhiteSpace(trimmed))
+                        {
+                            await connection.WriteLineAsync("500 5.5.2 Syntax error, command unrecognized");
+                            continue;
+                        }
+
                         string verb = upper.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
                         string? arg = trimmed.Length > verb.Length ? trimmed[(verb.Length + 1)..].Trim() : null;
 
                         if (CommandMap.TryGetValue(verb, out var command))
                         {
-                            await command.ExecuteAsync(trimmed, arg, session, writer);
+                            await command.ExecuteAsync(trimmed, arg, session, connection);
                         }
                         else
                         {
-                            await new UnknownCommand().ExecuteAsync(trimmed, arg, session, writer);
+                            await new UnknownCommand().ExecuteAsync(trimmed, arg, session, connection);
                         }
+                    }
+
+                    if (session.IsTerminated)
+                    {
+                        break;
                     }
                 }
             }
-            catch (OperationCanceledException) { /* QUIT */ }
             catch (Exception ex)
             {
                 Console.WriteLine($"Client error: {ex.Message}");
@@ -126,6 +131,17 @@ namespace NativeSmtpReceiver
             {
                 client.Close();
             }
+        }
+
+        private static int GetPort()
+        {
+            var configuredPort = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_PORT");
+            if (int.TryParse(configuredPort, out var port) && port is > 0 and <= 65535)
+            {
+                return port;
+            }
+
+            return 2525;
         }
     }
 }

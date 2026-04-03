@@ -7,5 +7,5 @@ namespace NativeSmtpReceiver;
 public interface ISmtpCommand
 {
     string[] SupportedVerbs { get; }
-    Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, StreamWriter writer);
+    Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, SmtpConnectionContext connection);
 }

@@ -44,7 +44,7 @@ if (inData)
         messageLines.Add(line);
     }
 */
-    public async Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, StreamWriter writer)
+    public async Task ExecuteAsync(string fullLine, string? argument, SmtpSession session, SmtpConnectionContext connection)
     {
         if (fullLine == ".")
         {
@@ -64,8 +64,10 @@ if (inData)
             Console.WriteLine("...");
 
             session.DataLines.Clear();
-            await writer.WriteLineAsync("250 2.0.0 Ok: queued");
-            await writer.FlushAsync();
+            session.MailFrom = null;
+            session.Recipients.Clear();
+            await connection.WriteLineAsync("250 2.0.0 Ok: queued");
+            return;
         }
 
         string content = fullLine;
@@ -78,7 +80,10 @@ if (inData)
     private static async Task PersistEmailAsync(string from, List<string> recipients, List<string> messageLines)
         {
             Console.WriteLine("Persisting email to disk...");
-            var baseDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "emails"); // Base folder for all emails
+            var configuredRoot = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_MAIL_ROOT");
+            var baseDir = string.IsNullOrWhiteSpace(configuredRoot)
+                ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "emails")
+                : configuredRoot; // Base folder for all emails
 
             foreach (var recipient in recipients)
             {
