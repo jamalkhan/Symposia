@@ -22,4 +22,22 @@ public sealed class PasswordHashingService
         var actualHash = Rfc2898DeriveBytes.Pbkdf2(password, saltBytes, Iterations, HashAlgorithmName.SHA256, expectedHash.Length);
         return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
     }
+
+    public string HashSecret(string secret)
+    {
+        var bytes = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secret));
+        return Convert.ToBase64String(bytes);
+    }
+
+    public bool VerifySecret(string candidate, string? hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash))
+        {
+            return false;
+        }
+
+        return CryptographicOperations.FixedTimeEquals(
+            Convert.FromBase64String(HashSecret(candidate)),
+            Convert.FromBase64String(hash));
+    }
 }

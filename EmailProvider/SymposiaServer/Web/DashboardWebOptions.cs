@@ -20,7 +20,7 @@ public sealed class DashboardWebOptions
         {
             HttpPort = ParsePort("SYMPOSIA_HTTP_PORT", 5080),
             HttpsPort = ParsePort("SYMPOSIA_HTTPS_PORT", 5443),
-            TlsCertificatePath = ResolvePath(certificatePath),
+            TlsCertificatePath = PathResolution.ResolveOptionalPath(certificatePath),
             TlsCertificatePassword = certificatePassword
         };
     }
@@ -49,19 +49,6 @@ public sealed class DashboardWebOptions
 
         return defaultValue;
     }
-
-    private static string? ResolvePath(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return null;
-        }
-
-        return Path.IsPathRooted(path)
-            ? path
-            : Path.GetFullPath(path, Environment.CurrentDirectory);
-    }
-
     private static string? FirstNonEmpty(params string?[] values)
     {
         foreach (var value in values)

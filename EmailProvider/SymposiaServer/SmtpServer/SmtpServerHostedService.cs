@@ -28,6 +28,12 @@ public sealed class SmtpServerHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_options.Enabled)
+        {
+            _logger.LogInformation("SMTP server listener is disabled by configuration");
+            return;
+        }
+
         _listener = new TcpListener(IPAddress.Any, _options.Port);
         _listener.Start();
 

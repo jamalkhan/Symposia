@@ -12,7 +12,20 @@
         "SYMPOSIA_SMTP_TLS_CERT_PASSWORD": "symposia-dev-pass",
         "SYMPOSIA_SMTP_AUTH_USERNAME": "devuser",
         "SYMPOSIA_SMTP_AUTH_PASSWORD": "devpass",
-        "SYMPOSIA_SMTP_HOSTING_CONFIG": "EmailProvider/SymposiaServer/Config/mailboxes.json"
+        "SYMPOSIA_SMTP_HOSTING_CONFIG": "Config/mailboxes.json"
+      }
+    },
+    "DevDashboard": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "SYMPOSIA_SMTP_ENABLED": "false",
+        "SYMPOSIA_SMTP_PORT": "2626",
+        "SYMPOSIA_HTTP_PORT": "5181",
+        "SYMPOSIA_HTTPS_PORT": "0",
+        "SYMPOSIA_SMTP_SERVER_NAME": "localhost",
+        "SYMPOSIA_SMTP_AUTH_USERNAME": "devuser",
+        "SYMPOSIA_SMTP_AUTH_PASSWORD": "devpass",
+        "SYMPOSIA_SMTP_HOSTING_CONFIG": "Config/mailboxes.json"
       }
     }
   }

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -5,21 +6,19 @@ namespace InboxWeb;
 
 public sealed class MailboxContentStore
 {
-    private static readonly MailAuthenticationAwareness EmptyAuthentication = new(
-        null,
-        null,
-        null,
-        false,
-        null,
-        null);
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
+
+    private static readonly MailAuthenticationAwareness EmptyAuthentication = new(null, null, null, false, null, null);
 
     private readonly HostedMailboxRepository _mailboxRepository;
     private readonly ILogger<MailboxContentStore> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public MailboxContentStore(
-        HostedMailboxRepository mailboxRepository,
-        ILogger<MailboxContentStore> logger)
+    public MailboxContentStore(HostedMailboxRepository mailboxRepository, ILogger<MailboxContentStore> logger)
     {
         _mailboxRepository = mailboxRepository;
         _logger = logger;
@@ -27,11 +26,19 @@ public sealed class MailboxContentStore
 
     public async Task<MailboxFolderCounts> GetFolderCountsAsync(string mailboxId, CancellationToken cancellationToken = default)
     {
-        var messages = await LoadMessagesAsync(mailboxId, null, cancellationToken);
+        var messages = await LoadMessagesAsync(mailboxId, cancellationToken);
         return new MailboxFolderCounts(
             messages.Count(static message => string.Equals(message.State.Folder, "inbox", StringComparison.OrdinalIgnoreCase)),
             messages.Count(static message => string.Equals(message.State.Folder, "sent", StringComparison.OrdinalIgnoreCase)),
             messages.Count(static message => string.Equals(message.State.Folder, "trash", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    public Task<MailboxMessagePage> GetMessagePageAsync(
+        string mailboxId,
+        MailboxMessageQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        return BuildMessagePageAsync(mailboxId, query, cancellationToken);
     }
 
     public async Task<IReadOnlyList<MailboxMessageListItem>> ListMessagesAsync(
@@ -40,57 +47,98 @@ public sealed class MailboxContentStore
         string? query,
         CancellationToken cancellationToken = default)
     {
-        var normalizedFolder = string.IsNullOrWhiteSpace(folder) ? "inbox" : folder.Trim().ToLowerInvariant();
-        var messages = await LoadMessagesAsync(mailboxId, normalizedFolder, cancellationToken);
-        if (!string.IsNullOrWhiteSpace(query))
-        {
-            messages = messages
-                .Where(message => BuildSearchText(message.Metadata).Contains(query, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-        }
-
-        return messages
-            .OrderByDescending(static message => message.Metadata.ReceivedAtUtc)
-            .ThenByDescending(static message => message.Metadata.MessageId, StringComparer.Ordinal)
-            .Select(ToListItem)
-            .ToArray();
+        var page = await BuildMessagePageAsync(
+            mailboxId,
+            new MailboxMessageQuery(folder, query, null, 1, 250),
+            cancellationToken);
+        return page.Items;
     }
 
-    public async Task<MailboxMessageDetail?> GetMessageAsync(
+    public async Task<MailboxThreadPage> GetThreadPageAsync(
         string mailboxId,
-        string messageId,
+        string folder,
+        string? query,
+        int page,
+        int pageSize,
         CancellationToken cancellationToken = default)
     {
+        var loaded = await FilterMessagesAsync(
+            mailboxId,
+            new MailboxMessageQuery(folder, query, null, page, pageSize),
+            cancellationToken);
+
+        var threads = loaded
+            .GroupBy(static message => message.State.ThreadId, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var ordered = group.OrderByDescending(static message => message.Metadata.ReceivedAtUtc).ToArray();
+                var latest = ordered[0];
+                var participants = ordered
+                    .SelectMany(static message => message.Metadata.EnvelopeRecipients.Append(message.Metadata.HeaderFrom ?? message.Metadata.EnvelopeFrom))
+                    .Where(static value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                return new MailboxThreadSummary(
+                    group.Key,
+                    latest.Metadata.Subject,
+                    participants,
+                    BuildPreview(latest.Metadata),
+                    ordered.Length,
+                    ordered.Count(static message => !message.State.IsRead),
+                    ordered.Any(static message => message.State.IsStarred),
+                    latest.Metadata.ReceivedAtUtc,
+                    latest.Metadata.MessageId);
+            })
+            .OrderByDescending(static thread => thread.LatestReceivedAtUtc)
+            .ThenByDescending(static thread => thread.LatestMessageId, StringComparer.Ordinal)
+            .ToArray();
+
+        return PaginateThreads(threads, page, pageSize);
+    }
+
+    public async Task<MailboxThreadDetail?> GetThreadAsync(string mailboxId, string threadId, CancellationToken cancellationToken = default)
+    {
+        var loaded = await LoadMessagesAsync(mailboxId, cancellationToken);
+        var threadMessages = loaded
+            .Where(message => string.Equals(message.State.ThreadId, threadId, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(static message => message.Metadata.ReceivedAtUtc)
+            .ThenBy(static message => message.Metadata.MessageId, StringComparer.Ordinal)
+            .ToArray();
+
+        if (threadMessages.Length == 0)
+        {
+            return null;
+        }
+
+        return new MailboxThreadDetail(
+            threadId,
+            threadMessages[0].Metadata.Subject,
+            threadMessages.Select(ToDetail).ToArray());
+    }
+
+    public async Task<StoredMailboxMessageMetadata?> GetMetadataAsync(string mailboxId, string messageId, CancellationToken cancellationToken = default)
+    {
         var pathInfo = await ResolveMailboxPathsAsync(mailboxId, cancellationToken);
-        var basePath = Path.Combine(pathInfo.MessagesPath, SanitizePathSegment(messageId));
-        var metadata = await ReadMetadataAsync($"{basePath}.json", cancellationToken);
+        return await ReadMetadataAsync(Path.Combine(pathInfo.MessagesPath, $"{SanitizePathSegment(messageId)}.json"), cancellationToken);
+    }
+
+    public async Task<MailboxMessageDetail?> GetMessageAsync(string mailboxId, string messageId, CancellationToken cancellationToken = default)
+    {
+        var pathInfo = await ResolveMailboxPathsAsync(mailboxId, cancellationToken);
+        var metadata = await ReadMetadataAsync(Path.Combine(pathInfo.MessagesPath, $"{SanitizePathSegment(messageId)}.json"), cancellationToken);
         if (metadata is null)
         {
             return null;
         }
 
-        var state = await ReadStateAsync($"{basePath}.state.json", metadata, cancellationToken);
-        var rawMessage = File.Exists($"{basePath}.eml")
-            ? await File.ReadAllTextAsync($"{basePath}.eml", cancellationToken)
+        var state = await ReadStateAsync(Path.Combine(pathInfo.MessagesPath, $"{SanitizePathSegment(messageId)}.state.json"), metadata, cancellationToken);
+        var rawMessagePath = Path.Combine(pathInfo.MessagesPath, $"{SanitizePathSegment(messageId)}.eml");
+        var rawMessage = File.Exists(rawMessagePath)
+            ? await File.ReadAllTextAsync(rawMessagePath, cancellationToken)
             : string.Empty;
 
-        return new MailboxMessageDetail(
-            metadata.MessageId,
-            state.Folder,
-            state.IsRead,
-            state.Direction,
-            state.DeliveryStatus,
-            metadata.EnvelopeFrom,
-            metadata.EnvelopeRecipients,
-            metadata.DeliveredAddresses,
-            metadata.HeaderFrom,
-            metadata.HeaderTo,
-            metadata.Subject,
-            metadata.Headers,
-            metadata.PlainTextBody,
-            metadata.HtmlBody,
-            rawMessage,
-            metadata.ReceivedAtUtc);
+        return ToDetail(new LoadedMailboxMessage(metadata, state, rawMessage));
     }
 
     public Task<bool> MarkReadAsync(string mailboxId, string messageId, bool isRead, CancellationToken cancellationToken = default)
@@ -104,10 +152,34 @@ public sealed class MailboxContentStore
 
     public Task<bool> MoveToFolderAsync(string mailboxId, string messageId, string folder, CancellationToken cancellationToken = default)
     {
-        var normalizedFolder = folder.Trim().ToLowerInvariant();
         return UpdateStateAsync(mailboxId, messageId, state => state with
         {
-            Folder = normalizedFolder,
+            Folder = folder.Trim().ToLowerInvariant(),
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        }, cancellationToken);
+    }
+
+    public Task<bool> SetLabelsAsync(string mailboxId, string messageId, IReadOnlyList<string> labels, CancellationToken cancellationToken = default)
+    {
+        var normalizedLabels = labels
+            .Where(static label => !string.IsNullOrWhiteSpace(label))
+            .Select(static label => label.Trim().ToLowerInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static label => label, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return UpdateStateAsync(mailboxId, messageId, state => state with
+        {
+            Labels = normalizedLabels,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        }, cancellationToken);
+    }
+
+    public Task<bool> SetStarredAsync(string mailboxId, string messageId, bool isStarred, CancellationToken cancellationToken = default)
+    {
+        return UpdateStateAsync(mailboxId, messageId, state => state with
+        {
+            IsStarred = isStarred,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         }, cancellationToken);
     }
@@ -125,6 +197,9 @@ public sealed class MailboxContentStore
 
         var senderPaths = await ResolveMailboxPathsAsync(account.MailboxId, cancellationToken);
         var messageId = Guid.NewGuid().ToString("N");
+        var threadId = string.IsNullOrWhiteSpace(request.ReplyToMessageId)
+            ? messageId
+            : request.ReplyToMessageId.Trim();
         var now = DateTimeOffset.UtcNow;
         var subject = string.IsNullOrWhiteSpace(request.Subject) ? "(no subject)" : request.Subject.Trim();
         var plainTextBody = request.PlainTextBody ?? string.Empty;
@@ -154,7 +229,7 @@ public sealed class MailboxContentStore
             senderPaths.MessagesPath,
             sentMetadata,
             rawMessage,
-            new MailboxMessageState("sent", true, "outbound", "sent", now),
+            new MailboxMessageState("sent", true, "outbound", "sent", threadId, false, Array.Empty<string>(), now),
             cancellationToken);
 
         var directory = await _mailboxRepository.LoadDirectoryAsync(cancellationToken);
@@ -198,7 +273,7 @@ public sealed class MailboxContentStore
                 recipientMessagesPath,
                 metadata,
                 rawMessage,
-                new MailboxMessageState("inbox", false, "inbound", "delivered", now),
+                new MailboxMessageState("inbox", false, "inbound", "delivered", threadId, false, Array.Empty<string>(), now),
                 cancellationToken);
 
             foreach (var item in routeGroup)
@@ -209,34 +284,120 @@ public sealed class MailboxContentStore
 
         if (externalRecipients.Count > 0)
         {
-            var outboundPath = Path.Combine(senderPaths.StorageRoot, "outbound", "pending");
-            Directory.CreateDirectory(outboundPath);
-            await File.WriteAllTextAsync(
-                Path.Combine(outboundPath, $"{messageId}.json"),
-                JsonSerializer.Serialize(new
-                {
-                    messageId,
-                    from = account.Address,
-                    recipients = externalRecipients,
-                    request.Cc,
-                    request.Bcc,
-                    subject,
-                    plainTextBody,
-                    htmlBody,
-                    queuedAtUtc = now
-                }, new JsonSerializerOptions { WriteIndented = true }),
-                cancellationToken);
-
-            _logger.LogInformation("Queued {RecipientCount} external recipients for message {MessageId}", externalRecipients.Count, messageId);
+            var queued = new OutboundQueuedMessage(
+                Guid.NewGuid().ToString("N"),
+                messageId,
+                account.Address,
+                externalRecipients,
+                request.Cc,
+                request.Bcc,
+                subject,
+                plainTextBody,
+                htmlBody,
+                rawMessage,
+                0,
+                now,
+                null,
+                null);
+            await EnqueueOutboundAsync(senderPaths.StorageRoot, queued, cancellationToken);
+            _logger.LogInformation(
+                "Queued outbound relay message {MessageId} with {RecipientCount} external recipients",
+                messageId,
+                externalRecipients.Count);
         }
 
         return new ComposeMessageResult(messageId, localRoutes.Count, externalRecipients.Count);
     }
 
-    private async Task<List<LoadedMailboxMessage>> LoadMessagesAsync(
+    public async Task<IReadOnlyList<(string QueuePath, OutboundQueuedMessage Message)>> ListPendingOutboundAsync(string storageRoot, CancellationToken cancellationToken = default)
+    {
+        var pendingPath = Path.Combine(storageRoot, "outbound", "pending");
+        if (!Directory.Exists(pendingPath))
+        {
+            return Array.Empty<(string QueuePath, OutboundQueuedMessage Message)>();
+        }
+
+        var queued = new List<(string QueuePath, OutboundQueuedMessage Message)>();
+        foreach (var queuePath in Directory.GetFiles(pendingPath, "*.json", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var message = await ReadQueuedOutboundAsync(queuePath, cancellationToken);
+            if (message is not null)
+            {
+                queued.Add((queuePath, message));
+            }
+        }
+
+        return queued;
+    }
+
+    public async Task MarkOutboundDeliveredAsync(string queuePath, OutboundQueuedMessage message, CancellationToken cancellationToken = default)
+    {
+        var sentPath = Path.Combine(Path.GetDirectoryName(queuePath)!.Replace($"{Path.DirectorySeparatorChar}pending", $"{Path.DirectorySeparatorChar}sent"), Path.GetFileName(queuePath));
+        Directory.CreateDirectory(Path.GetDirectoryName(sentPath)!);
+        await File.WriteAllTextAsync(sentPath, JsonSerializer.Serialize(message with
+        {
+            AttemptCount = message.AttemptCount + 1,
+            LastAttemptAtUtc = DateTimeOffset.UtcNow,
+            LastError = null
+        }, SerializerOptions), cancellationToken);
+        File.Delete(queuePath);
+    }
+
+    public async Task MarkOutboundAttemptFailedAsync(string queuePath, OutboundQueuedMessage message, string error, int maxAttempts, CancellationToken cancellationToken = default)
+    {
+        var updated = message with
+        {
+            AttemptCount = message.AttemptCount + 1,
+            LastAttemptAtUtc = DateTimeOffset.UtcNow,
+            LastError = error
+        };
+
+        var targetDirectory = updated.AttemptCount >= maxAttempts
+            ? Path.Combine(Path.GetDirectoryName(queuePath)!.Replace($"{Path.DirectorySeparatorChar}pending", $"{Path.DirectorySeparatorChar}dead-letter"))
+            : Path.GetDirectoryName(queuePath)!;
+        Directory.CreateDirectory(targetDirectory);
+        var targetPath = Path.Combine(targetDirectory, Path.GetFileName(queuePath));
+        await File.WriteAllTextAsync(targetPath, JsonSerializer.Serialize(updated, SerializerOptions), cancellationToken);
+        if (!string.Equals(targetPath, queuePath, StringComparison.Ordinal))
+        {
+            File.Delete(queuePath);
+        }
+    }
+
+    private async Task<MailboxMessagePage> BuildMessagePageAsync(
         string mailboxId,
-        string? folderFilter,
+        MailboxMessageQuery query,
         CancellationToken cancellationToken)
+    {
+        var loaded = await FilterMessagesAsync(mailboxId, query, cancellationToken);
+        var items = loaded.Select(ToListItem).ToArray();
+        return PaginateMessages(items, query.Page, query.PageSize);
+    }
+
+    private async Task<List<LoadedMailboxMessage>> FilterMessagesAsync(
+        string mailboxId,
+        MailboxMessageQuery query,
+        CancellationToken cancellationToken)
+    {
+        var normalizedFolder = string.IsNullOrWhiteSpace(query.Folder) ? "inbox" : query.Folder.Trim().ToLowerInvariant();
+        var normalizedLabel = string.IsNullOrWhiteSpace(query.Label) ? null : query.Label.Trim().ToLowerInvariant();
+
+        var loaded = await LoadMessagesAsync(mailboxId, cancellationToken);
+        var filtered = loaded
+            .Where(message => string.Equals(normalizedFolder, "all", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(message.State.Folder, normalizedFolder, StringComparison.OrdinalIgnoreCase))
+            .Where(message => normalizedLabel is null
+                || message.State.Labels.Contains(normalizedLabel, StringComparer.OrdinalIgnoreCase))
+            .Where(message => string.IsNullOrWhiteSpace(query.Query)
+                || BuildSearchText(message.Metadata).Contains(query.Query, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(static message => message.Metadata.ReceivedAtUtc)
+            .ThenByDescending(static message => message.Metadata.MessageId, StringComparer.Ordinal)
+            .ToList();
+        return filtered;
+    }
+
+    private async Task<List<LoadedMailboxMessage>> LoadMessagesAsync(string mailboxId, CancellationToken cancellationToken)
     {
         var pathInfo = await ResolveMailboxPathsAsync(mailboxId, cancellationToken);
         if (!Directory.Exists(pathInfo.MessagesPath))
@@ -255,14 +416,12 @@ public sealed class MailboxContentStore
             }
 
             var state = await ReadStateAsync(Path.ChangeExtension(metadataPath, null) + ".state.json", metadata, cancellationToken);
-            if (folderFilter is not null &&
-                !string.Equals(folderFilter, "all", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(state.Folder, folderFilter, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
+            var rawMessagePath = Path.ChangeExtension(metadataPath, ".eml");
+            var rawMessage = File.Exists(rawMessagePath)
+                ? await File.ReadAllTextAsync(rawMessagePath, cancellationToken)
+                : string.Empty;
 
-            messages.Add(new LoadedMailboxMessage(metadata, state));
+            messages.Add(new LoadedMailboxMessage(metadata, state, rawMessage));
         }
 
         return messages;
@@ -278,14 +437,13 @@ public sealed class MailboxContentStore
         try
         {
             var pathInfo = await ResolveMailboxPathsAsync(mailboxId, cancellationToken);
-            var basePath = Path.Combine(pathInfo.MessagesPath, SanitizePathSegment(messageId));
-            var metadata = await ReadMetadataAsync($"{basePath}.json", cancellationToken);
+            var metadata = await ReadMetadataAsync(Path.Combine(pathInfo.MessagesPath, $"{SanitizePathSegment(messageId)}.json"), cancellationToken);
             if (metadata is null)
             {
                 return false;
             }
 
-            var statePath = $"{basePath}.state.json";
+            var statePath = Path.Combine(pathInfo.MessagesPath, $"{SanitizePathSegment(messageId)}.state.json");
             var currentState = await ReadStateAsync(statePath, metadata, cancellationToken);
             await WriteStateAsync(statePath, updater(currentState), cancellationToken);
             return true;
@@ -307,10 +465,7 @@ public sealed class MailboxContentStore
 
         var providerName = bindings[0].StorageProviderName;
         var storageRoot = ResolveFileSystemRoot(directory, providerName, mailboxId);
-        return new MailboxPathInfo(
-            storageRoot,
-            Path.Combine(storageRoot, "mailboxes", SanitizePathSegment(mailboxId), "messages"),
-            providerName);
+        return new MailboxPathInfo(storageRoot, Path.Combine(storageRoot, "mailboxes", SanitizePathSegment(mailboxId), "messages"), providerName);
     }
 
     private static string ResolveFileSystemRoot(HostingDirectory directory, string providerName, string mailboxId)
@@ -337,30 +492,24 @@ public sealed class MailboxContentStore
         }
 
         await using var stream = File.OpenRead(metadataPath);
-        return await JsonSerializer.DeserializeAsync<StoredMailboxMessageMetadata>(stream, cancellationToken: cancellationToken);
+        return await JsonSerializer.DeserializeAsync<StoredMailboxMessageMetadata>(stream, SerializerOptions, cancellationToken);
     }
 
-    private static async Task<MailboxMessageState> ReadStateAsync(
-        string statePath,
-        StoredMailboxMessageMetadata metadata,
-        CancellationToken cancellationToken)
+    private static async Task<MailboxMessageState> ReadStateAsync(string statePath, StoredMailboxMessageMetadata metadata, CancellationToken cancellationToken)
     {
         if (!File.Exists(statePath))
         {
-            return new MailboxMessageState("inbox", false, "inbound", "delivered", metadata.ReceivedAtUtc);
+            return new MailboxMessageState("inbox", false, "inbound", "delivered", DeriveThreadId(metadata), false, Array.Empty<string>(), metadata.ReceivedAtUtc);
         }
 
         await using var stream = File.OpenRead(statePath);
-        var state = await JsonSerializer.DeserializeAsync<MailboxMessageState>(stream, cancellationToken: cancellationToken);
-        return state ?? new MailboxMessageState("inbox", false, "inbound", "delivered", metadata.ReceivedAtUtc);
+        var state = await JsonSerializer.DeserializeAsync<MailboxMessageState>(stream, SerializerOptions, cancellationToken);
+        return state ?? new MailboxMessageState("inbox", false, "inbound", "delivered", DeriveThreadId(metadata), false, Array.Empty<string>(), metadata.ReceivedAtUtc);
     }
 
     private static Task WriteStateAsync(string statePath, MailboxMessageState state, CancellationToken cancellationToken)
     {
-        return File.WriteAllTextAsync(
-            statePath,
-            JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }),
-            cancellationToken);
+        return File.WriteAllTextAsync(statePath, JsonSerializer.Serialize(state, SerializerOptions), cancellationToken);
     }
 
     private static async Task WriteMailboxMessageAsync(
@@ -373,27 +522,36 @@ public sealed class MailboxContentStore
         Directory.CreateDirectory(messagesPath);
         var basePath = Path.Combine(messagesPath, SanitizePathSegment(metadata.MessageId));
         await File.WriteAllTextAsync($"{basePath}.eml", rawMessage, cancellationToken);
-        await File.WriteAllTextAsync(
-            $"{basePath}.json",
-            JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true }),
-            cancellationToken);
+        await File.WriteAllTextAsync($"{basePath}.json", JsonSerializer.Serialize(metadata, SerializerOptions), cancellationToken);
         await WriteStateAsync($"{basePath}.state.json", state, cancellationToken);
     }
 
     private static Task WritePointerAsync(string storageRoot, MailboxRoute route, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var pointerPath = Path.Combine(
-            storageRoot,
-            "addresses",
-            SanitizePathSegment(route.DomainName),
-            SanitizePathSegment(route.Address),
-            "pointer.json");
+        var pointerPath = Path.Combine(storageRoot, "addresses", SanitizePathSegment(route.DomainName), SanitizePathSegment(route.Address), "pointer.json");
         Directory.CreateDirectory(Path.GetDirectoryName(pointerPath)!);
         var pointer = new MailboxAddressPointer(route.MailboxId, route.StorageProviderName, route.DomainName, route.Address, now);
-        return File.WriteAllTextAsync(
-            pointerPath,
-            JsonSerializer.Serialize(pointer, new JsonSerializerOptions { WriteIndented = true }),
-            cancellationToken);
+        return File.WriteAllTextAsync(pointerPath, JsonSerializer.Serialize(pointer, SerializerOptions), cancellationToken);
+    }
+
+    private static async Task EnqueueOutboundAsync(string storageRoot, OutboundQueuedMessage queuedMessage, CancellationToken cancellationToken)
+    {
+        var pendingPath = Path.Combine(storageRoot, "outbound", "pending");
+        Directory.CreateDirectory(pendingPath);
+        await File.WriteAllTextAsync(Path.Combine(pendingPath, $"{queuedMessage.QueueId}.json"), JsonSerializer.Serialize(queuedMessage, SerializerOptions), cancellationToken);
+    }
+
+    private static async Task<OutboundQueuedMessage?> ReadQueuedOutboundAsync(string queuePath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var stream = File.OpenRead(queuePath);
+            return await JsonSerializer.DeserializeAsync<OutboundQueuedMessage>(stream, SerializerOptions, cancellationToken);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string BuildRawMessage(
@@ -506,6 +664,9 @@ public sealed class MailboxContentStore
             message.State.IsRead,
             message.State.Direction,
             message.State.DeliveryStatus,
+            message.State.ThreadId,
+            message.State.IsStarred,
+            message.State.Labels,
             message.Metadata.HeaderFrom ?? message.Metadata.EnvelopeFrom,
             message.Metadata.EnvelopeRecipients,
             message.Metadata.Subject,
@@ -513,14 +674,33 @@ public sealed class MailboxContentStore
             message.Metadata.ReceivedAtUtc);
     }
 
+    private static MailboxMessageDetail ToDetail(LoadedMailboxMessage message)
+    {
+        return new MailboxMessageDetail(
+            message.Metadata.MessageId,
+            message.State.Folder,
+            message.State.IsRead,
+            message.State.Direction,
+            message.State.DeliveryStatus,
+            message.State.ThreadId,
+            message.State.IsStarred,
+            message.State.Labels,
+            message.Metadata.EnvelopeFrom,
+            message.Metadata.EnvelopeRecipients,
+            message.Metadata.DeliveredAddresses,
+            message.Metadata.HeaderFrom,
+            message.Metadata.HeaderTo,
+            message.Metadata.Subject,
+            message.Metadata.Headers,
+            message.Metadata.PlainTextBody,
+            message.Metadata.HtmlBody,
+            message.RawMessage,
+            message.Metadata.ReceivedAtUtc);
+    }
+
     private static string BuildPreview(StoredMailboxMessageMetadata metadata)
     {
-        var candidate = metadata.PlainTextBody;
-        if (string.IsNullOrWhiteSpace(candidate))
-        {
-            candidate = metadata.HtmlBody;
-        }
-
+        var candidate = string.IsNullOrWhiteSpace(metadata.PlainTextBody) ? metadata.HtmlBody : metadata.PlainTextBody;
         if (string.IsNullOrWhiteSpace(candidate))
         {
             return "(no preview)";
@@ -528,6 +708,58 @@ public sealed class MailboxContentStore
 
         var normalized = string.Join(' ', candidate.Split(new[] { '\r', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries));
         return normalized.Length <= 140 ? normalized : normalized[..140] + "...";
+    }
+
+    private static MailboxMessagePage PaginateMessages(IReadOnlyList<MailboxMessageListItem> items, int page, int pageSize)
+    {
+        var normalizedPageSize = Math.Clamp(pageSize <= 0 ? 25 : pageSize, 1, 100);
+        var normalizedPage = Math.Max(1, page);
+        var totalCount = items.Count;
+        var totalPages = Math.Max(1, (int)Math.Ceiling(totalCount / (double)normalizedPageSize));
+        var pagedItems = items.Skip((normalizedPage - 1) * normalizedPageSize).Take(normalizedPageSize).ToArray();
+        return new MailboxMessagePage(normalizedPage, normalizedPageSize, totalCount, totalPages, pagedItems);
+    }
+
+    private static MailboxThreadPage PaginateThreads(IReadOnlyList<MailboxThreadSummary> items, int page, int pageSize)
+    {
+        var normalizedPageSize = Math.Clamp(pageSize <= 0 ? 25 : pageSize, 1, 100);
+        var normalizedPage = Math.Max(1, page);
+        var totalCount = items.Count;
+        var totalPages = Math.Max(1, (int)Math.Ceiling(totalCount / (double)normalizedPageSize));
+        var pagedItems = items.Skip((normalizedPage - 1) * normalizedPageSize).Take(normalizedPageSize).ToArray();
+        return new MailboxThreadPage(normalizedPage, normalizedPageSize, totalCount, totalPages, pagedItems);
+    }
+
+    private static string DeriveThreadId(StoredMailboxMessageMetadata metadata)
+    {
+        var inReplyTo = metadata.Headers
+            .FirstOrDefault(static header => string.Equals(header.Name, "In-Reply-To", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+        if (!string.IsNullOrWhiteSpace(inReplyTo))
+        {
+            return NormalizeThreadToken(inReplyTo);
+        }
+
+        var subject = metadata.Subject ?? "(no subject)";
+        using var sha = SHA256.Create();
+        var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(NormalizeSubject(subject)));
+        return Convert.ToHexString(hash[..12]).ToLowerInvariant();
+    }
+
+    private static string NormalizeThreadToken(string token)
+    {
+        return token.Trim().Trim('<', '>').Replace("@symposia.local", string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeSubject(string subject)
+    {
+        var normalized = subject.Trim();
+        while (normalized.StartsWith("Re:", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[3..].Trim();
+        }
+
+        return normalized;
     }
 
     private static string GetDomainName(string address)
@@ -554,5 +786,5 @@ public sealed class MailboxContentStore
     }
 
     private sealed record MailboxPathInfo(string StorageRoot, string MessagesPath, string ProviderName);
-    private sealed record LoadedMailboxMessage(StoredMailboxMessageMetadata Metadata, MailboxMessageState State);
+    private sealed record LoadedMailboxMessage(StoredMailboxMessageMetadata Metadata, MailboxMessageState State, string RawMessage);
 }

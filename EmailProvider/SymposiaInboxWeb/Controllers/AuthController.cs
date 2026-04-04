@@ -12,13 +12,16 @@ public sealed class AuthController : ControllerBase
 {
     private readonly HostedMailboxRepository _mailboxRepository;
     private readonly InboxAccountService _accountService;
+    private readonly RequestSecurityService _requestSecurityService;
 
     public AuthController(
         HostedMailboxRepository mailboxRepository,
-        InboxAccountService accountService)
+        InboxAccountService accountService,
+        RequestSecurityService requestSecurityService)
     {
         _mailboxRepository = mailboxRepository;
         _accountService = accountService;
+        _requestSecurityService = requestSecurityService;
     }
 
     [HttpGet("domains")]
@@ -28,14 +31,13 @@ public sealed class AuthController : ControllerBase
     }
 
     [HttpPost("register")]
-    public async Task<ActionResult<InboxAccountSession>> RegisterAsync(
-        [FromBody] RegisterAccountRequest request,
-        CancellationToken cancellationToken)
+    public async Task<ActionResult<InboxAccountSession>> RegisterAsync([FromBody] RegisterAccountRequest request, CancellationToken cancellationToken)
     {
         try
         {
             var account = await _accountService.RegisterAsync(request, cancellationToken);
             await SignInAsync(account);
+            _requestSecurityService.SetCsrfCookie(Response, account.CsrfToken);
             return Ok(account);
         }
         catch (InvalidOperationException ex)
@@ -45,25 +47,56 @@ public sealed class AuthController : ControllerBase
     }
 
     [HttpPost("login")]
-    public async Task<ActionResult<InboxAccountSession>> LoginAsync(
-        [FromBody] LoginRequest request,
-        CancellationToken cancellationToken)
+    public async Task<ActionResult<InboxAccountSession>> LoginAsync([FromBody] LoginRequest request, CancellationToken cancellationToken)
     {
-        var account = await _accountService.AuthenticateAsync(request.EmailAddress, request.Password, cancellationToken);
-        if (account is null)
+        var result = await _accountService.AuthenticateAsync(request.EmailAddress, request.Password, cancellationToken);
+        if (!result.Succeeded || result.Session is null)
         {
-            return Unauthorized(new { error = "Email address or password is incorrect." });
+            return result.IsLockedOut
+                ? StatusCode(StatusCodes.Status423Locked, new { error = result.ErrorMessage })
+                : Unauthorized(new { error = result.ErrorMessage ?? "Email address or password is incorrect." });
         }
 
-        await SignInAsync(account);
-        return Ok(account);
+        await SignInAsync(result.Session);
+        _requestSecurityService.SetCsrfCookie(Response, result.Session.CsrfToken);
+        return Ok(result.Session);
     }
 
     [HttpPost("logout")]
     public async Task<IActionResult> LogoutAsync()
     {
+        if (User.Identity?.IsAuthenticated == true && !_requestSecurityService.IsValid(Request))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "CSRF token validation failed." });
+        }
+
         await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        _requestSecurityService.ClearCsrfCookie(Response);
         return NoContent();
+    }
+
+    [HttpPost("password-reset/request")]
+    public async Task<ActionResult<PasswordResetResponse>> RequestPasswordResetAsync(
+        [FromBody] PasswordResetRequest request,
+        CancellationToken cancellationToken)
+    {
+        return Ok(await _accountService.RequestPasswordResetAsync(request.EmailAddress, cancellationToken));
+    }
+
+    [HttpPost("password-reset/confirm")]
+    public async Task<IActionResult> ConfirmPasswordResetAsync(
+        [FromBody] PasswordResetConfirmationRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _accountService.ResetPasswordAsync(request.Token, request.NewPassword, cancellationToken);
+            return NoContent();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     [HttpGet("me")]
@@ -76,7 +109,14 @@ public sealed class AuthController : ControllerBase
         }
 
         var account = await _accountService.GetAccountAsync(accountId, cancellationToken);
-        return account is null ? Unauthorized() : Ok(account);
+        if (account is null)
+        {
+            return Unauthorized();
+        }
+
+        var csrfToken = User.GetCsrfToken() ?? account.CsrfToken;
+        _requestSecurityService.SetCsrfCookie(Response, csrfToken);
+        return Ok(account with { CsrfToken = csrfToken });
     }
 
     private Task SignInAsync(InboxAccountSession account)
@@ -86,7 +126,8 @@ public sealed class AuthController : ControllerBase
             new Claim(ClaimTypes.NameIdentifier, account.AccountId),
             new Claim(ClaimTypes.Name, account.Address),
             new Claim("mailboxId", account.MailboxId),
-            new Claim("displayName", account.DisplayName)
+            new Claim("displayName", account.DisplayName),
+            new Claim("csrf", account.CsrfToken)
         };
 
         var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));

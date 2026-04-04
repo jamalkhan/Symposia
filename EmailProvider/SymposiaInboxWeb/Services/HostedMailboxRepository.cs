@@ -129,6 +129,18 @@ public sealed class HostedMailboxRepository
         return Task.FromResult(HostingDirectory.Load(_options.HostingConfigPath));
     }
 
+    public async Task<IReadOnlyList<string>> ListFileSystemStorageRootsAsync(CancellationToken cancellationToken = default)
+    {
+        var directory = await LoadDirectoryAsync(cancellationToken);
+        return directory.StorageProviders.Values
+            .Where(static provider => string.Equals(provider.Type, MailStorageProviderTypes.FileSystem, StringComparison.OrdinalIgnoreCase)
+                && provider.FileSystem is not null)
+            .Select(static provider => provider.FileSystem!.RootPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
     private async Task<SmtpHostingConfiguration> LoadConfigurationAsync(CancellationToken cancellationToken)
     {
         if (!File.Exists(_options.HostingConfigPath))

@@ -7,6 +7,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="BuildTools/**" />
+    <Content Remove="BuildTools/**" />
+    <None Remove="BuildTools/**" />
+  </ItemGroup>
+
+  <Target Name="BundleClientApp" BeforeTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="dotnet run --project &quot;$(MSBuildProjectDirectory)/BuildTools/SymposiaInboxWeb.FrontendBuilder.csproj&quot; -- &quot;$(MSBuildProjectDirectory)&quot;" />
+  </Target>
+
+  <ItemGroup>
     <Content Update="Config/accounts.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

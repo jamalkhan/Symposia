@@ -14,7 +14,8 @@ public sealed record InboxAccountRecord(
     string PasswordHash,
     string PasswordSalt,
     DateTimeOffset CreatedAtUtc,
-    IReadOnlyList<AddressBookContactRecord> Contacts);
+    IReadOnlyList<AddressBookContactRecord> Contacts,
+    InboxAccountSecurityState SecurityState);
 
 public sealed class InboxAccountStoreDocument
 {
@@ -31,7 +32,17 @@ public sealed record InboxAccountSession(
     string AccountId,
     string Address,
     string MailboxId,
-    string DisplayName);
+    string DisplayName,
+    string CsrfToken);
+
+public sealed record InboxAccountSecurityState(
+    int FailedLoginCount,
+    DateTimeOffset? LockoutUntilUtc,
+    DateTimeOffset? LastLoginAtUtc,
+    DateTimeOffset? LastFailedLoginAtUtc,
+    string? PasswordResetTokenHash,
+    DateTimeOffset? PasswordResetRequestedAtUtc,
+    DateTimeOffset? LastPasswordChangedAtUtc);
 
 public sealed record RegisterAccountRequest(
     string Username,
@@ -42,6 +53,13 @@ public sealed record RegisterAccountRequest(
 public sealed record LoginRequest(
     string EmailAddress,
     string Password);
+
+public sealed record PasswordResetRequest(
+    string EmailAddress);
+
+public sealed record PasswordResetConfirmationRequest(
+    string Token,
+    string NewPassword);
 
 public sealed record ContactUpsertRequest(
     string? ContactId,
@@ -62,6 +80,9 @@ public sealed record MailboxMessageState(
     bool IsRead,
     string Direction,
     string DeliveryStatus,
+    string ThreadId,
+    bool IsStarred,
+    IReadOnlyList<string> Labels,
     DateTimeOffset UpdatedAtUtc);
 
 public sealed record MailboxMessageListItem(
@@ -70,6 +91,9 @@ public sealed record MailboxMessageListItem(
     bool IsRead,
     string Direction,
     string DeliveryStatus,
+    string ThreadId,
+    bool IsStarred,
+    IReadOnlyList<string> Labels,
     string DisplayFrom,
     IReadOnlyList<string> DisplayTo,
     string? Subject,
@@ -82,6 +106,9 @@ public sealed record MailboxMessageDetail(
     bool IsRead,
     string Direction,
     string DeliveryStatus,
+    string ThreadId,
+    bool IsStarred,
+    IReadOnlyList<string> Labels,
     string EnvelopeFrom,
     IReadOnlyList<string> EnvelopeRecipients,
     IReadOnlyList<string> DeliveredAddresses,
@@ -99,14 +126,67 @@ public sealed record MailboxFolderCounts(
     int Sent,
     int Trash);
 
+public sealed record MailboxMessageQuery(
+    string Folder,
+    string? Query,
+    string? Label,
+    int Page,
+    int PageSize);
+
+public sealed record MailboxMessagePage(
+    int Page,
+    int PageSize,
+    int TotalCount,
+    int TotalPages,
+    IReadOnlyList<MailboxMessageListItem> Items);
+
+public sealed record MailboxThreadSummary(
+    string ThreadId,
+    string? Subject,
+    IReadOnlyList<string> Participants,
+    string Preview,
+    int MessageCount,
+    int UnreadCount,
+    bool HasStarredMessage,
+    DateTimeOffset LatestReceivedAtUtc,
+    string LatestMessageId);
+
+public sealed record MailboxThreadPage(
+    int Page,
+    int PageSize,
+    int TotalCount,
+    int TotalPages,
+    IReadOnlyList<MailboxThreadSummary> Items);
+
+public sealed record MailboxThreadDetail(
+    string ThreadId,
+    string? Subject,
+    IReadOnlyList<MailboxMessageDetail> Messages);
+
 public sealed record MailboxBootstrapResponse(
     InboxAccountSession Account,
     IReadOnlyList<string> HostedDomains,
     IReadOnlyList<AddressBookContactRecord> Contacts,
     MailboxFolderCounts Counts,
-    IReadOnlyList<MailboxMessageListItem> RecentMessages);
+    MailboxMessagePage RecentMessages);
 
 public sealed record ComposeMessageResult(
     string SentMessageId,
     int DeliveredLocalCount,
     int QueuedExternalCount);
+
+public sealed record LabelUpdateRequest(
+    IReadOnlyList<string> Labels);
+
+public sealed record StarUpdateRequest(
+    bool IsStarred);
+
+public sealed record PasswordResetResponse(
+    bool Accepted,
+    string? ResetToken);
+
+public sealed record InboxAuthenticationResult(
+    bool Succeeded,
+    bool IsLockedOut,
+    string? ErrorMessage,
+    InboxAccountSession? Session);

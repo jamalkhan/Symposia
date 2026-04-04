@@ -38,9 +38,15 @@ builder.Services
     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
-        options.Cookie.Name = "symposia-inbox-auth";
+        options.Cookie.Name = inboxOptions.AuthCookieName;
         options.SlidingExpiration = true;
-        options.ExpireTimeSpan = TimeSpan.FromDays(7);
+        options.ExpireTimeSpan = TimeSpan.FromHours(12);
+        options.Cookie.HttpOnly = true;
+        options.Cookie.IsEssential = true;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SecurePolicy = inboxOptions.TryGetHttpsCertificate(out _, out _)
+            ? CookieSecurePolicy.Always
+            : CookieSecurePolicy.SameAsRequest;
         options.Events.OnRedirectToAccessDenied = static context =>
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -58,7 +64,10 @@ builder.Services.AddControllers();
 builder.Services.AddSingleton<HostedMailboxRepository>();
 builder.Services.AddSingleton<PasswordHashingService>();
 builder.Services.AddSingleton<InboxAccountService>();
+builder.Services.AddSingleton<RequestSecurityService>();
 builder.Services.AddSingleton<MailboxContentStore>();
+builder.Services.AddSingleton<OutboundRelayService>();
+builder.Services.AddHostedService<OutboundRelayWorker>();
 
 var app = builder.Build();
 
@@ -69,6 +78,7 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 app.MapControllers();
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/status", () => Results.Ok(StatusPayloads.Create()));
 
 app.Logger.LogInformation("Inbox HTTP endpoint listening on port {Port}", inboxOptions.HttpPort);
 if (inboxOptions.TryGetHttpsCertificate(out _, out _))
@@ -89,6 +99,11 @@ namespace InboxWeb
         public static string? GetAccountId(this ClaimsPrincipal principal)
         {
             return principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        }
+
+        public static string? GetCsrfToken(this ClaimsPrincipal principal)
+        {
+            return principal.FindFirst("csrf")?.Value;
         }
     }
 }

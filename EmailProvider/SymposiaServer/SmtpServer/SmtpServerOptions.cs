@@ -2,6 +2,7 @@ namespace NativeSmtpReceiver;
 
 public sealed class SmtpServerOptions
 {
+    public bool Enabled { get; init; } = true;
     public int Port { get; init; } = 2525;
     public string ServerName { get; init; } = "native-smtp.local";
     public string? TlsCertificatePath { get; init; }
@@ -29,9 +30,10 @@ public sealed class SmtpServerOptions
 
         return new SmtpServerOptions
         {
+            Enabled = ParseBool("SYMPOSIA_SMTP_ENABLED", true),
             Port = int.TryParse(configuredPort, out var port) && port is > 0 and <= 65535 ? port : 2525,
             ServerName = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_SERVER_NAME") ?? "native-smtp.local",
-            TlsCertificatePath = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_TLS_CERT_PATH"),
+            TlsCertificatePath = PathResolution.ResolveOptionalPath(Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_TLS_CERT_PATH")),
             TlsCertificatePassword = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_TLS_CERT_PASSWORD"),
             AuthUsername = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_AUTH_USERNAME"),
             AuthPassword = Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_AUTH_PASSWORD"),
@@ -43,7 +45,7 @@ public sealed class SmtpServerOptions
             MaxRecipientsPerMessage = ParseInt("SYMPOSIA_SMTP_MAX_RECIPIENTS_PER_MESSAGE", 50, 1, 1000),
             MaxMessageSizeBytes = ParseInt("SYMPOSIA_SMTP_MAX_MESSAGE_SIZE_BYTES", 10 * 1024 * 1024, 1024, 100 * 1024 * 1024),
             AllowAuthenticatedRelay = ParseBool("SYMPOSIA_SMTP_ALLOW_AUTHENTICATED_RELAY", false),
-            RetryQueueRootPath = ResolvePath(Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_RETRY_QUEUE_ROOT"))
+            RetryQueueRootPath = PathResolution.ResolveOptionalPath(Environment.GetEnvironmentVariable("SYMPOSIA_SMTP_RETRY_QUEUE_ROOT"))
                 ?? Path.Combine(AppContext.BaseDirectory, "retry-queue"),
             RetryInterval = TimeSpan.FromSeconds(ParseInt("SYMPOSIA_SMTP_RETRY_INTERVAL_SECONDS", 30, 5, 3600))
         };
@@ -61,17 +63,5 @@ public sealed class SmtpServerOptions
     {
         var rawValue = Environment.GetEnvironmentVariable(name);
         return bool.TryParse(rawValue, out var value) ? value : defaultValue;
-    }
-
-    private static string? ResolvePath(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return null;
-        }
-
-        return Path.IsPathRooted(path)
-            ? path
-            : Path.GetFullPath(path, Environment.CurrentDirectory);
     }
 }

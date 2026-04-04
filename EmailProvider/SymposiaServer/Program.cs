@@ -100,6 +100,7 @@ internal static class Program
             FileProvider = webRootProvider
         });
         app.MapControllers();
+        app.MapGet("/status", () => Results.Ok(StatusPayloads.Create()));
 
         app.Logger.LogInformation("Dashboard HTTP endpoint listening on port {Port}", webOptions.HttpPort);
         if (webOptions.TryGetHttpsCertificate(out _, out _))

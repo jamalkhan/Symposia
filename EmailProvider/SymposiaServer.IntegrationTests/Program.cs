@@ -24,6 +24,10 @@ internal sealed class Program
             RunMailboxStorageRoutingAsync,
             RunMailboxReadModelAsync,
             RunDashboardHttpApiAsync,
+            RunInboxAuthApiAsync,
+            RunInboxContactsApiAsync,
+            RunInboxMailboxWorkflowApiAsync,
+            RunInboxOutboundRelayAsync,
             RunMixedRecipientHandlingAsync,
             RunCommandOrderingFailuresAsync,
             RunMessageSizeLimitAsync,
@@ -402,6 +406,562 @@ internal sealed class Program
 
         ExpectEqual(jamalDomain2["messageCount"]?.GetValue<int>(), 1, "jamal@domain2.com message count");
         ExpectEqual(adminDomain2["messageCount"]?.GetValue<int>(), 1, "admin@domain2.com message count");
+    }
+
+    private static async Task RunInboxAuthApiAsync()
+    {
+        var httpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var mailRoot = Path.Combine(tempRoot, "maildrop");
+        var hostingConfigPath = Path.Combine(tempRoot, "mailboxes.json");
+        var accountStorePath = Path.Combine(tempRoot, "accounts.json");
+
+        await WriteHostingConfigAsync(
+            hostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, mailRoot)],
+            [
+                new TestDomain("symposia.com", "local-default",
+                [
+                    new TestMailbox("jamal@symposia.com", "jamal"),
+                    new TestMailbox("admin@symposia.com", "admin")
+                ]),
+                new TestDomain("symposia.net", "local-default",
+                [
+                    new TestMailbox("jamal@symposia.net", "jamal")
+                ])
+            ]);
+
+        await using var server = await RunningInboxServer.StartAsync(httpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_INBOX_HTTP_PORT"] = httpPort.ToString(),
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = hostingConfigPath,
+            ["SYMPOSIA_INBOX_ACCOUNT_STORE_PATH"] = accountStorePath,
+            ["SYMPOSIA_INBOX_LOCKOUT_THRESHOLD"] = "3",
+            ["SYMPOSIA_INBOX_LOCKOUT_MINUTES"] = "10",
+            ["SYMPOSIA_INBOX_EXPOSE_RESET_TOKENS"] = "true"
+        });
+
+        var cookies = new CookieContainer();
+        using var client = CreateHttpClient(httpPort, cookies);
+
+        var domainsResponse = await client.GetAsync("/api/auth/domains");
+        ExpectStatus(domainsResponse.StatusCode, HttpStatusCode.OK, "domains status");
+        var domains = JsonNode.Parse(await domainsResponse.Content.ReadAsStringAsync())?.AsArray()
+            ?? throw new InvalidOperationException("Hosted domains response could not be parsed.");
+        if (domains.Count != 2)
+        {
+            throw new InvalidOperationException($"Expected 2 hosted domains, found {domains.Count}.");
+        }
+
+        var meResponse = await client.GetAsync("/api/auth/me");
+        ExpectStatus(meResponse.StatusCode, HttpStatusCode.Unauthorized, "me unauthorized status");
+
+        var invalidDomainResponse = await PostJsonAsync(client, "/api/auth/register", new
+        {
+            Username = "violet",
+            Domain = "unknown.com",
+            Password = "testpass123",
+            DisplayName = "Violet"
+        });
+        ExpectStatus(invalidDomainResponse.StatusCode, HttpStatusCode.BadRequest, "invalid domain register status");
+        ExpectContains(await invalidDomainResponse.Content.ReadAsStringAsync(), "not hosted by this server");
+
+        var registerResponse = await PostJsonAsync(client, "/api/auth/register", new
+        {
+            Username = "violet",
+            Domain = "symposia.com",
+            Password = "testpass123",
+            DisplayName = "Violet User"
+        });
+        ExpectStatus(registerResponse.StatusCode, HttpStatusCode.OK, "register status");
+        var registerPayload = JsonNode.Parse(await registerResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Register response could not be parsed.");
+        var csrfToken = registerPayload["csrfToken"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Register response did not include a csrf token.");
+        var registeredAddress = registerPayload["address"]?.GetValue<string>();
+        if (!string.Equals(registeredAddress, "violet@symposia.com", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Expected registered address violet@symposia.com, got '{registeredAddress}'.");
+        }
+
+        var updatedHostingConfig = await File.ReadAllTextAsync(hostingConfigPath);
+        ExpectContains(updatedHostingConfig, "\"address\": \"violet@symposia.com\"");
+        var updatedAccountsConfig = await File.ReadAllTextAsync(accountStorePath);
+        ExpectContains(updatedAccountsConfig, "\"address\": \"violet@symposia.com\"");
+
+        var duplicateResponse = await PostJsonAsync(client, "/api/auth/register", new
+        {
+            Username = "violet",
+            Domain = "symposia.com",
+            Password = "testpass123",
+            DisplayName = "Violet User"
+        });
+        ExpectStatus(duplicateResponse.StatusCode, HttpStatusCode.BadRequest, "duplicate register status");
+        ExpectContains(await duplicateResponse.Content.ReadAsStringAsync(), "already exists");
+
+        var authedMeResponse = await client.GetAsync("/api/auth/me");
+        ExpectStatus(authedMeResponse.StatusCode, HttpStatusCode.OK, "me authorized status");
+        var authedMePayload = await authedMeResponse.Content.ReadAsStringAsync();
+        ExpectContains(authedMePayload, "violet@symposia.com");
+
+        var logoutResponse = await PostWithCsrfAsync(client, "/api/auth/logout", GetCsrfToken(authedMePayload));
+        ExpectStatus(logoutResponse.StatusCode, HttpStatusCode.NoContent, "logout status");
+
+        var wrongPasswordResponse = await PostJsonAsync(client, "/api/auth/login", new
+        {
+            EmailAddress = "violet@symposia.com",
+            Password = "wrongpass"
+        });
+        ExpectStatus(wrongPasswordResponse.StatusCode, HttpStatusCode.Unauthorized, "wrong password login status");
+
+        var secondWrongPasswordResponse = await PostJsonAsync(client, "/api/auth/login", new
+        {
+            EmailAddress = "violet@symposia.com",
+            Password = "wrongpass"
+        });
+        ExpectStatus(secondWrongPasswordResponse.StatusCode, HttpStatusCode.Unauthorized, "second wrong password login status");
+
+        var lockedPasswordResponse = await PostJsonAsync(client, "/api/auth/login", new
+        {
+            EmailAddress = "violet@symposia.com",
+            Password = "wrongpass"
+        });
+        ExpectStatus(lockedPasswordResponse.StatusCode, HttpStatusCode.Locked, "locked password login status");
+
+        var resetRequestResponse = await PostJsonAsync(client, "/api/auth/password-reset/request", new
+        {
+            EmailAddress = "violet@symposia.com"
+        });
+        ExpectStatus(resetRequestResponse.StatusCode, HttpStatusCode.OK, "password reset request status");
+        var resetRequestPayload = JsonNode.Parse(await resetRequestResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Password reset request response could not be parsed.");
+        var resetToken = resetRequestPayload["resetToken"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Expected exposed password reset token for integration test.");
+
+        var resetConfirmResponse = await PostJsonAsync(client, "/api/auth/password-reset/confirm", new
+        {
+            Token = resetToken,
+            NewPassword = "renewedpass123"
+        });
+        ExpectStatus(resetConfirmResponse.StatusCode, HttpStatusCode.NoContent, "password reset confirm status");
+
+        var oldPasswordResponse = await PostJsonAsync(client, "/api/auth/login", new
+        {
+            EmailAddress = "violet@symposia.com",
+            Password = "testpass123"
+        });
+        ExpectStatus(oldPasswordResponse.StatusCode, HttpStatusCode.Unauthorized, "old password login status");
+
+        var loginResponse = await PostJsonAsync(client, "/api/auth/login", new
+        {
+            EmailAddress = "violet@symposia.com",
+            Password = "renewedpass123"
+        });
+        ExpectStatus(loginResponse.StatusCode, HttpStatusCode.OK, "login status");
+        ExpectContains(await loginResponse.Content.ReadAsStringAsync(), "violet@symposia.com");
+    }
+
+    private static async Task RunInboxContactsApiAsync()
+    {
+        var httpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var mailRoot = Path.Combine(tempRoot, "maildrop");
+        var hostingConfigPath = Path.Combine(tempRoot, "mailboxes.json");
+        var accountStorePath = Path.Combine(tempRoot, "accounts.json");
+
+        await WriteHostingConfigAsync(
+            hostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, mailRoot)],
+            [new TestDomain("symposia.com", "local-default", [new TestMailbox("jamal@symposia.com", "jamal")])]);
+
+        await using var server = await RunningInboxServer.StartAsync(httpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_INBOX_HTTP_PORT"] = httpPort.ToString(),
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = hostingConfigPath,
+            ["SYMPOSIA_INBOX_ACCOUNT_STORE_PATH"] = accountStorePath
+        });
+
+        var cookies = new CookieContainer();
+        using var client = CreateHttpClient(httpPort, cookies);
+
+        var registerResponse = await PostJsonAsync(client, "/api/auth/register", new
+        {
+            Username = "jamal",
+            Domain = "symposia.com",
+            Password = "testpass123",
+            DisplayName = "Jamal"
+        });
+        await ExpectSuccessAsync(registerResponse, "register contact test account");
+        var csrfToken = GetCsrfToken(await registerResponse.Content.ReadAsStringAsync());
+
+        var createContactResponse = await PostJsonWithCsrfAsync(client, "/api/contacts", new
+        {
+            DisplayName = "Ada Lovelace",
+            EmailAddress = "ada@example.com"
+        }, csrfToken);
+        ExpectStatus(createContactResponse.StatusCode, HttpStatusCode.OK, "create contact status");
+        var contact = JsonNode.Parse(await createContactResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Create contact response could not be parsed.");
+        var contactId = contact["contactId"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Contact response did not include an id.");
+
+        var filteredContactsResponse = await client.GetAsync("/api/contacts?q=ada");
+        ExpectStatus(filteredContactsResponse.StatusCode, HttpStatusCode.OK, "contacts query status");
+        var filteredContacts = JsonNode.Parse(await filteredContactsResponse.Content.ReadAsStringAsync())?.AsArray()
+            ?? throw new InvalidOperationException("Filtered contacts response could not be parsed.");
+        if (filteredContacts.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one filtered contact, found {filteredContacts.Count}.");
+        }
+
+        var updateContactResponse = await PostJsonWithCsrfAsync(client, "/api/contacts", new
+        {
+            ContactId = contactId,
+            DisplayName = "Ada Byron",
+            EmailAddress = "ada@example.com"
+        }, csrfToken);
+        ExpectStatus(updateContactResponse.StatusCode, HttpStatusCode.OK, "update contact status");
+        ExpectContains(await updateContactResponse.Content.ReadAsStringAsync(), "Ada Byron");
+
+        var deleteResponse = await DeleteWithCsrfAsync(client, $"/api/contacts/{contactId}", csrfToken);
+        ExpectStatus(deleteResponse.StatusCode, HttpStatusCode.NoContent, "delete contact status");
+
+        var finalContactsResponse = await client.GetAsync("/api/contacts");
+        ExpectStatus(finalContactsResponse.StatusCode, HttpStatusCode.OK, "final contacts status");
+        var finalContacts = JsonNode.Parse(await finalContactsResponse.Content.ReadAsStringAsync())?.AsArray()
+            ?? throw new InvalidOperationException("Final contacts response could not be parsed.");
+        if (finalContacts.Count != 0)
+        {
+            throw new InvalidOperationException($"Expected zero contacts after deletion, found {finalContacts.Count}.");
+        }
+    }
+
+    private static async Task RunInboxMailboxWorkflowApiAsync()
+    {
+        var httpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var mailRoot = Path.Combine(tempRoot, "maildrop");
+        var hostingConfigPath = Path.Combine(tempRoot, "mailboxes.json");
+        var accountStorePath = Path.Combine(tempRoot, "accounts.json");
+
+        await WriteHostingConfigAsync(
+            hostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, mailRoot)],
+            [new TestDomain("symposia.com", "local-default",
+            [
+                new TestMailbox("jamal@symposia.com", "jamal"),
+                new TestMailbox("admin@symposia.com", "admin")
+            ])]);
+
+        await using var server = await RunningInboxServer.StartAsync(httpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_INBOX_HTTP_PORT"] = httpPort.ToString(),
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = hostingConfigPath,
+            ["SYMPOSIA_INBOX_ACCOUNT_STORE_PATH"] = accountStorePath
+        });
+
+        var senderCookies = new CookieContainer();
+        using var senderClient = CreateHttpClient(httpPort, senderCookies);
+        var adminCookies = new CookieContainer();
+        using var adminClient = CreateHttpClient(httpPort, adminCookies);
+
+        var senderRegisterResponse = await PostJsonAsync(senderClient, "/api/auth/register", new
+        {
+            Username = "jamal",
+            Domain = "symposia.com",
+            Password = "testpass123",
+            DisplayName = "Jamal"
+        });
+        await ExpectSuccessAsync(senderRegisterResponse, "register sender account");
+        var senderCsrf = GetCsrfToken(await senderRegisterResponse.Content.ReadAsStringAsync());
+
+        var composeEmptyRecipients = await PostJsonWithCsrfAsync(senderClient, "/api/mailbox/compose", new
+        {
+            Subject = "No recipients",
+            To = "",
+            PlainTextBody = "This should fail."
+        }, senderCsrf);
+        ExpectStatus(composeEmptyRecipients.StatusCode, HttpStatusCode.BadRequest, "compose invalid status");
+        ExpectContains(await composeEmptyRecipients.Content.ReadAsStringAsync(), "At least one recipient is required");
+
+        var composeResponse = await PostJsonWithCsrfAsync(senderClient, "/api/mailbox/compose", new
+        {
+            Subject = "Inbox workflow",
+            To = "admin@symposia.com, outside@example.net",
+            PlainTextBody = "Hello from the inbox integration test."
+        }, senderCsrf);
+        ExpectStatus(composeResponse.StatusCode, HttpStatusCode.OK, "compose status");
+        var composePayload = JsonNode.Parse(await composeResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Compose response could not be parsed.");
+        var sentMessageId = composePayload["sentMessageId"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Compose response did not include a sent message id.");
+        ExpectEqual(composePayload["deliveredLocalCount"]?.GetValue<int>(), 1, "local delivered count");
+        ExpectEqual(composePayload["queuedExternalCount"]?.GetValue<int>(), 1, "queued external count");
+
+        var sentPageResponse = await senderClient.GetAsync("/api/mailbox/messages/page?folder=sent&page=1&pageSize=10");
+        if (!sentPageResponse.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"Expected sender sent page request to succeed, got HTTP {(int)sentPageResponse.StatusCode}: {await sentPageResponse.Content.ReadAsStringAsync()}");
+        }
+
+        var sentPageBody = await sentPageResponse.Content.ReadAsStringAsync();
+        var sentPagePayload = JsonNode.Parse(sentPageBody)?.AsObject()
+            ?? throw new InvalidOperationException("Sent page response could not be parsed.");
+        if (sentPagePayload["totalCount"]?.GetValue<int>() != 1)
+        {
+            throw new InvalidOperationException($"Expected sender sent page totalCount to be 1, got '{sentPagePayload["totalCount"]?.ToJsonString() ?? "null"}'. Body: {sentPageBody}");
+        }
+
+        var sentMessagesResponse = await senderClient.GetAsync("/api/mailbox/messages?folder=sent");
+        ExpectStatus(sentMessagesResponse.StatusCode, HttpStatusCode.OK, "sent messages status");
+        var sentMessages = JsonNode.Parse(await sentMessagesResponse.Content.ReadAsStringAsync())?.AsArray()
+            ?? throw new InvalidOperationException("Sent messages response could not be parsed.");
+        if (sentMessages.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one sent message, found {sentMessages.Count}.");
+        }
+
+        var sentMessage = sentMessages[0]?.AsObject()
+            ?? throw new InvalidOperationException("Sent message payload could not be parsed.");
+        if (!string.Equals(sentMessage["messageId"]?.GetValue<string>(), sentMessageId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Sent message listing did not include the composed message.");
+        }
+
+        var adminRegisterResponse = await PostJsonAsync(adminClient, "/api/auth/register", new
+        {
+            Username = "admin",
+            Domain = "symposia.com",
+            Password = "adminpass123",
+            DisplayName = "Admin"
+        });
+        await ExpectSuccessAsync(adminRegisterResponse, "register admin account");
+        var adminCsrf = GetCsrfToken(await adminRegisterResponse.Content.ReadAsStringAsync());
+
+        var bootstrapResponse = await adminClient.GetAsync("/api/mailbox/bootstrap");
+        ExpectStatus(bootstrapResponse.StatusCode, HttpStatusCode.OK, "bootstrap status");
+        var bootstrap = JsonNode.Parse(await bootstrapResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Bootstrap response could not be parsed.");
+        ExpectEqual(bootstrap["counts"]?["inbox"]?.GetValue<int>(), 1, "admin inbox count");
+        var recentMessages = bootstrap["recentMessages"]?["items"]?.AsArray()
+            ?? throw new InvalidOperationException("Bootstrap response missing recentMessages.");
+        if (recentMessages.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one recent inbox message, found {recentMessages.Count}.");
+        }
+
+        var adminMessageId = recentMessages[0]?["messageId"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Recent inbox message did not include a message id.");
+
+        var searchResponse = await adminClient.GetAsync("/api/mailbox/messages?folder=inbox&q=workflow");
+        ExpectStatus(searchResponse.StatusCode, HttpStatusCode.OK, "search status");
+        var searchResults = JsonNode.Parse(await searchResponse.Content.ReadAsStringAsync())?.AsArray()
+            ?? throw new InvalidOperationException("Search response could not be parsed.");
+        if (searchResults.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one search result, found {searchResults.Count}.");
+        }
+
+        var detailResponse = await adminClient.GetAsync($"/api/mailbox/messages/{adminMessageId}");
+        ExpectStatus(detailResponse.StatusCode, HttpStatusCode.OK, "message detail status");
+        var detail = JsonNode.Parse(await detailResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Message detail response could not be parsed.");
+        ExpectContains(detail["plainTextBody"]?.GetValue<string>() ?? string.Empty, "Hello from the inbox integration test.");
+        var threadId = detail["threadId"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Message detail did not include thread id.");
+
+        var pageResponse = await adminClient.GetAsync("/api/mailbox/messages/page?folder=inbox&page=1&pageSize=10");
+        ExpectStatus(pageResponse.StatusCode, HttpStatusCode.OK, "paged messages status");
+        var pagePayload = JsonNode.Parse(await pageResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Paged messages response could not be parsed.");
+        ExpectEqual(pagePayload["totalCount"]?.GetValue<int>(), 1, "paged inbox total count");
+
+        ExpectStatus((await PostWithCsrfAsync(adminClient, $"/api/mailbox/messages/{adminMessageId}/read", adminCsrf)).StatusCode, HttpStatusCode.NoContent, "mark read status");
+        var readDetail = JsonNode.Parse(await (await adminClient.GetAsync($"/api/mailbox/messages/{adminMessageId}")).Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Read detail response could not be parsed.");
+        if (!readDetail["isRead"]!.GetValue<bool>())
+        {
+            throw new InvalidOperationException("Expected message to be marked read.");
+        }
+
+        ExpectStatus((await PostWithCsrfAsync(adminClient, $"/api/mailbox/messages/{adminMessageId}/unread", adminCsrf)).StatusCode, HttpStatusCode.NoContent, "mark unread status");
+        var unreadDetail = JsonNode.Parse(await (await adminClient.GetAsync($"/api/mailbox/messages/{adminMessageId}")).Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Unread detail response could not be parsed.");
+        if (unreadDetail["isRead"]!.GetValue<bool>())
+        {
+            throw new InvalidOperationException("Expected message to be marked unread.");
+        }
+
+        ExpectStatus((await PostJsonWithCsrfAsync(adminClient, $"/api/mailbox/messages/{adminMessageId}/labels", new
+        {
+            Labels = new[] { "priority", "customer" }
+        }, adminCsrf)).StatusCode, HttpStatusCode.NoContent, "update labels status");
+        ExpectStatus((await PostJsonWithCsrfAsync(adminClient, $"/api/mailbox/messages/{adminMessageId}/star", new
+        {
+            IsStarred = true
+        }, adminCsrf)).StatusCode, HttpStatusCode.NoContent, "update star status");
+
+        var labeledDetail = JsonNode.Parse(await (await adminClient.GetAsync($"/api/mailbox/messages/{adminMessageId}")).Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Labeled detail response could not be parsed.");
+        ExpectEqual(labeledDetail["isStarred"]?.GetValue<bool>(), true, "starred flag");
+        var labels = labeledDetail["labels"]?.AsArray() ?? throw new InvalidOperationException("Message detail did not include labels.");
+        if (labels.Count != 2)
+        {
+            throw new InvalidOperationException($"Expected two labels on message, found {labels.Count}.");
+        }
+
+        var labeledSearch = await adminClient.GetAsync("/api/mailbox/messages/page?folder=inbox&label=priority");
+        ExpectStatus(labeledSearch.StatusCode, HttpStatusCode.OK, "label search status");
+        var labeledPage = JsonNode.Parse(await labeledSearch.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Label search response could not be parsed.");
+        ExpectEqual(labeledPage["totalCount"]?.GetValue<int>(), 1, "labeled inbox total count");
+
+        var replyResponse = await PostJsonWithCsrfAsync(senderClient, "/api/mailbox/compose", new
+        {
+            Subject = "RE: Inbox workflow",
+            To = "admin@symposia.com",
+            PlainTextBody = "Following up on the same thread.",
+            ReplyToMessageId = adminMessageId
+        }, senderCsrf);
+        ExpectStatus(replyResponse.StatusCode, HttpStatusCode.OK, "reply compose status");
+
+        await WaitForConditionAsync(async () =>
+        {
+            var response = await adminClient.GetAsync("/api/mailbox/threads?folder=inbox&page=1&pageSize=10");
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsObject();
+            return payload?["items"]?.AsArray()?.Count == 1
+                && payload["items"]?[0]?["messageCount"]?.GetValue<int>() == 2;
+        }, "admin inbox thread list to show two messages");
+
+        var threadsResponse = await adminClient.GetAsync("/api/mailbox/threads?folder=inbox&page=1&pageSize=10");
+        ExpectStatus(threadsResponse.StatusCode, HttpStatusCode.OK, "thread page status");
+        var threadsPayload = JsonNode.Parse(await threadsResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Thread page response could not be parsed.");
+        var threadItems = threadsPayload["items"]?.AsArray()
+            ?? throw new InvalidOperationException("Thread page did not include items.");
+        if (threadItems.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one thread item, found {threadItems.Count}.");
+        }
+        var threadSummary = threadItems[0]?.AsObject()
+            ?? throw new InvalidOperationException("Thread summary could not be parsed.");
+        if (!string.Equals(threadSummary["threadId"]?.GetValue<string>(), threadId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Thread summary did not match the expected thread id.");
+        }
+        ExpectEqual(threadSummary["messageCount"]?.GetValue<int>(), 2, "thread message count");
+
+        var threadDetailResponse = await adminClient.GetAsync($"/api/mailbox/threads/{threadId}");
+        ExpectStatus(threadDetailResponse.StatusCode, HttpStatusCode.OK, "thread detail status");
+        var threadDetail = JsonNode.Parse(await threadDetailResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Thread detail response could not be parsed.");
+        var threadMessages = threadDetail["messages"]?.AsArray()
+            ?? throw new InvalidOperationException("Thread detail did not include messages.");
+        if (threadMessages.Count != 2)
+        {
+            throw new InvalidOperationException($"Expected two messages in thread detail, found {threadMessages.Count}.");
+        }
+
+        ExpectStatus((await PostWithCsrfAsync(adminClient, $"/api/mailbox/messages/{adminMessageId}/delete", adminCsrf)).StatusCode, HttpStatusCode.NoContent, "delete status");
+        var trashResponse = await adminClient.GetAsync("/api/mailbox/messages?folder=trash");
+        ExpectStatus(trashResponse.StatusCode, HttpStatusCode.OK, "trash messages status");
+        ExpectContains(await trashResponse.Content.ReadAsStringAsync(), adminMessageId);
+
+        ExpectStatus((await PostWithCsrfAsync(adminClient, $"/api/mailbox/messages/{adminMessageId}/restore", adminCsrf)).StatusCode, HttpStatusCode.NoContent, "restore status");
+        var restoredInbox = await adminClient.GetAsync("/api/mailbox/messages?folder=inbox");
+        ExpectStatus(restoredInbox.StatusCode, HttpStatusCode.OK, "restored inbox status");
+        ExpectContains(await restoredInbox.Content.ReadAsStringAsync(), adminMessageId);
+
+        var outboundPath = Path.Combine(mailRoot, "outbound", "pending");
+        var outboundQueueFiles = Directory.GetFiles(outboundPath, "*.json", SearchOption.TopDirectoryOnly);
+        if (outboundQueueFiles.Length != 1)
+        {
+            throw new InvalidOperationException($"Expected one outbound queue file, found {outboundQueueFiles.Length}.");
+        }
+
+        var outboundQueueJson = await File.ReadAllTextAsync(outboundQueueFiles[0]);
+        ExpectContains(outboundQueueJson, "outside@example.net");
+    }
+
+    private static async Task RunInboxOutboundRelayAsync()
+    {
+        var relaySmtpPort = GetFreePort();
+        var inboxHttpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var inboxMailRoot = Path.Combine(tempRoot, "inbox-maildrop");
+        var relayMailRoot = Path.Combine(tempRoot, "relay-maildrop");
+        var inboxHostingConfigPath = Path.Combine(tempRoot, "inbox-mailboxes.json");
+        var relayHostingConfigPath = Path.Combine(tempRoot, "relay-mailboxes.json");
+        var accountStorePath = Path.Combine(tempRoot, "accounts.json");
+
+        await WriteHostingConfigAsync(
+            inboxHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, inboxMailRoot)],
+            [new TestDomain("symposia.com", "local-default", [new TestMailbox("jamal@symposia.com", "jamal")])]);
+
+        await WriteHostingConfigAsync(
+            relayHostingConfigPath,
+            [new TestStorageProvider("relay-default", FileSystemStorageType, relayMailRoot)],
+            [new TestDomain("relay-target.net", "relay-default", [new TestMailbox("outside@relay-target.net", "outside")])]);
+
+        await using var relayServer = await RunningServer.StartAsync(relaySmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = relayHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = GetFreePort().ToString()
+        });
+
+        await using var inboxServer = await RunningInboxServer.StartAsync(inboxHttpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_INBOX_HTTP_PORT"] = inboxHttpPort.ToString(),
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = inboxHostingConfigPath,
+            ["SYMPOSIA_INBOX_ACCOUNT_STORE_PATH"] = accountStorePath,
+            ["SYMPOSIA_INBOX_OUTBOUND_RELAY_HOST"] = "127.0.0.1",
+            ["SYMPOSIA_INBOX_OUTBOUND_RELAY_PORT"] = relaySmtpPort.ToString(),
+            ["SYMPOSIA_INBOX_OUTBOUND_POLL_SECONDS"] = "1"
+        });
+
+        var cookies = new CookieContainer();
+        using var client = CreateHttpClient(inboxHttpPort, cookies);
+
+        var registerResponse = await PostJsonAsync(client, "/api/auth/register", new
+        {
+            Username = "jamal",
+            Domain = "symposia.com",
+            Password = "testpass123",
+            DisplayName = "Jamal"
+        });
+        await ExpectSuccessAsync(registerResponse, "register outbound relay account");
+        var csrfToken = GetCsrfToken(await registerResponse.Content.ReadAsStringAsync());
+
+        var composeResponse = await PostJsonWithCsrfAsync(client, "/api/mailbox/compose", new
+        {
+            Subject = "Relay this externally",
+            To = "outside@relay-target.net",
+            PlainTextBody = "Outbound relay integration message."
+        }, csrfToken);
+        ExpectStatus(composeResponse.StatusCode, HttpStatusCode.OK, "outbound relay compose status");
+
+        await WaitForConditionAsync(
+            () => Task.FromResult(Directory.Exists(Path.Combine(inboxMailRoot, "outbound", "sent"))
+                && Directory.GetFiles(Path.Combine(inboxMailRoot, "outbound", "sent"), "*.json", SearchOption.TopDirectoryOnly).Length == 1),
+            "outbound relay queue to be marked sent");
+
+        await WaitForConditionAsync(
+            () => Task.FromResult(Directory.Exists(Path.Combine(relayMailRoot, "mailboxes", "outside", "messages"))
+                && Directory.GetFiles(Path.Combine(relayMailRoot, "mailboxes", "outside", "messages"), "*.eml", SearchOption.TopDirectoryOnly).Length == 1),
+            "relayed message to arrive in relay target mailbox");
+
+        var relayedMessagePath = Directory.GetFiles(Path.Combine(relayMailRoot, "mailboxes", "outside", "messages"), "*.eml", SearchOption.TopDirectoryOnly)[0];
+        var relayedMessage = await File.ReadAllTextAsync(relayedMessagePath);
+        ExpectContains(relayedMessage, "Subject: Relay this externally");
+        ExpectContains(relayedMessage, "Outbound relay integration message.");
     }
 
     private static async Task RunCommandOrderingFailuresAsync()
@@ -889,6 +1449,14 @@ internal sealed class Program
         }
     }
 
+    private static void ExpectStatus(HttpStatusCode actual, HttpStatusCode expected, string label)
+    {
+        if (actual != expected)
+        {
+            throw new InvalidOperationException($"Expected {label} to be '{expected}', got '{actual}'.");
+        }
+    }
+
     private static async Task<string> WaitForHttpStringAsync(HttpClient client, string path)
     {
         var timeout = DateTime.UtcNow.AddSeconds(10);
@@ -915,6 +1483,88 @@ internal sealed class Program
         }
 
         throw new TimeoutException($"HTTP endpoint '{path}' did not become ready in time. Last failure: {lastFailure ?? "none"}.");
+    }
+
+    private static async Task WaitForConditionAsync(Func<Task<bool>> predicate, string description)
+    {
+        var timeout = DateTime.UtcNow.AddSeconds(10);
+
+        while (DateTime.UtcNow < timeout)
+        {
+            if (await predicate())
+            {
+                return;
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException($"Timed out waiting for {description}.");
+    }
+
+    private static HttpClient CreateHttpClient(int port, CookieContainer? cookies = null)
+    {
+        var handler = new HttpClientHandler
+        {
+            CookieContainer = cookies ?? new CookieContainer(),
+            UseCookies = true,
+            AllowAutoRedirect = false
+        };
+
+        return new HttpClient(handler)
+        {
+            BaseAddress = new Uri($"http://127.0.0.1:{port}")
+        };
+    }
+
+    private static Task<HttpResponseMessage> PostJsonAsync(HttpClient client, string path, object payload)
+    {
+        var content = new StringContent(
+            JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json");
+        return client.PostAsync(path, content);
+    }
+
+    private static Task<HttpResponseMessage> PostJsonWithCsrfAsync(HttpClient client, string path, object payload, string csrfToken)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("X-Symposia-Csrf", csrfToken);
+        return client.SendAsync(request);
+    }
+
+    private static Task<HttpResponseMessage> PostWithCsrfAsync(HttpClient client, string path, string csrfToken)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, path);
+        request.Headers.Add("X-Symposia-Csrf", csrfToken);
+        return client.SendAsync(request);
+    }
+
+    private static Task<HttpResponseMessage> DeleteWithCsrfAsync(HttpClient client, string path, string csrfToken)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Delete, path);
+        request.Headers.Add("X-Symposia-Csrf", csrfToken);
+        return client.SendAsync(request);
+    }
+
+    private static string GetCsrfToken(string responseBody)
+    {
+        var payload = JsonNode.Parse(responseBody)?.AsObject()
+            ?? throw new InvalidOperationException("Expected JSON object response with csrf token.");
+        return payload["csrfToken"]?.GetValue<string>()
+            ?? throw new InvalidOperationException("Response did not include csrfToken.");
+    }
+
+    private static async Task ExpectSuccessAsync(HttpResponseMessage response, string label)
+    {
+        if (!response.IsSuccessStatusCode)
+        {
+            var responseBody = await response.Content.ReadAsStringAsync();
+            throw new InvalidOperationException($"Expected {label} to succeed, got HTTP {(int)response.StatusCode}: {responseBody}");
+        }
     }
 }
 
@@ -1200,5 +1850,105 @@ internal sealed class RunningServer : IAsyncDisposable
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+}
+
+internal sealed class RunningInboxServer : IAsyncDisposable
+{
+    private readonly Process _process;
+
+    private RunningInboxServer(Process process)
+    {
+        _process = process;
+    }
+
+    public static async Task<RunningInboxServer> StartAsync(int httpPort, IReadOnlyDictionary<string, string?> extraEnvironment)
+    {
+        var process = StartProcess(extraEnvironment);
+        var server = new RunningInboxServer(process);
+        await server.WaitForServerAsync(httpPort);
+        return server;
+    }
+
+    private static Process StartProcess(IReadOnlyDictionary<string, string?> extraEnvironment)
+    {
+        var projectRoot = GetProjectRoot();
+        var inboxDll = Path.Combine(projectRoot, "EmailProvider", "SymposiaInboxWeb", "bin", "Debug", "net9.0", "SymposiaInboxWeb.dll");
+
+        var startInfo = new ProcessStartInfo("dotnet", $"\"{inboxDll}\"")
+        {
+            WorkingDirectory = projectRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+
+        foreach (var pair in extraEnvironment)
+        {
+            startInfo.Environment[pair.Key] = pair.Value;
+        }
+
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start inbox server process.");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (!_process.HasExited)
+            {
+                _process.Kill(entireProcessTree: true);
+            }
+        }
+        finally
+        {
+            await _process.WaitForExitAsync();
+            _process.Dispose();
+        }
+    }
+
+    private async Task WaitForServerAsync(int httpPort)
+    {
+        using var client = new HttpClient
+        {
+            BaseAddress = new Uri($"http://127.0.0.1:{httpPort}")
+        };
+
+        var timeout = DateTime.UtcNow.AddSeconds(10);
+        string? lastFailure = null;
+
+        while (DateTime.UtcNow < timeout)
+        {
+            if (_process.HasExited)
+            {
+                var stdout = await _process.StandardOutput.ReadToEndAsync();
+                var stderr = await _process.StandardError.ReadToEndAsync();
+                throw new InvalidOperationException($"Inbox server exited unexpectedly.\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+            }
+
+            try
+            {
+                var response = await client.GetAsync("/api/health");
+                if (response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+
+                lastFailure = $"HTTP {(int)response.StatusCode}";
+            }
+            catch (HttpRequestException ex)
+            {
+                lastFailure = ex.Message;
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException($"Inbox server did not become ready in time. Last failure: {lastFailure ?? "none"}.");
+    }
+
+    private static string GetProjectRoot()
+    {
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
     }
 }

@@ -35,3 +35,19 @@ public sealed record MailboxAddressPointer(
     string DomainName,
     string Address,
     DateTimeOffset UpdatedAtUtc);
+
+public sealed record OutboundQueuedMessage(
+    string QueueId,
+    string MessageId,
+    string From,
+    IReadOnlyList<string> Recipients,
+    string? Cc,
+    string? Bcc,
+    string Subject,
+    string PlainTextBody,
+    string? HtmlBody,
+    string RawMessage,
+    int AttemptCount,
+    DateTimeOffset QueuedAtUtc,
+    DateTimeOffset? LastAttemptAtUtc,
+    string? LastError);

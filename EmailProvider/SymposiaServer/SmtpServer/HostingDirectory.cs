@@ -127,9 +127,7 @@ public sealed class HostingDirectory
             return Path.Combine(AppContext.BaseDirectory, "Config", "mailboxes.json");
         }
 
-        return Path.IsPathRooted(configuredPath)
-            ? configuredPath
-            : Path.GetFullPath(configuredPath, Environment.CurrentDirectory);
+        return PathResolution.ResolvePath(configuredPath);
     }
 
     private static Dictionary<string, MailStorageProviderConfiguration> BuildStorageProviders(

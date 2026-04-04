@@ -10,16 +10,16 @@ namespace SymposiaInboxWeb.Controllers;
 public sealed class ContactsController : ControllerBase
 {
     private readonly InboxAccountService _accountService;
+    private readonly RequestSecurityService _requestSecurityService;
 
-    public ContactsController(InboxAccountService accountService)
+    public ContactsController(InboxAccountService accountService, RequestSecurityService requestSecurityService)
     {
         _accountService = accountService;
+        _requestSecurityService = requestSecurityService;
     }
 
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<AddressBookContactRecord>>> ListAsync(
-        [FromQuery(Name = "q")] string? query,
-        CancellationToken cancellationToken)
+    public async Task<ActionResult<IReadOnlyList<AddressBookContactRecord>>> ListAsync([FromQuery(Name = "q")] string? query, CancellationToken cancellationToken)
     {
         var accountId = User.GetAccountId();
         if (string.IsNullOrWhiteSpace(accountId))
@@ -31,10 +31,13 @@ public sealed class ContactsController : ControllerBase
     }
 
     [HttpPost]
-    public async Task<ActionResult<AddressBookContactRecord>> UpsertAsync(
-        [FromBody] ContactUpsertRequest request,
-        CancellationToken cancellationToken)
+    public async Task<ActionResult<AddressBookContactRecord>> UpsertAsync([FromBody] ContactUpsertRequest request, CancellationToken cancellationToken)
     {
+        if (!_requestSecurityService.IsValid(Request))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "CSRF token validation failed." });
+        }
+
         var accountId = User.GetAccountId();
         if (string.IsNullOrWhiteSpace(accountId))
         {
@@ -54,6 +57,11 @@ public sealed class ContactsController : ControllerBase
     [HttpDelete("{contactId}")]
     public async Task<IActionResult> DeleteAsync(string contactId, CancellationToken cancellationToken)
     {
+        if (!_requestSecurityService.IsValid(Request))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "CSRF token validation failed." });
+        }
+
         var accountId = User.GetAccountId();
         if (string.IsNullOrWhiteSpace(accountId))
         {
