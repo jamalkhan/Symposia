@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Basemail.Protocol\Basemail.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Update="Config/mailboxes.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

@@ -5,27 +5,31 @@ namespace NativeSmtpReceiver;
 public sealed class MailboxReadService
 {
     private readonly HostingDirectory _hostingDirectory;
+    private readonly BasemailMailboxRegistryService? _mailboxRegistryService;
     private readonly IReadOnlyDictionary<string, IMailboxStorageProvider> _providers;
     private readonly ILogger<MailboxReadService> _logger;
 
     public MailboxReadService(
         HostingDirectory hostingDirectory,
         MailboxStorageProviderCatalog providerCatalog,
-        ILogger<MailboxReadService> logger)
+        ILogger<MailboxReadService> logger,
+        BasemailMailboxRegistryService? mailboxRegistryService = null)
     {
         _hostingDirectory = hostingDirectory;
+        _mailboxRegistryService = mailboxRegistryService;
         _providers = providerCatalog.Providers;
         _logger = logger;
     }
 
     public IReadOnlyList<MailboxBinding> GetMailboxBindings(string mailboxId)
     {
-        return _hostingDirectory.GetMailboxBindings(mailboxId);
+        return _mailboxRegistryService?.GetLocalBindings(mailboxId)
+               ?? _hostingDirectory.GetMailboxBindings(mailboxId);
     }
 
     public async Task<IReadOnlyList<MailboxMessageSummary>> ListMessagesAsync(string mailboxId, CancellationToken cancellationToken = default)
     {
-        var bindings = _hostingDirectory.GetMailboxBindings(mailboxId);
+        var bindings = GetMailboxBindings(mailboxId);
         if (bindings.Count == 0)
         {
             _logger.LogInformation("Mailbox {MailboxId} has no configured bindings", mailboxId);
@@ -53,7 +57,7 @@ public sealed class MailboxReadService
 
     public async Task<StoredMailboxMessage?> GetMessageAsync(string mailboxId, string messageId, CancellationToken cancellationToken = default)
     {
-        var bindings = _hostingDirectory.GetMailboxBindings(mailboxId);
+        var bindings = GetMailboxBindings(mailboxId);
         if (bindings.Count == 0)
         {
             _logger.LogInformation("Mailbox {MailboxId} has no configured bindings", mailboxId);

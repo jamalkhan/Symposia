@@ -9,6 +9,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Basemail.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 using NativeSmtpReceiver;
 
@@ -24,6 +25,13 @@ internal sealed class Program
             RunMailboxStorageRoutingAsync,
             RunMailboxReadModelAsync,
             RunDashboardHttpApiAsync,
+            RunBasemailReplicaFanoutAsync,
+            RunBasemailRemoteMailboxRoutingAsync,
+            RunBasemailRegistryPushInvalidationAsync,
+            RunBasemailRegistryDedupBackoffAsync,
+            RunBasemailRegistryTopologyFanoutAsync,
+            RunBasemailRegistryActiveSyncAsync,
+            RunBasemailRegistryDeltaSnapshotAsync,
             RunInboxAuthApiAsync,
             RunInboxContactsApiAsync,
             RunInboxMailboxWorkflowApiAsync,
@@ -406,6 +414,911 @@ internal sealed class Program
 
         ExpectEqual(jamalDomain2["messageCount"]?.GetValue<int>(), 1, "jamal@domain2.com message count");
         ExpectEqual(adminDomain2["messageCount"]?.GetValue<int>(), 1, "admin@domain2.com message count");
+    }
+
+    private static async Task RunBasemailReplicaFanoutAsync()
+    {
+        var nodeASmtpPort = GetFreePort();
+        var nodeAHttpPort = GetFreePort();
+        var nodeBSmtpPort = GetFreePort();
+        var nodeBHttpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var nodeAMailRoot = Path.Combine(tempRoot, "node-a-maildrop");
+        var nodeBMailRoot = Path.Combine(tempRoot, "node-b-maildrop");
+        var nodeAHostingConfigPath = Path.Combine(tempRoot, "node-a-mailboxes.json");
+        var nodeBHostingConfigPath = Path.Combine(tempRoot, "node-b-mailboxes.json");
+        var nodeAPeersConfigPath = Path.Combine(tempRoot, "node-a-peers.json");
+        var nodeBPeersConfigPath = Path.Combine(tempRoot, "node-b-peers.json");
+
+        await WriteHostingConfigAsync(
+            nodeAHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, nodeAMailRoot)],
+            [new TestDomain("symposia.com", "local-default", [new TestMailbox("jamal@symposia.com", "jamal")])]);
+        await WriteHostingConfigAsync(
+            nodeBHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, nodeBMailRoot)],
+            [new TestDomain("symposia.com", "local-default", [new TestMailbox("jamal@symposia.com", "jamal")])]);
+
+        var nodeAKeys = CreateSigningKeyPair();
+        var nodeBKeys = CreateSigningKeyPair();
+
+        await WriteBasemailPeersConfigAsync(nodeAPeersConfigPath,
+        [
+            new TestBasemailPeer("node-b", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeBPeersConfigPath,
+        [
+            new TestBasemailPeer("node-a", null, nodeAKeys.PublicKeyPem, "node-a")
+        ]);
+
+        await using var nodeB = await RunningServer.StartAsync(nodeBSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeBHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeBHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-b",
+            ["BASEMAIL_OPERATOR_ADDRESS"] = "0x00000000000000000000000000000000000000b0",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeBKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeBKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeBPeersConfigPath
+        });
+
+        await using var nodeA = await RunningServer.StartAsync(nodeASmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeAHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeAHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-a",
+            ["BASEMAIL_OPERATOR_ADDRESS"] = "0x00000000000000000000000000000000000000a0",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeAKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeAKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeAPeersConfigPath
+        });
+
+        using var nodeAHttpClient = CreateHttpClient(nodeAHttpPort);
+        using var nodeBHttpClient = CreateHttpClient(nodeBHttpPort);
+
+        await WaitForHttpStringAsync(nodeAHttpClient, "/network/status");
+        await WaitForHttpStringAsync(nodeBHttpClient, "/network/status");
+
+        var messageId = Guid.NewGuid().ToString("N");
+        var rawMessage = string.Join("\r\n", new[]
+        {
+            "From: Sender Example <sender@example.com>",
+            "To: jamal@symposia.com",
+            "Subject: Basemail Fanout",
+            "",
+            "Replicate this message across two Basemail nodes."
+        });
+
+        var ingestResponse = await PostJsonAsync(nodeAHttpClient, "/network/messages/ingest", new BasemailCanonicalMessagePackage(
+            "jamal",
+            messageId,
+            $"hash-{messageId}",
+            "sender@example.com",
+            ["jamal@symposia.com"],
+            [
+                new BasemailParsedHeaderDto("From", "Sender Example <sender@example.com>"),
+                new BasemailParsedHeaderDto("To", "jamal@symposia.com"),
+                new BasemailParsedHeaderDto("Subject", "Basemail Fanout")
+            ],
+            "Replicate this message across two Basemail nodes.",
+            "<p>Replicate this message across two Basemail nodes.</p>",
+            rawMessage,
+            DateTimeOffset.UtcNow));
+        ExpectStatus(ingestResponse.StatusCode, HttpStatusCode.OK, "Basemail ingest status");
+
+        var ingestPayload = JsonNode.Parse(await ingestResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Basemail ingest response could not be parsed.");
+        var selectedReplicaNodes = ingestPayload["selectedReplicaNodes"]?.AsArray()
+            ?? throw new InvalidOperationException("Basemail ingest response did not include selectedReplicaNodes.");
+        if (selectedReplicaNodes.Count != 2)
+        {
+            throw new InvalidOperationException($"Expected two selected replica nodes, found {selectedReplicaNodes.Count}.");
+        }
+
+        if (!selectedReplicaNodes.Any(node => string.Equals(node?.GetValue<string>(), "node-a", StringComparison.Ordinal)) ||
+            !selectedReplicaNodes.Any(node => string.Equals(node?.GetValue<string>(), "node-b", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("Basemail ingest response did not include both node-a and node-b.");
+        }
+
+        await WaitForConditionAsync(
+            () => Task.FromResult(Directory.Exists(Path.Combine(nodeAMailRoot, "mailboxes", "jamal", "messages"))
+                && Directory.GetFiles(Path.Combine(nodeAMailRoot, "mailboxes", "jamal", "messages"), "*.eml", SearchOption.TopDirectoryOnly).Length == 1),
+            "node A local replica");
+        await WaitForConditionAsync(
+            () => Task.FromResult(Directory.Exists(Path.Combine(nodeBMailRoot, "mailboxes", "jamal", "messages"))
+                && Directory.GetFiles(Path.Combine(nodeBMailRoot, "mailboxes", "jamal", "messages"), "*.eml", SearchOption.TopDirectoryOnly).Length == 1),
+            "node B replicated mailbox storage");
+
+        var nodeBIndexResponse = await SendSignedBasemailRequestAsync(
+            nodeBHttpClient,
+            HttpMethod.Get,
+            "/network/mailboxes/jamal/index",
+            nodeId: "node-a",
+            privateKeyPem: nodeAKeys.PrivateKeyPem);
+        ExpectStatus(nodeBIndexResponse.StatusCode, HttpStatusCode.OK, "Basemail peer index status");
+        var nodeBIndex = JsonNode.Parse(await nodeBIndexResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Basemail peer index response could not be parsed.");
+        var nodeBMessages = nodeBIndex["messages"]?.AsArray()
+            ?? throw new InvalidOperationException("Basemail peer index response did not include messages.");
+        if (nodeBMessages.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one Basemail index message on node B, found {nodeBMessages.Count}.");
+        }
+
+        if (!string.Equals(nodeBMessages[0]?["messageId"]?.GetValue<string>(), messageId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Node B index did not include the replicated message.");
+        }
+    }
+
+    private static async Task RunBasemailRemoteMailboxRoutingAsync()
+    {
+        var nodeAHttpPort = GetFreePort();
+        var nodeASmtpPort = GetFreePort();
+        var nodeBHttpPort = GetFreePort();
+        var nodeBSmtpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var nodeAMailRoot = Path.Combine(tempRoot, "node-a-routing-maildrop");
+        var nodeBMailRoot = Path.Combine(tempRoot, "node-b-routing-maildrop");
+        var nodeAHostingConfigPath = Path.Combine(tempRoot, "node-a-routing-mailboxes.json");
+        var nodeBHostingConfigPath = Path.Combine(tempRoot, "node-b-routing-mailboxes.json");
+        var routingConfigPath = Path.Combine(tempRoot, "basemail-routing.json");
+        var nodeAPeersConfigPath = Path.Combine(tempRoot, "node-a-routing-peers.json");
+        var nodeBPeersConfigPath = Path.Combine(tempRoot, "node-b-routing-peers.json");
+
+        await WriteHostingConfigAsync(
+            nodeAHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, nodeAMailRoot)],
+            []);
+        await WriteHostingConfigAsync(
+            nodeBHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, nodeBMailRoot)],
+            []);
+
+        await WriteBasemailRoutingConfigAsync(routingConfigPath,
+        [
+            new TestBasemailMailboxRoute(
+                "jamal",
+                ["jamal@symposia.com"],
+                ["node-a-routing", "node-b-routing"],
+                "local-default")
+        ]);
+
+        var nodeAKeys = CreateSigningKeyPair();
+        var nodeBKeys = CreateSigningKeyPair();
+
+        await WriteBasemailPeersConfigAsync(nodeAPeersConfigPath,
+        [
+            new TestBasemailPeer("node-b-routing", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-routing")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeBPeersConfigPath,
+        [
+            new TestBasemailPeer("node-a-routing", $"http://127.0.0.1:{nodeAHttpPort}", nodeAKeys.PublicKeyPem, "node-a-routing")
+        ]);
+
+        await using var nodeB = await RunningServer.StartAsync(nodeBSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeBHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeBHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-b-routing",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeBKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeBKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeBPeersConfigPath,
+            ["BASEMAIL_NETWORK_ROUTING_CONFIG"] = routingConfigPath
+        });
+
+        await using var nodeA = await RunningServer.StartAsync(nodeASmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeAHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeAHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-a-routing",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeAKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeAKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeAPeersConfigPath
+        });
+
+        using var nodeAHttpClient = CreateHttpClient(nodeAHttpPort);
+        using var nodeBHttpClient = CreateHttpClient(nodeBHttpPort);
+
+        await WaitForHttpStringAsync(nodeAHttpClient, "/network/status");
+        await WaitForHttpStringAsync(nodeBHttpClient, "/network/status");
+
+        var registryFetchResponse = await SendSignedBasemailRequestAsync(
+            nodeBHttpClient,
+            HttpMethod.Get,
+            "/network/registry/mailboxes/jamal",
+            nodeId: "node-a-routing",
+            privateKeyPem: nodeAKeys.PrivateKeyPem);
+        ExpectStatus(registryFetchResponse.StatusCode, HttpStatusCode.OK, "Basemail registry fetch status");
+
+        var messageId = Guid.NewGuid().ToString("N");
+        var rawMessage = string.Join("\r\n", new[]
+        {
+            "From: Network Sender <sender@example.com>",
+            "To: jamal@symposia.com",
+            "Subject: Routed Basemail Mailbox",
+            "",
+            "This mailbox only exists in the Basemail routing map."
+        });
+
+        var ingestResponse = await PostJsonAsync(nodeAHttpClient, "/network/messages/ingest", new BasemailCanonicalMessagePackage(
+            "jamal",
+            messageId,
+            $"hash-{messageId}",
+            "sender@example.com",
+            ["jamal@symposia.com"],
+            [
+                new BasemailParsedHeaderDto("From", "Network Sender <sender@example.com>"),
+                new BasemailParsedHeaderDto("To", "jamal@symposia.com"),
+                new BasemailParsedHeaderDto("Subject", "Routed Basemail Mailbox")
+            ],
+            "This mailbox only exists in the Basemail routing map.",
+            null,
+            rawMessage,
+            DateTimeOffset.UtcNow));
+        ExpectStatus(ingestResponse.StatusCode, HttpStatusCode.OK, "Basemail routed ingest status");
+
+        await WaitForConditionAsync(
+            () => Task.FromResult(Directory.Exists(Path.Combine(nodeAMailRoot, "mailboxes", "jamal", "messages"))
+                && Directory.GetFiles(Path.Combine(nodeAMailRoot, "mailboxes", "jamal", "messages"), "*.eml", SearchOption.TopDirectoryOnly).Length == 1
+                && Directory.GetFiles(Path.Combine(nodeAMailRoot, "mailboxes", "jamal", "messages"), "*.json", SearchOption.TopDirectoryOnly).Length == 1),
+            "node A routed mailbox storage");
+        await WaitForConditionAsync(
+            () => Task.FromResult(Directory.Exists(Path.Combine(nodeBMailRoot, "mailboxes", "jamal", "messages"))
+                && Directory.GetFiles(Path.Combine(nodeBMailRoot, "mailboxes", "jamal", "messages"), "*.eml", SearchOption.TopDirectoryOnly).Length == 1
+                && Directory.GetFiles(Path.Combine(nodeBMailRoot, "mailboxes", "jamal", "messages"), "*.json", SearchOption.TopDirectoryOnly).Length == 1),
+            "node B routed mailbox storage");
+
+        var nodeBIndexResponse = await SendSignedBasemailRequestAsync(
+            nodeBHttpClient,
+            HttpMethod.Get,
+            "/network/mailboxes/jamal/index",
+            nodeId: "node-a-routing",
+            privateKeyPem: nodeAKeys.PrivateKeyPem);
+        ExpectStatus(nodeBIndexResponse.StatusCode, HttpStatusCode.OK, "Basemail routed peer index status");
+        var nodeBIndex = JsonNode.Parse(await nodeBIndexResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Basemail routed peer index response could not be parsed.");
+        var nodeBMessages = nodeBIndex["messages"]?.AsArray()
+            ?? throw new InvalidOperationException("Basemail routed peer index response did not include messages.");
+        if (nodeBMessages.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one routed Basemail index message on node B, found {nodeBMessages.Count}.");
+        }
+    }
+
+    private static async Task RunBasemailRegistryActiveSyncAsync()
+    {
+        var nodeAHttpPort = GetFreePort();
+        var nodeASmtpPort = GetFreePort();
+        var nodeBHttpPort = GetFreePort();
+        var nodeBSmtpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var nodeAHostingConfigPath = Path.Combine(tempRoot, "node-a-sync-mailboxes.json");
+        var nodeBHostingConfigPath = Path.Combine(tempRoot, "node-b-sync-mailboxes.json");
+        var routingConfigPath = Path.Combine(tempRoot, "basemail-sync-routing.json");
+        var nodeAPeersConfigPath = Path.Combine(tempRoot, "node-a-sync-peers.json");
+        var nodeBPeersConfigPath = Path.Combine(tempRoot, "node-b-sync-peers.json");
+
+        await WriteHostingConfigAsync(
+            nodeAHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-a-sync-maildrop"))],
+            []);
+        await WriteHostingConfigAsync(
+            nodeBHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-b-sync-maildrop"))],
+            []);
+
+        await WriteBasemailRoutingConfigAsync(routingConfigPath,
+        [
+            new TestBasemailMailboxRoute(
+                "jamal",
+                ["jamal@symposia.com"],
+                ["node-a-sync", "node-b-sync"],
+                "local-default",
+                7)
+        ]);
+
+        var nodeAKeys = CreateSigningKeyPair();
+        var nodeBKeys = CreateSigningKeyPair();
+
+        await WriteBasemailPeersConfigAsync(nodeAPeersConfigPath,
+        [
+            new TestBasemailPeer("node-b-sync", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-sync")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeBPeersConfigPath,
+        [
+            new TestBasemailPeer("node-a-sync", $"http://127.0.0.1:{nodeAHttpPort}", nodeAKeys.PublicKeyPem, "node-a-sync")
+        ]);
+
+        await using var nodeB = await RunningServer.StartAsync(nodeBSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeBHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeBHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-b-sync",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeBKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeBKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeBPeersConfigPath,
+            ["BASEMAIL_NETWORK_ROUTING_CONFIG"] = routingConfigPath,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "1"
+        });
+
+        await using var nodeA = await RunningServer.StartAsync(nodeASmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeAHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeAHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-a-sync",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeAKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeAKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeAPeersConfigPath,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "1"
+        });
+
+        using var nodeAHttpClient = CreateHttpClient(nodeAHttpPort);
+        using var nodeBHttpClient = CreateHttpClient(nodeBHttpPort);
+
+        await WaitForHttpStringAsync(nodeAHttpClient, "/network/status");
+        await WaitForHttpStringAsync(nodeBHttpClient, "/network/status");
+
+        await WaitForConditionAsync(async () =>
+        {
+            var response = await SendSignedBasemailRequestAsync(
+                nodeAHttpClient,
+                HttpMethod.Get,
+                "/network/registry/mailboxes",
+                nodeId: "node-b-sync",
+                privateKeyPem: nodeBKeys.PrivateKeyPem);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsArray();
+            return payload?.Any(node =>
+                string.Equals(node?["mailboxId"]?.GetValue<string>(), "jamal", StringComparison.Ordinal) &&
+                node?["version"]?.GetValue<long>() == 7) == true;
+        }, "active Basemail registry sync to populate node A");
+
+        var snapshotResponse = await SendSignedBasemailRequestAsync(
+            nodeAHttpClient,
+            HttpMethod.Get,
+            "/network/registry/snapshot",
+            nodeId: "node-b-sync",
+            privateKeyPem: nodeBKeys.PrivateKeyPem);
+        ExpectStatus(snapshotResponse.StatusCode, HttpStatusCode.OK, "Basemail registry snapshot status");
+        var snapshot = JsonNode.Parse(await snapshotResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Basemail registry snapshot response could not be parsed.");
+        ExpectEqual(snapshot["version"]?.GetValue<long>(), 7, "registry snapshot version");
+    }
+
+    private static async Task RunBasemailRegistryPushInvalidationAsync()
+    {
+        var nodeAHttpPort = GetFreePort();
+        var nodeASmtpPort = GetFreePort();
+        var nodeBHttpPort = GetFreePort();
+        var nodeBSmtpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var nodeAHostingConfigPath = Path.Combine(tempRoot, "node-a-push-mailboxes.json");
+        var nodeBHostingConfigPath = Path.Combine(tempRoot, "node-b-push-mailboxes.json");
+        var routingConfigPath = Path.Combine(tempRoot, "basemail-push-routing.json");
+        var nodeAPeersConfigPath = Path.Combine(tempRoot, "node-a-push-peers.json");
+        var nodeBPeersConfigPath = Path.Combine(tempRoot, "node-b-push-peers.json");
+
+        await WriteHostingConfigAsync(
+            nodeAHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-a-push-maildrop"))],
+            []);
+        await WriteHostingConfigAsync(
+            nodeBHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-b-push-maildrop"))],
+            []);
+
+        await WriteBasemailRoutingConfigAsync(routingConfigPath,
+        [
+            new TestBasemailMailboxRoute(
+                "jamal",
+                ["jamal@symposia.com"],
+                ["node-a-push", "node-b-push"],
+                "local-default",
+                11)
+        ]);
+
+        var nodeAKeys = CreateSigningKeyPair();
+        var nodeBKeys = CreateSigningKeyPair();
+
+        await WriteBasemailPeersConfigAsync(nodeAPeersConfigPath,
+        [
+            new TestBasemailPeer("node-b-push", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-push")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeBPeersConfigPath,
+        [
+            new TestBasemailPeer("node-a-push", $"http://127.0.0.1:{nodeAHttpPort}", nodeAKeys.PublicKeyPem, "node-a-push")
+        ]);
+
+        await using var nodeA = await RunningServer.StartAsync(nodeASmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeAHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeAHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-a-push",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeAKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeAKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeAPeersConfigPath,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120"
+        });
+
+        using var nodeAHttpClient = CreateHttpClient(nodeAHttpPort);
+        await WaitForHttpStringAsync(nodeAHttpClient, "/network/status");
+
+        await using var nodeB = await RunningServer.StartAsync(nodeBSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeBHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeBHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-b-push",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeBKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeBKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeBPeersConfigPath,
+            ["BASEMAIL_NETWORK_ROUTING_CONFIG"] = routingConfigPath,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120"
+        });
+
+        await WaitForConditionAsync(async () =>
+        {
+            var response = await SendSignedBasemailRequestAsync(
+                nodeAHttpClient,
+                HttpMethod.Get,
+                "/network/registry/version",
+                nodeId: "node-b-push",
+                privateKeyPem: nodeBKeys.PrivateKeyPem);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsObject();
+            return payload?["version"]?.GetValue<long>() == 11;
+        }, "push invalidation to refresh node A registry without waiting for poll");
+    }
+
+    private static async Task RunBasemailRegistryDedupBackoffAsync()
+    {
+        var nodeAHttpPort = GetFreePort();
+        var nodeASmtpPort = GetFreePort();
+        var nodeBHttpPort = GetFreePort();
+        var nodeBSmtpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var nodeAHostingConfigPath = Path.Combine(tempRoot, "node-a-dedup-mailboxes.json");
+        var nodeBHostingConfigPath = Path.Combine(tempRoot, "node-b-dedup-mailboxes.json");
+        var routingConfigPath = Path.Combine(tempRoot, "basemail-dedup-routing.json");
+        var nodeAPeersConfigPath = Path.Combine(tempRoot, "node-a-dedup-peers.json");
+        var nodeBPeersConfigPath = Path.Combine(tempRoot, "node-b-dedup-peers.json");
+
+        await WriteHostingConfigAsync(
+            nodeAHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-a-dedup-maildrop"))],
+            []);
+        await WriteHostingConfigAsync(
+            nodeBHostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-b-dedup-maildrop"))],
+            []);
+
+        await WriteBasemailRoutingConfigAsync(routingConfigPath,
+        [
+            new TestBasemailMailboxRoute(
+                "jamal",
+                ["jamal@symposia.com"],
+                ["node-a-dedup", "node-b-dedup"],
+                "local-default",
+                15)
+        ]);
+
+        var nodeAKeys = CreateSigningKeyPair();
+        var nodeBKeys = CreateSigningKeyPair();
+
+        await WriteBasemailPeersConfigAsync(nodeAPeersConfigPath,
+        [
+            new TestBasemailPeer("node-b-dedup", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-dedup")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeBPeersConfigPath,
+        [
+            new TestBasemailPeer("node-a-dedup", $"http://127.0.0.1:{nodeAHttpPort}", nodeAKeys.PublicKeyPem, "node-a-dedup")
+        ]);
+
+        await using var nodeA = await RunningServer.StartAsync(nodeASmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeAHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeAHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-a-dedup",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeAKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeAKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeAPeersConfigPath,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120",
+            ["BASEMAIL_REGISTRY_INVALIDATION_DEDUP_SECONDS"] = "120"
+        });
+
+        await using var nodeB = await RunningServer.StartAsync(nodeBSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = nodeBHostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeBHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-b-dedup",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeBKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeBKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeBPeersConfigPath,
+            ["BASEMAIL_NETWORK_ROUTING_CONFIG"] = routingConfigPath,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120",
+            ["BASEMAIL_REGISTRY_INVALIDATION_DEDUP_SECONDS"] = "120"
+        });
+
+        using var nodeAHttpClient = CreateHttpClient(nodeAHttpPort);
+        await WaitForHttpStringAsync(nodeAHttpClient, "/network/status");
+
+        await WaitForConditionAsync(async () =>
+        {
+            var response = await SendSignedBasemailRequestAsync(
+                nodeAHttpClient,
+                HttpMethod.Get,
+                "/network/registry/stats",
+                nodeId: "node-b-dedup",
+                privateKeyPem: nodeBKeys.PrivateKeyPem);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsObject();
+            return payload?["registryVersion"]?.GetValue<long>() == 15;
+        }, "initial invalidation-driven sync for dedup test");
+
+        var beforeStatsResponse = await SendSignedBasemailRequestAsync(
+            nodeAHttpClient,
+            HttpMethod.Get,
+            "/network/registry/stats",
+            nodeId: "node-b-dedup",
+            privateKeyPem: nodeBKeys.PrivateKeyPem);
+        ExpectStatus(beforeStatsResponse.StatusCode, HttpStatusCode.OK, "registry stats before duplicate invalidation");
+        var beforeStats = JsonNode.Parse(await beforeStatsResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Registry stats response before duplicate invalidation could not be parsed.");
+        var beforeFetchCount = beforeStats["deltaSyncFetchCount"]?.GetValue<long>()
+            ?? throw new InvalidOperationException("Registry stats did not include deltaSyncFetchCount.");
+        var beforeDedupCount = beforeStats["dedupedInvalidations"]?.GetValue<long>()
+            ?? throw new InvalidOperationException("Registry stats did not include dedupedInvalidations.");
+
+        var duplicateInvalidation = new BasemailMailboxRegistryInvalidation(
+            "node-b-dedup",
+            "node-b-dedup",
+            15,
+            0,
+            3,
+            DateTimeOffset.UtcNow);
+        var duplicateOne = await SendSignedBasemailRequestAsync(
+            nodeAHttpClient,
+            HttpMethod.Post,
+            "/network/registry/invalidate",
+            nodeId: "node-b-dedup",
+            privateKeyPem: nodeBKeys.PrivateKeyPem,
+            payload: duplicateInvalidation);
+        ExpectStatus(duplicateOne.StatusCode, HttpStatusCode.Accepted, "duplicate invalidation 1 status");
+
+        var duplicateTwo = await SendSignedBasemailRequestAsync(
+            nodeAHttpClient,
+            HttpMethod.Post,
+            "/network/registry/invalidate",
+            nodeId: "node-b-dedup",
+            privateKeyPem: nodeBKeys.PrivateKeyPem,
+            payload: duplicateInvalidation);
+        ExpectStatus(duplicateTwo.StatusCode, HttpStatusCode.Accepted, "duplicate invalidation 2 status");
+
+        var afterStatsResponse = await SendSignedBasemailRequestAsync(
+            nodeAHttpClient,
+            HttpMethod.Get,
+            "/network/registry/stats",
+            nodeId: "node-b-dedup",
+            privateKeyPem: nodeBKeys.PrivateKeyPem);
+        ExpectStatus(afterStatsResponse.StatusCode, HttpStatusCode.OK, "registry stats after duplicate invalidation");
+        var afterStats = JsonNode.Parse(await afterStatsResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Registry stats response after duplicate invalidation could not be parsed.");
+        var afterFetchCount = afterStats["deltaSyncFetchCount"]?.GetValue<long>()
+            ?? throw new InvalidOperationException("Registry stats after duplicate invalidation did not include deltaSyncFetchCount.");
+        var afterDedupCount = afterStats["dedupedInvalidations"]?.GetValue<long>()
+            ?? throw new InvalidOperationException("Registry stats after duplicate invalidation did not include dedupedInvalidations.");
+
+        ExpectEqual(afterFetchCount, beforeFetchCount, "duplicate invalidation delta fetch count");
+        if (afterDedupCount < beforeDedupCount + 2)
+        {
+            throw new InvalidOperationException(
+                $"Expected deduped invalidations to increase by at least 2, but went from {beforeDedupCount} to {afterDedupCount}.");
+        }
+    }
+
+    private static async Task RunBasemailRegistryTopologyFanoutAsync()
+    {
+        var nodeAHttpPort = GetFreePort();
+        var nodeASmtpPort = GetFreePort();
+        var nodeBHttpPort = GetFreePort();
+        var nodeBSmtpPort = GetFreePort();
+        var nodeCHttpPort = GetFreePort();
+        var nodeCSmtpPort = GetFreePort();
+        var nodeDHttpPort = GetFreePort();
+        var nodeDSmtpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var routingConfigPath = Path.Combine(tempRoot, "basemail-topology-routing.json");
+
+        await WriteHostingConfigAsync(Path.Combine(tempRoot, "node-a-topology-mailboxes.json"),
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-a-topology-maildrop"))], []);
+        await WriteHostingConfigAsync(Path.Combine(tempRoot, "node-b-topology-mailboxes.json"),
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-b-topology-maildrop"))], []);
+        await WriteHostingConfigAsync(Path.Combine(tempRoot, "node-c-topology-mailboxes.json"),
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-c-topology-maildrop"))], []);
+        await WriteHostingConfigAsync(Path.Combine(tempRoot, "node-d-topology-mailboxes.json"),
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-d-topology-maildrop"))], []);
+
+        await WriteBasemailRoutingConfigAsync(routingConfigPath,
+        [
+            new TestBasemailMailboxRoute(
+                "jamal",
+                ["jamal@symposia.com"],
+                ["node-a-topology", "node-b-topology", "node-c-topology", "node-d-topology"],
+                "local-default",
+                21)
+        ]);
+
+        var nodeAKeys = CreateSigningKeyPair();
+        var nodeBKeys = CreateSigningKeyPair();
+        var nodeCKeys = CreateSigningKeyPair();
+        var nodeDKeys = CreateSigningKeyPair();
+
+        var nodeAConfig = Path.Combine(tempRoot, "node-a-topology-peers.json");
+        var nodeBConfig = Path.Combine(tempRoot, "node-b-topology-peers.json");
+        var nodeCConfig = Path.Combine(tempRoot, "node-c-topology-peers.json");
+        var nodeDConfig = Path.Combine(tempRoot, "node-d-topology-peers.json");
+
+        await WriteBasemailPeersConfigAsync(nodeAConfig,
+        [
+            new TestBasemailPeer("node-b-topology", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-topology"),
+            new TestBasemailPeer("node-c-topology", $"http://127.0.0.1:{nodeCHttpPort}", nodeCKeys.PublicKeyPem, "node-c-topology"),
+            new TestBasemailPeer("node-d-topology", $"http://127.0.0.1:{nodeDHttpPort}", nodeDKeys.PublicKeyPem, "node-d-topology")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeBConfig,
+        [
+            new TestBasemailPeer("node-a-topology", $"http://127.0.0.1:{nodeAHttpPort}", nodeAKeys.PublicKeyPem, "node-a-topology"),
+            new TestBasemailPeer("node-c-topology", $"http://127.0.0.1:{nodeCHttpPort}", nodeCKeys.PublicKeyPem, "node-c-topology"),
+            new TestBasemailPeer("node-d-topology", $"http://127.0.0.1:{nodeDHttpPort}", nodeDKeys.PublicKeyPem, "node-d-topology")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeCConfig,
+        [
+            new TestBasemailPeer("node-a-topology", $"http://127.0.0.1:{nodeAHttpPort}", nodeAKeys.PublicKeyPem, "node-a-topology"),
+            new TestBasemailPeer("node-b-topology", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-topology"),
+            new TestBasemailPeer("node-d-topology", $"http://127.0.0.1:{nodeDHttpPort}", nodeDKeys.PublicKeyPem, "node-d-topology")
+        ]);
+        await WriteBasemailPeersConfigAsync(nodeDConfig,
+        [
+            new TestBasemailPeer("node-a-topology", $"http://127.0.0.1:{nodeAHttpPort}", nodeAKeys.PublicKeyPem, "node-a-topology"),
+            new TestBasemailPeer("node-b-topology", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-topology"),
+            new TestBasemailPeer("node-c-topology", $"http://127.0.0.1:{nodeCHttpPort}", nodeCKeys.PublicKeyPem, "node-c-topology")
+        ]);
+
+        await using var nodeB = await RunningServer.StartAsync(nodeBSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = Path.Combine(tempRoot, "node-b-topology-mailboxes.json"),
+            ["SYMPOSIA_HTTP_PORT"] = nodeBHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-b-topology",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeBKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeBKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeBConfig,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120",
+            ["BASEMAIL_REGISTRY_INVALIDATION_FANOUT"] = "1",
+            ["BASEMAIL_REGISTRY_INVALIDATION_MAX_HOPS"] = "3"
+        });
+        await using var nodeC = await RunningServer.StartAsync(nodeCSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = Path.Combine(tempRoot, "node-c-topology-mailboxes.json"),
+            ["SYMPOSIA_HTTP_PORT"] = nodeCHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-c-topology",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeCKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeCKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeCConfig,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120",
+            ["BASEMAIL_REGISTRY_INVALIDATION_FANOUT"] = "1",
+            ["BASEMAIL_REGISTRY_INVALIDATION_MAX_HOPS"] = "3"
+        });
+        await using var nodeD = await RunningServer.StartAsync(nodeDSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = Path.Combine(tempRoot, "node-d-topology-mailboxes.json"),
+            ["SYMPOSIA_HTTP_PORT"] = nodeDHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-d-topology",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeDKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeDKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeDConfig,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120",
+            ["BASEMAIL_REGISTRY_INVALIDATION_FANOUT"] = "1",
+            ["BASEMAIL_REGISTRY_INVALIDATION_MAX_HOPS"] = "3"
+        });
+
+        using var nodeBHttpClient = CreateHttpClient(nodeBHttpPort);
+        using var nodeCHttpClient = CreateHttpClient(nodeCHttpPort);
+        using var nodeDHttpClient = CreateHttpClient(nodeDHttpPort);
+        await WaitForHttpStringAsync(nodeBHttpClient, "/network/status");
+        await WaitForHttpStringAsync(nodeCHttpClient, "/network/status");
+        await WaitForHttpStringAsync(nodeDHttpClient, "/network/status");
+
+        await using var nodeA = await RunningServer.StartAsync(nodeASmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = Path.Combine(tempRoot, "node-a-topology-mailboxes.json"),
+            ["SYMPOSIA_HTTP_PORT"] = nodeAHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-a-topology",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeAKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeAKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = nodeAConfig,
+            ["BASEMAIL_NETWORK_ROUTING_CONFIG"] = routingConfigPath,
+            ["BASEMAIL_REGISTRY_SYNC_SECONDS"] = "120",
+            ["BASEMAIL_REGISTRY_INVALIDATION_FANOUT"] = "1",
+            ["BASEMAIL_REGISTRY_INVALIDATION_MAX_HOPS"] = "3"
+        });
+
+        using var nodeAHttpClient = CreateHttpClient(nodeAHttpPort);
+
+        await WaitForHttpStringAsync(nodeAHttpClient, "/network/status");
+
+        await WaitForConditionAsync(async () =>
+        {
+            var response = await SendSignedBasemailRequestAsync(
+                nodeDHttpClient,
+                HttpMethod.Get,
+                "/network/registry/version",
+                nodeId: "node-a-topology",
+                privateKeyPem: nodeAKeys.PrivateKeyPem);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsObject();
+            return payload?["version"]?.GetValue<long>() == 21;
+        }, "topology fanout propagation to reach node D");
+
+        var nodeAStatsResponse = await SendSignedBasemailRequestAsync(
+            nodeAHttpClient,
+            HttpMethod.Get,
+            "/network/registry/stats",
+            nodeId: "node-b-topology",
+            privateKeyPem: nodeBKeys.PrivateKeyPem);
+        ExpectStatus(nodeAStatsResponse.StatusCode, HttpStatusCode.OK, "node A topology stats status");
+        var nodeAStats = JsonNode.Parse(await nodeAStatsResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Node A topology stats could not be parsed.");
+        var nodeANotificationsSent = nodeAStats["notificationsSent"]?.GetValue<long>()
+            ?? throw new InvalidOperationException("Node A topology stats did not include notificationsSent.");
+        if (nodeANotificationsSent > 1)
+        {
+            throw new InvalidOperationException($"Expected node A limited fanout notifications to be at most 1, got '{nodeANotificationsSent}'.");
+        }
+    }
+
+    private static async Task RunBasemailRegistryDeltaSnapshotAsync()
+    {
+        var nodeHttpPort = GetFreePort();
+        var nodeSmtpPort = GetFreePort();
+        var tempRoot = CreateTempDirectory();
+        var hostingConfigPath = Path.Combine(tempRoot, "node-delta-mailboxes.json");
+        var routingConfigPath = Path.Combine(tempRoot, "basemail-delta-routing.json");
+        var peersConfigPath = Path.Combine(tempRoot, "node-delta-peers.json");
+
+        await WriteHostingConfigAsync(
+            hostingConfigPath,
+            [new TestStorageProvider("local-default", FileSystemStorageType, Path.Combine(tempRoot, "node-delta-maildrop"))],
+            []);
+        await WriteBasemailRoutingConfigAsync(routingConfigPath,
+        [
+            new TestBasemailMailboxRoute(
+                "jamal",
+                ["jamal@symposia.com"],
+                ["node-delta"],
+                "local-default",
+                5),
+            new TestBasemailMailboxRoute(
+                "admin",
+                ["admin@symposia.com"],
+                ["node-delta"],
+                "local-default",
+                9)
+        ]);
+
+        var nodeKeys = CreateSigningKeyPair();
+        await WriteBasemailPeersConfigAsync(peersConfigPath,
+        [
+            new TestBasemailPeer("node-delta", $"http://127.0.0.1:{nodeHttpPort}", nodeKeys.PublicKeyPem, "node-delta")
+        ]);
+
+        await using var node = await RunningServer.StartAsync(nodeSmtpPort, new Dictionary<string, string?>
+        {
+            ["SYMPOSIA_SMTP_SERVER_NAME"] = "localhost",
+            ["SYMPOSIA_SMTP_HOSTING_CONFIG"] = hostingConfigPath,
+            ["SYMPOSIA_HTTP_PORT"] = nodeHttpPort.ToString(),
+            ["BASEMAIL_NETWORK_ENABLED"] = "true",
+            ["BASEMAIL_NETWORK_REQUIRE_SIGNATURES"] = "true",
+            ["BASEMAIL_NODE_ID"] = "node-delta",
+            ["BASEMAIL_NODE_PUBLIC_KEY_PEM"] = nodeKeys.PublicKeyPem,
+            ["BASEMAIL_NODE_PRIVATE_KEY_PEM"] = nodeKeys.PrivateKeyPem,
+            ["BASEMAIL_NETWORK_PEERS_CONFIG"] = peersConfigPath,
+            ["BASEMAIL_NETWORK_ROUTING_CONFIG"] = routingConfigPath
+        });
+
+        using var httpClient = CreateHttpClient(nodeHttpPort);
+        await WaitForHttpStringAsync(httpClient, "/network/status");
+
+        var versionResponse = await SendSignedBasemailRequestAsync(
+            httpClient,
+            HttpMethod.Get,
+            "/network/registry/version",
+            nodeId: "node-delta",
+            privateKeyPem: nodeKeys.PrivateKeyPem);
+        ExpectStatus(versionResponse.StatusCode, HttpStatusCode.OK, "Basemail registry version status");
+        var versionPayload = JsonNode.Parse(await versionResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Basemail registry version response could not be parsed.");
+        ExpectEqual(versionPayload["version"]?.GetValue<long>(), 9, "registry version");
+
+        var deltaResponse = await SendSignedBasemailRequestAsync(
+            httpClient,
+            HttpMethod.Get,
+            "/network/registry/snapshot?sinceVersion=5",
+            nodeId: "node-delta",
+            privateKeyPem: nodeKeys.PrivateKeyPem);
+        ExpectStatus(deltaResponse.StatusCode, HttpStatusCode.OK, "Basemail delta snapshot status");
+        var deltaPayload = JsonNode.Parse(await deltaResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Basemail delta snapshot response could not be parsed.");
+        ExpectEqual(deltaPayload["version"]?.GetValue<long>(), 9, "delta snapshot version");
+        ExpectEqual(deltaPayload["baseVersion"]?.GetValue<long>(), 5, "delta snapshot base version");
+        ExpectEqual(deltaPayload["isDelta"]?.GetValue<bool>(), true, "delta snapshot mode");
+        var deltaRoutes = deltaPayload["routes"]?.AsArray()
+            ?? throw new InvalidOperationException("Basemail delta snapshot response did not include routes.");
+        if (deltaRoutes.Count != 1)
+        {
+            throw new InvalidOperationException($"Expected one delta route, found {deltaRoutes.Count}.");
+        }
+
+        if (!string.Equals(deltaRoutes[0]?["mailboxId"]?.GetValue<string>(), "admin", StringComparison.Ordinal) ||
+            deltaRoutes[0]?["version"]?.GetValue<long>() != 9)
+        {
+            throw new InvalidOperationException("Basemail delta snapshot did not return only the newer admin route.");
+        }
     }
 
     private static async Task RunInboxAuthApiAsync()
@@ -1348,6 +2261,35 @@ internal sealed class Program
         }));
     }
 
+    private static async Task WriteBasemailPeersConfigAsync(string path, IReadOnlyList<TestBasemailPeer> peers)
+    {
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(peers, new JsonSerializerOptions
+        {
+            WriteIndented = true
+        }));
+    }
+
+    private static async Task WriteBasemailRoutingConfigAsync(string path, IReadOnlyList<TestBasemailMailboxRoute> mailboxes)
+    {
+        var config = new
+        {
+            Mailboxes = mailboxes
+        };
+
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(config, new JsonSerializerOptions
+        {
+            WriteIndented = true
+        }));
+    }
+
+    private static TestSigningKeyPair CreateSigningKeyPair()
+    {
+        using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        return new TestSigningKeyPair(
+            ecdsa.ExportSubjectPublicKeyInfoPem(),
+            ecdsa.ExportPkcs8PrivateKeyPem());
+    }
+
     private static void ExpectSingle(IReadOnlyList<string> actual, string expected)
     {
         if (actual.Count != 1 || !string.Equals(actual[0], expected, StringComparison.Ordinal))
@@ -1517,6 +2459,48 @@ internal sealed class Program
         };
     }
 
+    private static Task<HttpResponseMessage> SendSignedBasemailRequestAsync(
+        HttpClient client,
+        HttpMethod method,
+        string path,
+        string nodeId,
+        string privateKeyPem,
+        object? payload = null)
+    {
+        byte[] body = payload is null
+            ? Array.Empty<byte>()
+            : JsonSerializer.SerializeToUtf8Bytes(payload, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
+
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        var nonce = Guid.NewGuid().ToString("N");
+        var canonicalBytes = BasemailCanonicalRequest.GetCanonicalBytes(
+            method.Method,
+            path,
+            timestamp,
+            nonce,
+            body);
+        var signature = BasemailSignature.Sign(canonicalBytes, privateKeyPem);
+
+        var request = new HttpRequestMessage(method, path);
+        request.Headers.Add(BasemailProtocolConstants.HeaderProtocolVersion, BasemailProtocolConstants.ProtocolVersion);
+        request.Headers.Add(BasemailProtocolConstants.HeaderNode, nodeId);
+        request.Headers.Add(BasemailProtocolConstants.HeaderTimestamp, timestamp);
+        request.Headers.Add(BasemailProtocolConstants.HeaderNonce, nonce);
+        request.Headers.Add(BasemailProtocolConstants.HeaderSignature, signature);
+        request.Headers.Add(BasemailProtocolConstants.HeaderKeyId, nodeId);
+
+        if (payload is not null)
+        {
+            request.Content = new ByteArrayContent(body);
+            request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+        }
+
+        return client.SendAsync(request);
+    }
+
     private static Task<HttpResponseMessage> PostJsonAsync(HttpClient client, string path, object payload)
     {
         var content = new StringContent(
@@ -1616,6 +2600,23 @@ internal sealed record TestMailbox(string Address, string MailboxId, string? Sto
         };
     }
 }
+
+internal sealed record TestBasemailPeer(
+    string NodeId,
+    string? BaseUrl,
+    string PublicKeyPem,
+    string? KeyId);
+
+internal sealed record TestBasemailMailboxRoute(
+    string MailboxId,
+    IReadOnlyList<string> Addresses,
+    IReadOnlyList<string> ReplicaNodes,
+    string? StorageProviderName,
+    long? Version = null);
+
+internal sealed record TestSigningKeyPair(
+    string PublicKeyPem,
+    string PrivateKeyPem);
 
 internal sealed class SmtpTestClient : IDisposable
 {

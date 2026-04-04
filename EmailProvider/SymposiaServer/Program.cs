@@ -25,6 +25,7 @@ internal static class Program
 
         var smtpOptions = SmtpServerOptions.LoadFromEnvironment();
         var webOptions = DashboardWebOptions.LoadFromEnvironment();
+        var basemailOptions = BasemailNodeOptions.LoadFromEnvironment();
 
         builder.WebHost.ConfigureKestrel(options =>
         {
@@ -41,6 +42,7 @@ internal static class Program
 
         builder.Services.AddSingleton(smtpOptions);
         builder.Services.AddSingleton(webOptions);
+        builder.Services.AddSingleton(basemailOptions);
         builder.Services.AddSingleton(sp =>
         {
             var logger = sp.GetRequiredService<ILogger<HostingDirectory>>();
@@ -51,14 +53,19 @@ internal static class Program
                 directory.StorageProviderCount);
             return directory;
         });
+        builder.Services.AddSingleton<BasemailMailboxRegistryService>();
 
         builder.Services.AddHttpLogging(static options =>
         {
             options.LoggingFields = HttpLoggingFields.RequestPath | HttpLoggingFields.ResponseStatusCode;
         });
+        builder.Services.AddHttpClient(nameof(BasemailReplicaFanoutService));
+        builder.Services.AddHttpClient(nameof(BasemailMailboxRegistryService));
         builder.Services.AddControllers();
 
         builder.Services.AddSingleton<SmtpConnectionGuard>();
+        builder.Services.AddSingleton<BasemailRequestSignatureValidator>();
+        builder.Services.AddSingleton<BasemailReplicaFanoutService>();
         builder.Services.AddSingleton<MailboxStorageProviderCatalog>();
         builder.Services.AddSingleton<MailboxDeliveryService>();
         builder.Services.AddSingleton<MailboxReadService>();
@@ -82,15 +89,18 @@ internal static class Program
         builder.Services.AddTransient<SmtpSessionHandler>();
         builder.Services.AddHostedService<SmtpServerHostedService>();
         builder.Services.AddHostedService<MailboxRetryWorker>();
+        builder.Services.AddHostedService<BasemailMailboxRegistrySyncWorker>();
 
         var app = builder.Build();
         var webRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot");
         var webRootProvider = new PhysicalFileProvider(webRootPath);
 
         _ = app.Services.GetRequiredService<HostingDirectory>();
+        var mailboxRegistry = app.Services.GetRequiredService<BasemailMailboxRegistryService>();
         _ = app.Services.GetRequiredService<SmtpCommandRegistry>();
 
         app.UseHttpLogging();
+        app.UseMiddleware<BasemailNetworkAuthMiddleware>();
         app.UseDefaultFiles(new DefaultFilesOptions
         {
             FileProvider = webRootProvider
@@ -110,6 +120,19 @@ internal static class Program
         else
         {
             app.Logger.LogInformation("Dashboard HTTPS endpoint is disabled because no TLS certificate is configured");
+        }
+
+        if (basemailOptions.NetworkEnabled)
+        {
+            app.Logger.LogInformation(
+                "Basemail node endpoints enabled for node {NodeId} with {PeerCount} configured peers and {RouteCount} seeded mailbox routes",
+                basemailOptions.NodeId,
+                basemailOptions.Peers.Count,
+                mailboxRegistry.RouteCount);
+        }
+        else
+        {
+            app.Logger.LogInformation("Basemail node endpoints are disabled");
         }
 
         await app.RunAsync();
