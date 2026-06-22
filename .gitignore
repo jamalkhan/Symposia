@@ -54,6 +54,9 @@ Generated\ Files/
 [Bb]uild[Ll]og.*
 *.trx
 
+# Symposia...
+accounts.json
+
 # NUnit
 *.VisualState.xml
 TestResult.xml

@@ -1101,9 +1101,9 @@ internal sealed class Program
 
         await WriteBasemailPeersConfigAsync(nodeAConfig,
         [
-            new TestBasemailPeer("node-b-topology", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-topology"),
-            new TestBasemailPeer("node-c-topology", $"http://127.0.0.1:{nodeCHttpPort}", nodeCKeys.PublicKeyPem, "node-c-topology"),
-            new TestBasemailPeer("node-d-topology", $"http://127.0.0.1:{nodeDHttpPort}", nodeDKeys.PublicKeyPem, "node-d-topology")
+            new TestBasemailPeer("node-b-topology", $"http://127.0.0.1:{nodeBHttpPort}", nodeBKeys.PublicKeyPem, "node-b-topology", 120, 0.55, 0.15, 0.25, "us-east"),
+            new TestBasemailPeer("node-c-topology", $"http://127.0.0.1:{nodeCHttpPort}", nodeCKeys.PublicKeyPem, "node-c-topology", 15, 0.98, 0.90, 0.92, "us-west"),
+            new TestBasemailPeer("node-d-topology", $"http://127.0.0.1:{nodeDHttpPort}", nodeDKeys.PublicKeyPem, "node-d-topology", 220, 0.40, 0.10, 0.10, "eu-central")
         ]);
         await WriteBasemailPeersConfigAsync(nodeBConfig,
         [
@@ -1197,6 +1197,34 @@ internal sealed class Program
         using var nodeAHttpClient = CreateHttpClient(nodeAHttpPort);
 
         await WaitForHttpStringAsync(nodeAHttpClient, "/network/status");
+
+        await WaitForConditionAsync(async () =>
+        {
+            var response = await SendSignedBasemailRequestAsync(
+                nodeCHttpClient,
+                HttpMethod.Get,
+                "/network/registry/version",
+                nodeId: "node-a-topology",
+                privateKeyPem: nodeAKeys.PrivateKeyPem);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var payload = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsObject();
+            return payload?["version"]?.GetValue<long>() == 21;
+        }, "topology fanout direct propagation to highest-scored node C");
+
+        var nodeBVersionResponse = await SendSignedBasemailRequestAsync(
+            nodeBHttpClient,
+            HttpMethod.Get,
+            "/network/registry/version",
+            nodeId: "node-a-topology",
+            privateKeyPem: nodeAKeys.PrivateKeyPem);
+        ExpectStatus(nodeBVersionResponse.StatusCode, HttpStatusCode.OK, "node B topology version status");
+        var nodeBVersionPayload = JsonNode.Parse(await nodeBVersionResponse.Content.ReadAsStringAsync())?.AsObject()
+            ?? throw new InvalidOperationException("Node B topology version response could not be parsed.");
+        ExpectEqual(nodeBVersionPayload["version"]?.GetValue<long>(), 0, "node B should not receive the direct fanout update immediately");
 
         await WaitForConditionAsync(async () =>
         {
@@ -2605,7 +2633,12 @@ internal sealed record TestBasemailPeer(
     string NodeId,
     string? BaseUrl,
     string PublicKeyPem,
-    string? KeyId);
+    string? KeyId,
+    int? AdvertisedLatencyMs = null,
+    double? ReliabilityScore = null,
+    double? StakeWeight = null,
+    double? CapacityWeight = null,
+    string? Region = null);
 
 internal sealed record TestBasemailMailboxRoute(
     string MailboxId,

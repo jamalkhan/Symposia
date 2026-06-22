@@ -1,0 +1,17 @@
+From: jamal@symposia.com
+To: admin@symposia.com
+Subject: hi
+Date: Sat, 04 Apr 2026 05:03:07 GMT
+Message-ID: <cc353cf8b5d048b496edcf1f4079e09b@symposia.local>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="symposia-3e238de1fc4b4832a4259d669f3a4f33"
+
+--symposia-3e238de1fc4b4832a4259d669f3a4f33
+Content-Type: text/plain; charset=utf-8
+
+hello
+--symposia-3e238de1fc4b4832a4259d669f3a4f33
+Content-Type: text/html; charset=utf-8
+
+<body><h1>hi</h1></body>
+--symposia-3e238de1fc4b4832a4259d669f3a4f33--

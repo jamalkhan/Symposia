@@ -1,0 +1,51 @@
+{
+  "messageId": "cc353cf8b5d048b496edcf1f4079e09b",
+  "mailboxId": "jamal",
+  "storageProviderName": "local-default",
+  "envelopeFrom": "jamal@symposia.com",
+  "envelopeRecipients": [
+    "admin@symposia.com"
+  ],
+  "deliveredAddresses": [
+    "admin@symposia.com"
+  ],
+  "deliveredDomains": [
+    "symposia.com"
+  ],
+  "headerFrom": "jamal@symposia.com",
+  "headerTo": "admin@symposia.com",
+  "subject": "hi",
+  "headers": [
+    {
+      "name": "From",
+      "value": "jamal@symposia.com"
+    },
+    {
+      "name": "To",
+      "value": "admin@symposia.com"
+    },
+    {
+      "name": "Subject",
+      "value": "hi"
+    },
+    {
+      "name": "Date",
+      "value": "Sat, 04 Apr 2026 05:03:07 GMT"
+    },
+    {
+      "name": "Message-ID",
+      "value": "\u003Ccc353cf8b5d048b496edcf1f4079e09b@symposia.local\u003E"
+    }
+  ],
+  "plainTextBody": "hello",
+  "htmlBody": "\u003Cbody\u003E\u003Ch1\u003Ehi\u003C/h1\u003E\u003C/body\u003E",
+  "authenticationAwareness": {
+    "spfStatus": null,
+    "dkimStatus": null,
+    "dmarcStatus": null,
+    "hasDkimSignature": false,
+    "authenticationResultsHeader": null,
+    "receivedSpfHeader": null
+  },
+  "receivedAtUtc": "2026-04-04T05:03:07.131963+00:00"
+}

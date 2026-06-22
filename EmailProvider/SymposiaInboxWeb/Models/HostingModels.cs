@@ -32,7 +32,7 @@ public sealed class HostingDirectory
             PropertyNameCaseInsensitive = true
         }) ?? throw new InvalidOperationException("Hosting configuration file could not be parsed.");
 
-        var storageProviders = BuildStorageProviders(config);
+        var storageProviders = BuildStorageProviders(config, configPath);
         var domains = BuildDomains(config, storageProviders);
         var mailboxesById = BuildMailboxesById(domains);
         return new HostingDirectory(storageProviders, domains, mailboxesById);
@@ -78,13 +78,16 @@ public sealed class HostingDirectory
             : Array.Empty<MailboxBinding>();
     }
 
-    private static Dictionary<string, MailStorageProviderConfiguration> BuildStorageProviders(SmtpHostingConfiguration config)
+    private static Dictionary<string, MailStorageProviderConfiguration> BuildStorageProviders(
+        SmtpHostingConfiguration config,
+        string configPath)
     {
         var providers = new Dictionary<string, MailStorageProviderConfiguration>(StringComparer.OrdinalIgnoreCase);
         foreach (var provider in config.StorageProviders)
         {
             if (!string.IsNullOrWhiteSpace(provider.Name))
             {
+                provider.Normalize(configPath);
                 providers[provider.Name] = provider;
             }
         }
@@ -215,6 +218,25 @@ public sealed class MailStorageProviderConfiguration
                     : rootPath
             }
         };
+    }
+
+    public void Normalize(string configPath)
+    {
+        if (string.Equals(Type, MailStorageProviderTypes.FileSystem, StringComparison.OrdinalIgnoreCase) &&
+            FileSystem is not null &&
+            !string.IsNullOrWhiteSpace(FileSystem.RootPath) &&
+            !Path.IsPathRooted(FileSystem.RootPath))
+        {
+            var configDirectory = Path.GetDirectoryName(configPath);
+            var basePath = string.IsNullOrWhiteSpace(configDirectory)
+                ? Environment.CurrentDirectory
+                : configDirectory;
+
+            FileSystem = FileSystem with
+            {
+                RootPath = Path.GetFullPath(FileSystem.RootPath, basePath)
+            };
+        }
     }
 }
 

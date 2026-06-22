@@ -441,15 +441,38 @@ public sealed class BasemailMailboxRegistryService
                 !string.Equals(peer.NodeId, exceptNodeId, StringComparison.Ordinal) &&
                 !string.Equals(peer.NodeId, invalidation.NodeId, StringComparison.Ordinal) &&
                 !string.Equals(peer.NodeId, originNodeId, StringComparison.Ordinal))
-            .OrderBy(peer => ComputeFanoutScore(peer.NodeId, originNodeId, invalidation.Version))
+            .OrderByDescending(peer => ComputePeerScore(peer, originNodeId))
+            .ThenBy(peer => ComputeFanoutTiebreaker(peer.NodeId, originNodeId, invalidation.Version))
             .ThenBy(peer => peer.NodeId, StringComparer.Ordinal)
             .Take(maxFanout)
             .ToArray();
     }
 
-    private static ulong ComputeFanoutScore(string peerNodeId, string originNodeId, long version)
+    private static double ComputePeerScore(BasemailPeerRecord peer, string originNodeId)
+    {
+        var reliability = Clamp(peer.ReliabilityScore ?? 0.5d, 0d, 1d);
+        var stake = Math.Max(0d, peer.StakeWeight ?? 0d);
+        var capacity = Math.Max(0d, peer.CapacityWeight ?? 0d);
+        var latencyScore = 1d / (1d + Math.Max(1, peer.AdvertisedLatencyMs ?? 100));
+        var diversityBonus = string.IsNullOrWhiteSpace(peer.Region)
+            ? 0d
+            : (string.Equals(peer.Region, originNodeId, StringComparison.OrdinalIgnoreCase) ? 0d : 0.05d);
+
+        return (reliability * 0.45d) +
+               (stake * 0.20d) +
+               (capacity * 0.20d) +
+               (latencyScore * 0.10d) +
+               diversityBonus;
+    }
+
+    private static ulong ComputeFanoutTiebreaker(string peerNodeId, string originNodeId, long version)
     {
         return (ulong)HashCode.Combine(peerNodeId, originNodeId, version);
+    }
+
+    private static double Clamp(double value, double min, double max)
+    {
+        return value < min ? min : (value > max ? max : value);
     }
 
     private BasemailMailboxRouteDefinition? GetKnownRoute(string mailboxId)

@@ -103,4 +103,9 @@ public sealed record BasemailPeerRecord(
     string NodeId,
     string? BaseUrl,
     string PublicKeyPem,
-    string? KeyId);
+    string? KeyId,
+    int? AdvertisedLatencyMs = null,
+    double? ReliabilityScore = null,
+    double? StakeWeight = null,
+    double? CapacityWeight = null,
+    string? Region = null);

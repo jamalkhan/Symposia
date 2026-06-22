@@ -1,0 +1,7 @@
+{
+  "mailboxId": "admin",
+  "storageProviderName": "local-default",
+  "domainName": "symposia.com",
+  "address": "admin@symposia.com",
+  "updatedAtUtc": "2026-04-04T05:03:07.131963+00:00"
+}
