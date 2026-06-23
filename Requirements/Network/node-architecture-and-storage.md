@@ -23,13 +23,13 @@ The system is composed of autonomous storage nodes. Each node stores blobs on it
 - Node operators declare the amount of storage they are offering at registration time and may adjust it at any time.
 - **Scaling up**: The node announces additional available capacity; the network begins routing new writes to it as it is verified and trusted.
 - **Scaling down**: The operator may reduce their offered capacity. Before reducing, the node must ensure all blobs it holds that would exceed the new capacity are replicated elsewhere. The network must re-place those blobs before the reduction takes effect.
-- Operators who reduce their storage offering are subject to a **disincentive period** (see Incentives & Penalties requirements): their token earning rate is reduced for a defined period following a capacity decrease, to discourage churn and to compensate for the disruption caused to the network.
+- Operators who reduce their storage offering are subject to a **disincentive period** (see [Node Runner Incentives and Penalties](./node-runner-incentives-and-penalties.md)): their token earning rate is reduced for a defined period following a capacity decrease, to discourage churn and to compensate for the disruption caused to the network.
 
 ## Node Identity
 
 - Each node has a persistent cryptographic identity (public/private keypair) generated at first launch.
 - The node's public key serves as its unique identifier on the network and on-chain.
-- Node identity is tied to its region claim and verification record (see Region Identification requirements).
+- Node identity is tied to its region claim and verification record (see [Region Identification and Verification](./region-identification-and-verification.md)).
 
 ## Operational Metrics Exported Per Node
 
@@ -62,7 +62,7 @@ Metrics are reported to the coordination layer continuously at a sub-epoch caden
 | **Available storage** | Total bytes offered to the network (configured by operator). |
 | **Used storage** | Bytes currently occupied by stored blobs. |
 | **Storage utilization %** | Used / available. SSDs in particular degrade in IOPS as utilization approaches 100%; nodes above 85% utilization are deprioritized for new writes. |
-| **S.M.A.R.T. health indicators** | Reallocated sectors, pending sectors, uncorrectable errors, wear level (SSDs), and temperature, reported continuously. Used for early failure detection (see Incentives & Penalties). |
+| **S.M.A.R.T. health indicators** | Reallocated sectors, pending sectors, uncorrectable errors, wear level (SSDs), and temperature, reported continuously. Used for early failure detection (see [Node Runner Incentives and Penalties](./node-runner-incentives-and-penalties.md)). |
 
 ### Compute Metrics
 
@@ -77,7 +77,7 @@ Metrics are reported to the coordination layer continuously at a sub-epoch caden
 | Metric | Description |
 |---|---|
 | **Uptime %** | Percentage of the current epoch the node has been reachable, measured by peer heartbeat checks. |
-| **Heartbeat compliance %** | Percentage of expected sub-epoch heartbeats successfully submitted. Used for auto-payout eligibility (see Incentives & Penalties). |
+| **Heartbeat compliance %** | Percentage of expected sub-epoch heartbeats successfully submitted. Used for auto-payout eligibility (see [Node Runner Incentives and Penalties](./node-runner-incentives-and-penalties.md)). |
 | **Blobs stored** | Count of distinct blobs currently held by this node. |
 | **Total data served** | Cumulative bytes transferred to clients since the node joined the network. |
 | **Request error rate** | Percentage of requests that returned an error (5xx) during the sampling window, excluding client errors (4xx). |

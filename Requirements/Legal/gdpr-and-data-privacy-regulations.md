@@ -61,8 +61,8 @@ Data subjects have the right to receive their personal data in a portable format
 
 GDPR restricts transfers of personal data outside the EU/EEA unless adequate protections are in place.
 
-- The region assignment system (see Region Assignment requirements) is the mechanism by which tenants enforce data residency. A tenant can pin EU personal data to `eu-*` regions, ensuring it is never written to nodes outside the EU.
-- The platform must be able to guarantee that region constraints are honored — blobs assigned to EU regions are never replicated to non-EU nodes, not even as overflow copies (see Redundancy requirements for the overflow copy rules; GDPR tenants may need to configure their region assignments to disable global overflow).
+- The region assignment system (see [Region Assignment for Data](../BlobStorage/region-assignment-for-data.md)) is the mechanism by which tenants enforce data residency. A tenant can pin EU personal data to `eu-*` regions, ensuring it is never written to nodes outside the EU.
+- The platform must be able to guarantee that region constraints are honored — blobs assigned to EU regions are never replicated to non-EU nodes, not even as overflow copies (see [Redundancy and Data Integrity](../BlobStorage/redundancy-and-data-integrity.md) for the overflow copy rules; GDPR tenants may need to configure their region assignments to disable global overflow).
 - For cross-border transfers where residency is not enforced, the platform must maintain Standard Contractual Clauses (SCCs) with non-EU sub-processors (node operators) as the transfer mechanism.
 - The platform publishes a list of all regions, their geographic location, and the legal jurisdiction applicable to nodes in each region.
 
@@ -104,6 +104,6 @@ While GDPR is the primary framework addressed here, the following also apply and
 | **PIPL** | China | Strict rules on cross-border data transfer out of China. A `cn-*` region with no cross-border overflow is required to serve Chinese tenants. |
 | **PDPA** | Various (Thailand, Singapore, etc.) | Similar to GDPR; region residency controls satisfy most requirements. |
 | **UK GDPR** | United Kingdom | Post-Brexit equivalent of EU GDPR. Same technical requirements. |
-| **HIPAA** | USA | Covered in Security requirements. |
+| **HIPAA** | USA | Covered in [Security](../Platform/security.md). |
 
 The platform does not certify compliance with these frameworks on behalf of tenants — compliance is a shared responsibility. The platform provides the technical controls (encryption, region residency, deletion, audit logs); tenants are responsible for their own obligations as data controllers.

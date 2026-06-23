@@ -19,7 +19,7 @@ Region is a core primitive of the network. Every node must belong to a verified 
 
 ## Network Verification
 
-- A subset of existing, already-verified nodes act as **verifiers** for new claims.
+- A subset of existing, already-verified nodes act as **verifiers** for new claims. See [Verifier Nodes](./verifier-nodes.md) for eligibility requirements, selection mechanics, compensation, and misbehavior penalties.
 - Verifiers measure the following from multiple geographic vantage points against the claimant:
   - Round-trip latency (ping)
   - Jitter (variance in latency)
@@ -36,7 +36,7 @@ Region is a core primitive of the network. Every node must belong to a verified 
 - Region verification is not a one-time event. Nodes are subject to **periodic re-verification challenges** on a randomized schedule.
 - A node that passes re-verification has its on-chain attestation renewed.
 - A node that fails re-verification is immediately suspended from new storage assignments and token rewards until it re-establishes verification.
-- Repeated failures may result in slashing of staked collateral (see Tokenomics requirements).
+- Repeated failures may result in slashing of staked collateral (see [Blockchain and Tokenomics](../Blockchain/blockchain-and-tokenomics.md)).
 
 ## Sybil and Spoofing Resistance
 

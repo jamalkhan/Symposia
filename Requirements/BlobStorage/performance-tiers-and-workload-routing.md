@@ -95,7 +95,7 @@ When a blob is written, the placement engine selects target nodes as follows:
 
 1. **Explicit tier requirement**: If the bucket or blob specifies a minimum tier, only nodes meeting that tier are eligible. A write that cannot be fulfilled at the requested tier fails with an explicit error (e.g., `"Insufficient Tier 1 nodes available in region eu-west"`).
 2. **Inferred tier**: If no tier is specified, the system defaults to Tier 2 for new blobs. The blob may be demoted to Tier 3 or 4 over time if access patterns indicate it is cold (see Automatic Promotion and Demotion below).
-3. **Mixed-tier replication**: For a blob with multiple copies (see Redundancy requirements), the primary copies are placed on nodes at or above the target tier. Overflow copies (e.g., the +1 in a different region) may be placed on lower-tier nodes — they serve as durability copies, not performance copies.
+3. **Mixed-tier replication**: For a blob with multiple copies (see [Redundancy and Data Integrity](./redundancy-and-data-integrity.md)), the primary copies are placed on nodes at or above the target tier. Overflow copies (e.g., the +1 in a different region) may be placed on lower-tier nodes — they serve as durability copies, not performance copies.
 
 ### Read Routing
 

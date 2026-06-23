@@ -10,18 +10,18 @@ Storage systems accumulate orphaned data over time: incomplete multipart uploads
 
 ### 1. Incomplete Multipart Uploads
 
-A multipart upload is initiated with a `CreateMultipartUpload` call. Parts are uploaded individually. The upload is finalized with `CompleteMultipartUpload`. If the final call is never made — due to a client crash, a bug, or abandonment — the uploaded parts remain on storage nodes indefinitely, consuming real disk space and counting toward used capacity.
+A multipart upload is initiated with a `CreateMultipartUpload` call (see [Multipart Upload](./multipart-upload.md) for full lifecycle and API). Parts are uploaded individually. The upload is finalized with `CompleteMultipartUpload`. If the final call is never made — due to a client crash, a bug, or abandonment — the uploaded parts remain on storage nodes indefinitely, consuming real disk space and counting toward used capacity.
 
 **GC rules:**
 - By default, incomplete multipart uploads are automatically aborted and their parts deleted after **7 days** of inactivity.
 - Tenants may configure a shorter or longer TTL per bucket (minimum: 1 hour; maximum: 30 days).
 - Inactivity is defined as: no `UploadPart` call received for the upload ID within the TTL window.
-- An `blob.multipart_aborted` event is emitted when GC cleans up an incomplete upload (see Blob Event Notifications requirements).
+- An `blob.multipart_aborted` event is emitted when GC cleans up an incomplete upload (see [Blob Event Notifications](./blob-event-notifications.md)).
 - Tenants are billed for the storage consumed by uploaded parts during the period they exist, before GC removes them.
 
 ### 2. Soft-Deleted Blobs
 
-Blobs in the soft-delete state (marked as deleted but not yet physically removed) occupy disk space on storage nodes. Physical removal must follow the retention schedule (see Data Retention and Billing requirements) but is a GC operation.
+Blobs in the soft-delete state (marked as deleted but not yet physically removed) occupy disk space on storage nodes. Physical removal must follow the retention schedule (see [Data Retention and Billing](../Platform/retention-and-billing.md)) but is a GC operation.
 
 **GC rules:**
 - After the soft-delete recovery window expires (30 days for standard accounts, up to 12 months for ePHI accounts), blobs are queued for physical deletion.
@@ -44,7 +44,7 @@ When a node leaves the network (decommissioned, slashed off, or simply disappear
 
 **GC rules:**
 - When a node is confirmed offline for longer than the grace period (15 minutes), its replica references are marked `Offline` in blob metadata.
-- A background process scans for blobs with any `Offline` replicas and triggers re-replication (see Redundancy requirements).
+- A background process scans for blobs with any `Offline` replicas and triggers re-replication (see [Redundancy and Data Integrity](./redundancy-and-data-integrity.md)).
 - Once re-replication is confirmed and the new replica is healthy, the stale replica reference is purged from the metadata record.
 - Stale references that cannot be re-replicated (e.g., no eligible nodes in the required region) remain flagged and are surfaced in the Tenant Observability dashboard as a placement warning.
 
@@ -101,6 +101,6 @@ GC tasks are background operations and are throttled to avoid consuming node I/O
 ## Tenant-Visible GC Controls
 
 - **Multipart upload TTL**: Configurable per bucket (see above).
-- **Lifecycle rules**: Define version expiry and object TTL (see Data Management requirements).
+- **Lifecycle rules**: Define version expiry and object TTL (see [Data Management](./data-management.md)).
 - **List incomplete uploads**: Tenants can query in-progress multipart uploads and manually abort them at any time.
 - **GC status**: The observability dashboard shows counts of objects pending physical deletion and the estimated time until they are purged.

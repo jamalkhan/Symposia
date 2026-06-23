@@ -113,7 +113,7 @@ When a slash event is recorded on-chain, the platform automatically generates an
 
 If the platform is found to have caused permanent, unrecoverable data loss (blobs that cannot be retrieved by any means):
 
-- The tenant is compensated at a rate defined in the SLA (see SLA requirements) per GB of confirmed lost data.
+- The tenant is compensated at a rate defined in the SLA (see [SLA and Availability Guarantees](../Platform/sla-and-availability-guarantees.md)) per GB of confirmed lost data.
 - Compensation is in the form of account credits or token transfer, at the tenant's election.
 - Compensation is capped at the amount the tenant paid for storage of the lost data over the preceding 12 months.
 - Compensation does not extend to consequential damages (downstream business losses, lost revenue from the tenant's customers, etc.) unless separately agreed in an enterprise contract.

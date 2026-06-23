@@ -44,7 +44,7 @@ Each SDK wraps the underlying S3/Azure interface but exposes the platform's nati
 - Presigned URL generation.
 - Credential creation and rotation (where the tenant's auth allows it).
 - Usage and cost queries.
-- Event subscription management (see Blob Event Notifications requirements).
+- Event subscription management (see [Blob Event Notifications](../BlobStorage/blob-event-notifications.md)).
 - Retry logic with exponential backoff built in.
 - Streaming upload and download (no full-file buffering in memory).
 
@@ -90,10 +90,10 @@ A browser-based console provides a visual interface for tenants who prefer not t
 ### Minimum Feature Set
 
 - **Bucket and blob browser**: Navigate buckets, folders, and blobs. Upload and download files. View metadata.
-- **Usage dashboard**: Current epoch's storage and egress consumption, estimated cost, credit balance, and burn rate. (See Tenant Observability requirements for full detail.)
+- **Usage dashboard**: Current epoch's storage and egress consumption, estimated cost, credit balance, and burn rate. (See [Tenant Observability](../BlobStorage/tenant-observability.md) for full detail.)
 - **Credential manager**: Create, view, and revoke credentials. Display scopes and expiry dates.
 - **Audit log viewer**: Searchable, filterable view of the tenant's audit events.
-- **Event subscription manager**: Configure and test webhook subscriptions. (See Blob Event Notifications requirements.)
+- **Event subscription manager**: Configure and test webhook subscriptions. (See [Blob Event Notifications](../BlobStorage/blob-event-notifications.md).)
 - **Billing history**: Itemized usage reports per epoch.
 - **Account settings**: Contact info, alert thresholds, KMS integration config.
 
@@ -110,7 +110,7 @@ The web console authenticates using the same credential system as the API — th
 - **Region and tier guide**: How to assign regions and tiers, what the trade-offs are, examples.
 - **Security and encryption guide**: How client-side encryption works, KMS integration examples for AWS KMS, Azure Key Vault, and HashiCorp Vault.
 - **HIPAA compliance guide**: What the platform provides, what the tenant is responsible for, how to configure ePHI-designated storage.
-- **Node runner guide**: Hardware requirements, setup, benchmarking, earnings estimation. (See Node Runner Onboarding requirements.)
+- **Node runner guide**: Hardware requirements, setup, benchmarking, earnings estimation. (See [Node Runner Onboarding and Tooling](../Network/node-runner-onboarding-and-tooling.md).)
 - **Billing and retention guide**: How billing works, how to set retention policies, what happens on non-payment.
 - **Migration guide**: How to migrate from S3 or Azure Blob Storage with no downtime, using the compatibility interfaces.
 

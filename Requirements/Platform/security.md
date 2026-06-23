@@ -8,7 +8,7 @@ Security is a foundational requirement, not an afterthought. The system is desig
 
 ## Authentication and Authorization
 
-- All API requests must be authenticated using valid credentials (see Multi-Tenancy & Credentials requirements).
+- All API requests must be authenticated using valid credentials (see [Multi-Tenancy and Credentials](../BlobStorage/multi-tenancy-and-credentials.md)).
 - Authorization is enforced server-side on every request; clients cannot self-elevate privileges.
 - Credential scope is validated at the point of access: a read credential is rejected on a write endpoint; a credential scoped to bucket A is rejected for bucket B.
 - Unauthenticated access is only permitted for blobs explicitly marked public or for presigned URL requests with a valid, unexpired signature.
@@ -94,7 +94,7 @@ See Audit Logging section below. HIPAA requires hardware, software, and procedur
 
 ### Integrity (§164.312(c))
 
-- All blobs are integrity-verified via cryptographic hash on every read (see Redundancy & Data Integrity requirements).
+- All blobs are integrity-verified via cryptographic hash on every read (see [Redundancy and Data Integrity](../BlobStorage/redundancy-and-data-integrity.md)).
 - ePHI blobs are additionally subject to a periodic integrity audit: the system verifies that stored ciphertext has not been altered since ingest, on a schedule no less frequent than once per epoch.
 - Any integrity failure on an ePHI blob triggers an immediate alert to the tenant and to the platform security team.
 
@@ -153,7 +153,7 @@ See Audit Logging section below. HIPAA requires hardware, software, and procedur
 
 - Rate limiting is applied per credential and per IP on all API endpoints.
 - Gateway nodes implement connection-level throttling and configurable block lists.
-- Presigned URLs carry short default expiry times (default: 15 minutes; maximum: 7 days) to limit the blast radius of leaked URLs.
+- Presigned URLs carry short default expiry times (default: 15 minutes; maximum: 7 days) to limit the blast radius of leaked URLs. See [Presigned URLs](../BlobStorage/presigned-urls.md) for full expiry rules, scope constraints, and HIPAA overrides.
 - Large upload and download operations are subject to per-tenant bandwidth quotas (configurable).
 - ePHI buckets cannot be configured for public access, presigned public URLs, or zero-auth access modes.
 

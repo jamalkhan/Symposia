@@ -71,11 +71,13 @@ Node runners must stake tokens to participate. For staking to be practical at la
 - The minimum stake per node is set at a level achievable with the tokens available at launch, not at a future speculative price.
 - A **stake-to-earn ratio** is defined: the expected time to recover the staked amount from epoch rewards, at baseline performance. This must be publicly communicated before mainnet so node runners can evaluate the economics.
 
-### Exchange Listing
+### Exchange Listing and Liquidity
 
-- The token must be listed on at least one liquid exchange at or before mainnet launch. Node runners and tenants need the ability to acquire tokens (to stake or pay for storage) and liquidate earnings.
-- The foundation pursues exchange listings as a pre-launch requirement, not a post-launch afterthought.
-- Stablecoins are accepted as payment for storage at mainnet (see Billing requirements), reducing the dependency on token liquidity for tenants who only want to pay for storage without holding the native token.
+- Because the token is an ERC-20 on Base, it is immediately compatible with Base's existing DEX ecosystem (Uniswap v3 on Base, Aerodrome, etc.) from the moment of deployment. No centralized exchange listing is required for initial liquidity — a DEX liquidity pool on Base is sufficient for launch.
+- The foundation seeds an initial liquidity pool on a Base DEX with tokens from the public launch allocation, paired against ETH or a stablecoin.
+- A centralized exchange listing is pursued as a post-launch milestone, not a launch blocker.
+- Stablecoins are accepted as payment for storage at mainnet (see [Data Retention and Billing](../Platform/retention-and-billing.md)), reducing the dependency on token liquidity for tenants who only want to pay for storage without holding the native token.
+- The OP Stack canonical bridge allows tokens to move between the L3, Base, and Ethereum mainnet. Token holders on any of these three layers can participate in the ecosystem.
 
 ---
 

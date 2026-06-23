@@ -20,7 +20,7 @@ Tenants may specify geographic placement constraints for their blobs and folders
 When a blob is written, the gateway evaluates the following inputs to select target nodes:
 
 1. **Region constraint** from the resolved policy (object → folder → bucket → none).
-2. **Minimum replica count** (at least 2; see Redundancy requirements).
+2. **Minimum replica count** (at least 2; see [Redundancy and Data Integrity](./redundancy-and-data-integrity.md)).
 3. **Node health**: nodes must be online, verified, and have available capacity.
 4. **Node performance scores**: prefer nodes with higher throughput, lower latency, and better uptime history.
 5. **Geographic diversity**: within a region, prefer nodes that are not co-located (different AS numbers or physical facilities where identifiable).

@@ -22,7 +22,7 @@ Storage is billed on a **per-byte-per-epoch** basis. There is no minimum storage
 
 ### Pricing Tiers (Performance)
 
-Storage pricing varies by the performance tier of the nodes where the data is placed (see Performance Tiers requirements). Higher-tier nodes cost more per byte because they deliver better IOPS and lower latency.
+Storage pricing varies by the performance tier of the nodes where the data is placed (see [Performance Tiers and Workload Routing](../BlobStorage/performance-tiers-and-workload-routing.md)). Higher-tier nodes cost more per byte because they deliver better IOPS and lower latency.
 
 | Tier | Storage Price (illustrative) | Egress Price (illustrative) |
 |---|---|---|
@@ -40,7 +40,7 @@ Regions may carry a price modifier reflecting the relative cost and demand of no
 ### Payment Denomination
 
 - The primary payment denomination is the **native token**.
-- Supported stablecoins may be accepted at market rate as an alternative, swapped automatically to the native token at settlement.
+- Supported stablecoins may be accepted at market rate as an alternative, swapped automatically to the native token at settlement. See [Payment and Stablecoin Integration](./payment-and-stablecoin-integration.md) for supported stablecoins, oracle mechanics, and swap failure handling.
 - Prices are published in the native token. Tenants using stablecoins see a fiat-equivalent rate at time of payment.
 
 ---

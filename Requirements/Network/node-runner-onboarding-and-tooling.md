@@ -145,7 +145,7 @@ This gives operators ongoing visibility into whether their hardware investment i
 
 - Operators scale **up** capacity by updating the `offered_capacity_gb` configuration value and restarting. The new capacity is announced to the network immediately.
 - Operators scale **down** capacity by updating the configuration and initiating a controlled wind-down. The node software verifies that all blobs that would exceed the new capacity have been successfully re-replicated elsewhere before the reduction takes effect. The estimated time for this process is displayed before the operator confirms.
-- Voluntary capacity reduction triggers the disincentive period (see Node Runner Incentives requirements). The dashboard shows the projected impact on earnings before the operator confirms the reduction.
+- Voluntary capacity reduction triggers the disincentive period (see [Node Runner Incentives and Penalties](./node-runner-incentives-and-penalties.md)). The dashboard shows the projected impact on earnings before the operator confirms the reduction.
 
 ---
 

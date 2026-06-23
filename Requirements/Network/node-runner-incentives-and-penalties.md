@@ -18,7 +18,7 @@ Token rewards are calculated per **epoch** (a defined time period, e.g., 1 hour 
 | **Used Storage** | Proportion of offered capacity actively storing data for tenants. |
 | **Retrieval Speed** | End-to-end blob delivery speed as measured by verifiers and clients. This is the primary performance metric and carries the highest reward weight. |
 
-- The exact weighting of each factor is a governance parameter (see Blockchain & Tokenomics requirements).
+- The exact weighting of each factor is a governance parameter (see [Blockchain and Tokenomics](../Blockchain/blockchain-and-tokenomics.md)).
 - Faster retrieval yields disproportionately higher rewards: the incentive design explicitly favors nodes that invest in good hardware, network peering, and low-latency infrastructure.
 - Metrics are aggregated from: self-reported node telemetry (subject to challenge), verifier-observed measurements, and client-reported retrieval outcomes.
 

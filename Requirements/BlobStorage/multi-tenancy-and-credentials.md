@@ -19,7 +19,7 @@ The system is multi-tenant by design. Multiple independent users and organizatio
   - **Read-Write credentials**: full CRUD access including delete.
 - Credentials may be scoped to a specific bucket, folder prefix, or individual object rather than the entire tenant namespace.
 - Credentials may carry an optional expiration time, after which they are automatically invalid.
-- Presigned URLs / temporary tokens must be derivable from a credential without calling a live service at retrieval time (capability-based or signed-token approach such as Macaroons or signed JWTs).
+- Presigned URLs / temporary tokens must be derivable from a credential without calling a live service at retrieval time (capability-based or signed-token approach such as Macaroons or signed JWTs). See [Presigned URLs](./presigned-urls.md) for full signing mechanics, scope constraints, and expiry rules.
 - Credentials may optionally be region-locked, restricting their validity to requests arriving from or targeting a specific region.
 
 ## Credential Lifecycle
@@ -28,7 +28,7 @@ The system is multi-tenant by design. Multiple independent users and organizatio
 - Credentials must be revocable at any time by the tenant. Revocation must propagate to all nodes within a bounded time window.
 - A revocation list (or on-chain revocation for blockchain-integrated deployments) is maintained and checked on each authenticated request.
 - Credential rotation is supported: issuing a replacement credential and revoking the old one.
-- Audit events are recorded for credential creation, use, and revocation (see Security requirements).
+- Audit events are recorded for credential creation, use, and revocation (see [Security](../Platform/security.md)).
 
 ## Access Control
 

@@ -8,7 +8,7 @@ Every blob stored in the network must be durable and available even when individ
 
 ## Copy Count and Placement Rules by Region Assignment
 
-The minimum number of copies and their required placement is determined by the number of regions assigned to a blob (see Region Assignment requirements). These are hard invariants — the system must never allow a blob to fall below its target copy count without immediately triggering repair.
+The minimum number of copies and their required placement is determined by the number of regions assigned to a blob (see [Region Assignment for Data](./region-assignment-for-data.md)). These are hard invariants — the system must never allow a blob to fall below its target copy count without immediately triggering repair.
 
 ### Zero Regions (Best Effort / Global)
 
@@ -73,7 +73,7 @@ Soft-rule violations are permitted only when the network does not have enough el
 
 ## Penalty-Triggered Pre-Replication
 
-When a node enters any penalty stage (see Node Runner Incentives & Penalties requirements), the system does not wait for data loss to occur before acting. The response is immediate and proportional:
+When a node enters any penalty stage (see [Node Runner Incentives and Penalties](../Network/node-runner-incentives-and-penalties.md)), the system does not wait for data loss to occur before acting. The response is immediate and proportional:
 
 | Node Penalty Stage | Replication Response |
 |---|---|
@@ -147,7 +147,7 @@ Background replication (penalty-triggered or repair) is throttled per node to a 
 - Every blob is hashed on ingest (SHA-256 or a content-addressed identifier such as a CID).
 - The hash is stored in blob metadata and verified on every read. A read returning data that does not match the stored hash fails immediately and triggers read repair.
 - Nodes periodically re-verify stored blob hashes (**proof of possession**) and report results to the coordination layer. The verification schedule is randomized to prevent coordinated attestation fraud.
-- A node that consistently fails integrity checks progresses through the penalty stages (see Node Runner Incentives & Penalties requirements).
+- A node that consistently fails integrity checks progresses through the penalty stages (see [Node Runner Incentives and Penalties](../Network/node-runner-incentives-and-penalties.md)).
 
 ## Proofs of Storage and Retrieval
 

@@ -17,12 +17,24 @@ The specific failure modes to plan for:
 
 ---
 
+## Launch Reality
+
+At the day the network opens to public traffic, it is expected to have very few nodes — potentially as few as two. This is normal and expected. The L3 on Base architecture means the chain itself is secured by Base/Ethereum regardless of how few storage nodes exist. The storage network's redundancy, region diversity, and performance tier requirements define what *full* operation looks like; the bootstrapping phases below define how the network gets from two nodes to that state.
+
+The two-node launch scenario means:
+- Only Tier 3 or Tier 4 classification is achievable until more nodes join.
+- Zero-region blobs will have limited geographic diversity (two nodes may be in the same region).
+- The minimum copy count requirements (4–7 copies) cannot be met with two nodes — until the node count grows, the system enforces "as many copies as there are eligible nodes" with a clear warning to tenants.
+- Early tenants accept reduced redundancy guarantees in exchange for being first adopters; this is disclosed explicitly at account creation.
+
+---
+
 ## Phase 0 — Foundation Infrastructure (Pre-Launch)
 
 Before any public access is opened, the platform operator runs a set of **foundation nodes** across multiple geographic regions. These nodes:
 
 - Are operated directly by the organization.
-- Are pre-staked using tokens from the foundation allocation (see Token Distribution requirements).
+- Are pre-staked using tokens from the foundation allocation (see [Token Distribution and Launch Economics](../Blockchain/token-distribution-and-launch-economics.md)).
 - Serve as the initial verifier set for region verification.
 - Provide enough storage capacity to onboard the first wave of tenants.
 - Remain operational for a minimum of 12 months post-mainnet, regardless of network growth, to ensure baseline availability.
@@ -90,7 +102,7 @@ Once critical mass is reached, foundation nodes begin a phased wind-down over 6 
 
 Region verification requires multiple verifiers. In a minimal network, there may not be enough verified nodes to form a quorum for verifying new ones. This is resolved as follows:
 
-- Foundation nodes serve as the initial verifier set and are trusted by genesis.
+- Foundation nodes serve as the initial verifier set and are trusted by genesis (see [Verifier Nodes](./verifier-nodes.md) for how the verifier pool grows beyond foundation nodes).
 - As community nodes pass verification, they are added to the eligible verifier pool.
 - The minimum verifier quorum required to verify a new node scales with network size: it starts at 3 (achievable with foundation nodes alone) and increases as the verifier pool grows, up to the long-term target.
 - The quorum formula and growth schedule are defined in the chain's genesis configuration.
