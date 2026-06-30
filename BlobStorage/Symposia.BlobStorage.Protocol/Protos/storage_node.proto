@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package symposia.blobstorage.v1;
+
+option csharp_namespace = "Symposia.BlobStorage.Protocol";
+
+// Private gateway-to-node protocol, run over TLS. Not the public S3/Azure HTTP interface.
+// See Requirements/BlobStorage/gateway-architecture.md#gateway-node-protocol.
+service StorageNode {
+  // Client-streaming so the node never buffers the full blob in memory before it hits disk.
+  rpc WriteBlob(stream WriteBlobChunk) returns (WriteBlobResponse);
+
+  // Server-streaming with optional byte-range support for partial reads.
+  rpc ReadBlob(ReadBlobRequest) returns (stream ReadBlobChunk);
+
+  rpc DeleteBlob(DeleteBlobRequest) returns (DeleteBlobResponse);
+
+  // Lightweight liveness/load probe used for the gateway's node health cache.
+  rpc Probe(ProbeRequest) returns (ProbeResponse);
+
+  // Proof-of-possession: hash a requested byte range without transferring the full blob.
+  rpc IntegrityChallenge(IntegrityChallengeRequest) returns (IntegrityChallengeResponse);
+}
+
+message WriteBlobChunk {
+  oneof payload {
+    WriteBlobHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message WriteBlobHeader {
+  string tenant_id = 1;
+  string bucket = 2;
+  string key = 3;
+  repeated string region_tags = 4;
+}
+
+message WriteBlobResponse {
+  string cid = 1;
+  int64 size_bytes = 2;
+}
+
+message ReadBlobRequest {
+  string cid = 1;
+  int64 offset = 2; // 0 = start of blob
+  int64 length = 3; // 0 = read to end
+}
+
+message ReadBlobChunk {
+  bytes data = 1;
+}
+
+message DeleteBlobRequest {
+  string cid = 1;
+}
+
+message DeleteBlobResponse {
+  bool deleted = 1;
+}
+
+message ProbeRequest {
+}
+
+message ProbeResponse {
+  string node_id = 1;
+  int64 used_storage_bytes = 2;
+  int64 available_storage_bytes = 3;
+  int64 blob_count = 4;
+  bool healthy = 5;
+}
+
+message IntegrityChallengeRequest {
+  string cid = 1;
+  int64 offset = 2;
+  int64 length = 3; // 0 = hash to end of blob
+}
+
+message IntegrityChallengeResponse {
+  string sha256_hex = 1;
+}

@@ -42,22 +42,63 @@ Tenants hold their own keys via their external KMS. If a third party wants acces
 
 This guarantee must be maintained in perpetuity. Any future feature, product addition, or architectural change that would give the platform — or any party other than the tenant — the ability to decrypt tenant data is prohibited. If a future internal key management service is ever implemented, it must be designed so that the platform operator cannot use it to unilaterally decrypt data without an explicit, auditable action by the tenant.
 
-### Encryption at Rest — Client-Managed Keys (Required)
+### Encryption at Rest — Two Models
 
-- Tenants are responsible for managing their own encryption keys using an external Key Management Service of their choice (e.g., AWS KMS, Azure Key Vault, HashiCorp Vault, or any compatible system).
+There are two classes of data principal in the system, each with a different key management model.
+
+#### Model A: Business Tenant Encryption (Bring-Your-Own KMS)
+
+Business tenants (companies, developers, organizations) manage their own encryption keys via an external Key Management Service of their choice (e.g., AWS KMS, Azure Key Vault, HashiCorp Vault, or any compatible system).
+
 - Before uploading data, tenants encrypt their blobs using keys sourced from their KMS. The platform receives and stores only ciphertext.
 - Storage nodes receive, store, and return opaque encrypted blobs. They have no decryption capability and no access to any tenant's keys.
 - The platform never receives, stores, touches, or has access to tenant encryption keys or plaintext data at any point.
 - If a tenant loses access to their KMS or their encryption keys, their data is permanently and irrecoverably unreadable. The platform cannot assist with key recovery under any circumstances.
+- For HIPAA workloads, tenants must follow their KMS provider's HIPAA-eligible configuration guidance and maintain their own key rotation schedule (recommended: 90-day rotation for ePHI keys).
 
-### Key Management (Tenant Responsibility)
+#### Model B: Individual Data Encryption (Wallet-Based)
 
-- Key generation, rotation, revocation, and backup are entirely the tenant's responsibility, managed within their chosen external KMS.
+Individual users' personal data — behavioral history, profile attributes, consent records, and any data they upload through the Symposia network identity — is encrypted using keys derived from their **blockchain wallet keypair**. The wallet IS the individual's KMS. No external KMS account or technical knowledge is required.
+
+The encryption model for individual data uses **envelope encryption**:
+
+1. Each blob or data record is encrypted with a symmetric **Data Encryption Key (DEK)** using AES-256-GCM.
+2. The DEK itself is encrypted with the individual's wallet-derived public key.
+3. Only the individual — holding the corresponding private key in their wallet — can decrypt the DEK and therefore the data.
+
+**Sharing data with a marketer** is a cryptographic operation, not just a policy record:
+
+1. The individual (or an authorized key-delegation service acting on their behalf) re-encrypts the DEK with the marketer's public key, producing a **capability token**.
+2. The marketer receives the capability token and can decrypt only the data explicitly shared — nothing else.
+3. Each marketer receives a separate capability token scoped to exactly the permissions granted.
+4. Capability tokens are recorded on-chain (linked to the permission grant record) so that the individual can audit exactly what has been shared with whom.
+
+**Revoking access** is also cryptographic:
+
+1. The individual rotates their DEK.
+2. All data is re-encrypted under the new DEK.
+3. New capability tokens are issued only to marketers who still hold valid permission grants.
+4. Old capability tokens are now cryptographically worthless — the DEK they reference no longer decrypts anything.
+
+This enforcement happens at the data layer. A marketer whose permission has been revoked cannot read the individual's data even if they retain the old capability token. The revocation is not enforced by a policy check that could be bypassed — it is enforced by the mathematics of encryption.
+
+The individual's wallet private key never leaves their device. The platform has no access to it at any time.
+
+### Key Management (Tenant Responsibility — Model A)
+
+- Key generation, rotation, revocation, and backup are entirely the business tenant's responsibility, managed within their chosen external KMS.
 - The platform provides documentation and integration guidance for common KMS providers but does not operate or access any tenant KMS.
-- For HIPAA workloads, tenants should follow their KMS provider's HIPAA-eligible configuration guidance and maintain their own key rotation schedule (recommended: 90-day rotation for ePHI keys).
 - Credential secrets (API keys, tokens) used to authenticate to the platform are stored as secure hashes server-side — never plaintext.
 - Credential rotation is supported without service disruption.
 - Revocation propagates to all nodes within 60 seconds. Revoked credentials cannot be re-issued with the same identifier.
+
+### Key Management (Individual Wallet — Model B)
+
+- The individual's wallet keypair is generated and held on their device (or in a self-custody wallet they control).
+- The platform never has access to the individual's wallet private key.
+- Key rotation (DEK rotation) can be initiated by the individual at any time from their profile portal. The platform's key-delegation service re-encrypts affected data under the new DEK and re-issues capability tokens to authorized marketers — all without the platform ever seeing plaintext data.
+- If an individual loses access to their wallet private key, their personal data is permanently and irrecoverably unreadable. The platform cannot assist with key recovery.
+- Wallet recovery (e.g., via BIP-39 seed phrase backup) is the individual's responsibility. The platform provides documentation on secure seed phrase management but does not hold recovery keys.
 
 ---
 

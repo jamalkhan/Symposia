@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Symposia.BlobStorage.Domain/Symposia.BlobStorage.Domain.csproj" />
+  <Project Path="Symposia.BlobStorage.Gateway/Symposia.BlobStorage.Gateway.csproj" />
+  <Project Path="Symposia.BlobStorage.Protocol/Symposia.BlobStorage.Protocol.csproj" />
+  <Project Path="Symposia.BlobStorage.StorageNode.Tests/Symposia.BlobStorage.StorageNode.Tests.csproj" />
+  <Project Path="Symposia.BlobStorage.StorageNode/Symposia.BlobStorage.StorageNode.csproj" />
+</Solution>

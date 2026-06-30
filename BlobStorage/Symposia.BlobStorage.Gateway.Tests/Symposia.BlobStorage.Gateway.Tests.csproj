@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="3.7.412.9" />
+    <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.9" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Gateway gets the global alias so Gateway types need no prefix in test code. -->
+    <ProjectReference Include="..\Symposia.BlobStorage.Gateway\Symposia.BlobStorage.Gateway.csproj" Aliases="global,GatewayAlias" />
+    <!-- StorageNode gets a named alias to disambiguate its Program class from Gateway's. -->
+    <ProjectReference Include="..\Symposia.BlobStorage.StorageNode\Symposia.BlobStorage.StorageNode.csproj" Aliases="NodeAlias" />
+  </ItemGroup>
+
+</Project>
