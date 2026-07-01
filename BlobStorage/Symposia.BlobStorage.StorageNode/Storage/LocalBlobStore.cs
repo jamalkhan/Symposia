@@ -131,5 +131,23 @@ public sealed class LocalBlobStore
         return true;
     }
 
+    /// <summary>
+    /// Enumerates all CIDs stored on disk by walking the sharded directory tree.
+    /// Skips the tmp directory and any non-hex filenames.
+    /// </summary>
+    public IEnumerable<Cid> EnumerateCids()
+    {
+        if (!Directory.Exists(_root)) yield break;
+
+        foreach (var file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+        {
+            // Skip anything inside the tmp directory.
+            if (file.StartsWith(_tempDir, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (Cid.TryParse(name, out var cid)) yield return cid;
+        }
+    }
+
     private string GetFullPath(Cid cid) => Path.Combine(_root, cid.ToShardedRelativePath());
 }

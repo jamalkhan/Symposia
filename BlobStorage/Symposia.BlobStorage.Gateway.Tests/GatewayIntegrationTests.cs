@@ -110,8 +110,8 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
         await _f.S3.PutObjectAsync(new PutObjectRequest
         {
             BucketName = Bucket, Key = key,
-            InputStream = new MemoryStream(body), ContentType = "text/plain",
-            DisablePayloadSigning = true,
+            InputStream = new MemoryStream(body), UseChunkEncoding = false,
+            ContentType = "text/plain",
         });
 
         var get = await _f.S3.GetObjectAsync(new GetObjectRequest
@@ -133,8 +133,8 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
         await _f.S3.PutObjectAsync(new PutObjectRequest
         {
             BucketName = Bucket, Key = key,
-            InputStream = new MemoryStream(body), ContentType = "application/octet-stream",
-            DisablePayloadSigning = true,
+            InputStream = new MemoryStream(body), UseChunkEncoding = false,
+            ContentType = "application/octet-stream",
         });
 
         var get = await _f.S3.GetObjectAsync(new GetObjectRequest
@@ -171,8 +171,8 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
         await _f.S3.PutObjectAsync(new PutObjectRequest
         {
             BucketName = Bucket, Key = key,
-            InputStream = new MemoryStream(body), ContentType = "text/plain",
-            DisablePayloadSigning = true,
+            InputStream = new MemoryStream(body), UseChunkEncoding = false,
+            ContentType = "text/plain",
         });
 
         var meta = await _f.S3.GetObjectMetadataAsync(new GetObjectMetadataRequest
@@ -205,8 +205,8 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
         {
             BucketName = Bucket, Key = key,
             InputStream = new MemoryStream("content"u8.ToArray()),
+            UseChunkEncoding = false,
             ContentType = "text/plain",
-            DisablePayloadSigning = true,
         });
 
         var list = await _f.S3.ListObjectsV2Async(new ListObjectsV2Request
@@ -228,14 +228,14 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
             _f.S3.PutObjectAsync(new PutObjectRequest
             {
                 BucketName = Bucket, Key = matchKey,
-                InputStream = new MemoryStream("a"u8.ToArray()), ContentType = "text/plain",
-                DisablePayloadSigning = true,
+                InputStream = new MemoryStream("a"u8.ToArray()),
+                UseChunkEncoding = false, ContentType = "text/plain",
             }),
             _f.S3.PutObjectAsync(new PutObjectRequest
             {
                 BucketName = Bucket, Key = noMatchKey,
-                InputStream = new MemoryStream("b"u8.ToArray()), ContentType = "text/plain",
-                DisablePayloadSigning = true,
+                InputStream = new MemoryStream("b"u8.ToArray()),
+                UseChunkEncoding = false, ContentType = "text/plain",
             }));
 
         var list = await _f.S3.ListObjectsV2Async(new ListObjectsV2Request
@@ -257,8 +257,8 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
         await _f.S3.PutObjectAsync(new PutObjectRequest
         {
             BucketName = Bucket, Key = key,
-            InputStream = new MemoryStream("bye"u8.ToArray()), ContentType = "text/plain",
-            DisablePayloadSigning = true,
+            InputStream = new MemoryStream("bye"u8.ToArray()),
+            UseChunkEncoding = false, ContentType = "text/plain",
         });
 
         await _f.S3.DeleteObjectAsync(new DeleteObjectRequest { BucketName = Bucket, Key = key });
@@ -294,8 +294,8 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
         await _f.S3.PutObjectAsync(new PutObjectRequest
         {
             BucketName = Bucket, Key = srcKey,
-            InputStream = new MemoryStream(body), ContentType = "text/plain",
-            DisablePayloadSigning = true,
+            InputStream = new MemoryStream(body), UseChunkEncoding = false,
+            ContentType = "text/plain",
         });
 
         await _f.S3.CopyObjectAsync(new CopyObjectRequest
@@ -328,14 +328,14 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
         var r1 = await _f.S3.PutObjectAsync(new PutObjectRequest
         {
             BucketName = Bucket, Key = key1,
-            InputStream = new MemoryStream(body), ContentType = "application/octet-stream",
-            DisablePayloadSigning = true,
+            InputStream = new MemoryStream(body), UseChunkEncoding = false,
+            ContentType = "application/octet-stream",
         });
         var r2 = await _f.S3.PutObjectAsync(new PutObjectRequest
         {
             BucketName = Bucket, Key = key2,
-            InputStream = new MemoryStream(body), ContentType = "application/octet-stream",
-            DisablePayloadSigning = true,
+            InputStream = new MemoryStream(body), UseChunkEncoding = false,
+            ContentType = "application/octet-stream",
         });
 
         Assert.Equal(r1.ETag, r2.ETag);
@@ -571,4 +571,7 @@ internal sealed class TestNodeRegistry : INodeRegistry
     public IReadOnlyList<NodeConnection> Healthy => [_node];
 
     public NodeConnection? SelectForRead(IEnumerable<string> nodeUrls) => _node;
+
+    public NodeConnection AddNode(string url) => _node;   // no-op in tests
+    public bool RemoveNode(string url) => false;           // no-op in tests
 }

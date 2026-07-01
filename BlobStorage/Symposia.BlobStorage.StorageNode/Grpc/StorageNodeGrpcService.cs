@@ -165,6 +165,26 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         return new IntegrityChallengeResponse { Sha256Hex = Convert.ToHexStringLower(hasher.GetHashAndReset()) };
     }
 
+    public override async Task ListBlobs(
+        ListBlobsRequest request, IServerStreamWriter<ListBlobsChunk> responseStream, ServerCallContext context)
+    {
+        const int PageSize = 100;
+        var afterCid = request.AfterCid;
+
+        while (true)
+        {
+            var page = _manifestStore.ListCidsPaged(afterCid, PageSize);
+            if (page.Count == 0) break;
+
+            var chunk = new ListBlobsChunk();
+            chunk.Cids.AddRange(page);
+            await responseStream.WriteAsync(chunk, context.CancellationToken);
+
+            if (page.Count < PageSize) break;
+            afterCid = page[^1];
+        }
+    }
+
     private (Cid Cid, long Remaining, long Offset) ResolveRange(string cidValue, long offset, long length)
     {
         if (!Cid.TryParse(cidValue, out var cid) || !_blobStore.Exists(cid))

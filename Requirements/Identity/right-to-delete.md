@@ -10,6 +10,41 @@ On Symposia, deletion requests can be submitted:
 
 ---
 
+## Identity Tier Requirements
+
+The scope of a deletion request depends on the individual's identity tier. See [Identity Proof and Claim](./identity-proof-and-claim.md) for full tier definitions.
+
+| Tier | How Deletion Request is Submitted | Scope |
+|---|---|---|
+| **T0** (anonymous) | Cannot submit. No verified identity to prove ownership of any record. | — |
+| **T1** (OTP-verified email or phone) | Via the marketer's preference center, using email or phone OTP. | Single marketer only. Must repeat per marketer. |
+| **T2** (wallet + ≥1 OTP-verified address) | Via the Symposia profile portal. Wallet authentication required. | Cross-brand: propagates to all marketers who hold records linked to any of the wallet's claimed addresses simultaneously. |
+| **T3** (wallet signature over all claimed surfaces) | Same as T2 + can generate on-chain proof tokens for each deletion request. | Cross-brand with cryptographic proof capability. |
+
+A T1 deletion using email OTP is authoritative for that email address only. It cannot exercise rights for a phone number or other identifier — those require separate T1 flows for each identifier.
+
+---
+
+## Two-Layer Erasure Model
+
+Not all data about an individual is treated identically under a deletion request. The platform distinguishes two layers — consistent with the [data ownership model](../Platform/stakeholders-and-personas.md):
+
+**Identity layer** (owned by the individual): Data that identifies the person — name, email, phone, postal address, device identifiers. Deleted **outright** on a valid erasure request.
+
+**Created / derived layer** (owned by the marketer or AppBuilder): Data created about the individual — purchase history, loyalty tier, ML scores, custom properties, behavioral segments. **Anonymized or pseudonymized**, not deleted:
+- *Anonymization*: All identity fields removed such that re-identification is not reasonably possible. The record falls outside the scope of personal data law.
+- *Pseudonymization*: The `contact_id` is retained as an opaque token; all identity fields are nulled and the `symposia_identity_id` foreign key is severed. The record is still personal data under most regimes but the individual cannot be identified from it.
+
+The choice of anonymization vs. pseudonymization depends on data type and applicable jurisdiction. This decision requires jurisdiction-by-jurisdiction validation — see [Todo.md — Research jurisdictional privacy law](../Todo.md).
+
+The suppression hash (`marketing.erasure_hashes`) is always retained regardless of which layer is being erased — it is not personal data and is required to prevent re-import.
+
+### Data Escrow on Deletion
+
+Pre-wallet tracking data held in the platform's identity escrow (data collected before an individual claimed a Symposia wallet identity) is subject to the same deletion process. If an individual submits a T1 deletion for a marketer, all escrow data associated with that marketer-contact relationship is deleted outright — escrow data is identity-layer data. The 13-month escrow auto-purge still applies to unclaimed escrow data; a deletion request simply accelerates it.
+
+---
+
 ## What "Deletion" Means
 
 A deletion request does not simply mean removing a database row. The individual has the right to have their data erased from all locations where it is held — including backups, exports, and analytical copies.
@@ -130,8 +165,6 @@ When the platform sends a `contact.erased` webhook to the marketer, the marketer
 The platform cannot enforce this — it is the marketer's legal obligation as the data controller. The platform's ToS makes this obligation explicit and the platform surfaces the list of integrations the marketer has active so the operator knows where to propagate the deletion.
 
 ---
-
-## Open Questions
 
 ## Answered Questions
 - **Content stored in blob storage**: If the marketer has exported a CSV of contacts to their blob bucket, the deletion does not automatically purge that export. The `contact.erased` webhook notifies the marketer, but blob objects must be deleted by the marketer. Should the platform provide a helper (e.g., scan blob buckets for files matching the erased email)? This is complex and possibly over-reach.

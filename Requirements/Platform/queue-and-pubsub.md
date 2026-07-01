@@ -50,6 +50,7 @@ sym.{tenant_id}.compliance.unsubscribe_requested
 sym.{tenant_id}.compliance.deletion_requested
 sym.{tenant_id}.compliance.consent_granted
 sym.{tenant_id}.compliance.consent_revoked
+sym.{tenant_id}.compliance.identity_verification_lapsed   ← T1/T2 claim expired after 13 months; contact drops to unclaimed
 sym.platform.integrity.batch_committed        ← platform-level, not tenant-scoped
 ```
 

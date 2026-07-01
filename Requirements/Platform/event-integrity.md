@@ -185,11 +185,13 @@ sym-events/
     {year}/
       {month}/
         {day}/
-          {hour}.batch          ← encrypted, content-addressed
+          {hour}.parquet        ← encrypted Parquet file, content-addressed
           {hour}.batch.index    ← plaintext index of event_ids in this batch (for proof lookup without decrypting the full batch)
 ```
 
-The `.batch.index` file maps `event_id → leaf_position` in the Merkle tree and is stored unencrypted (event IDs are UUIDs — not PII). This allows proof lookups to work without decrypting the full batch, which may contain thousands of events.
+**Format**: [Apache Parquet](https://parquet.apache.org/) with Zstd compression. Parquet is a columnar format — it makes analytics queries (group by campaign, sum revenue, filter by event_type) dramatically faster than row-oriented JSON, and achieves 10–20x better compression on event data. The archiver flattens high-cardinality analytics fields (`campaign_id`, `send_id`, `journey_id`, `order_revenue`) from the `properties` JSON to top-level columns at write time. See [Analytics Layer — Parquet Schema](../Analytics/analytics-layer.md#parquet-schema) for the full column list.
+
+The Parquet file is encrypted with the tenant's data encryption key before being written to blob (envelope encryption — the file is encrypted with a data key, the data key is encrypted with the tenant's master key). The `.batch.index` file is stored unencrypted — it maps `event_id → leaf_position` in the Merkle tree (event IDs are UUIDs, not PII) so proof lookups can locate a specific event without decrypting the full batch.
 
 Batch files are immutable once written. The blob storage layer enforces this at the object level: batches are write-once, delete-never. Only the platform's integrity archiver service has write credentials to the `sym-events/` bucket; tenant application credentials are read-only to their own prefix.
 

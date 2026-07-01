@@ -131,31 +131,113 @@ This allows Symposia network tracking to work in Safari/Firefox without third-pa
 
 ## Consent Integration
 
-The tracker integrates with consent management platforms (CMPs) to respect the individual's cookie consent choices.
+### Banner Responsibility: Marketer-Primary, Symposia Fallback
+
+The **marketer's cookie consent banner is the primary consent surface** for both cookies — the brand-level cookie (`_sym_brand`) and the Symposia network cookie (`_sym_net`). When a marketer deploys the Symposia tracker, their banner must explicitly name both cookies and their purposes. The marketer controls the wording, timing, and CMP integration; the platform provides guidance on required disclosures.
+
+**If the Symposia tracker is installed but no marketer banner is detected** — meaning no CMP consent event fires within a configurable timeout (default: 3 seconds after tracker load) — the tracker automatically surfaces the **Symposia fallback banner**. This is a safety net, not the intended primary flow.
+
+> **TODO: Legal review required for the Symposia fallback banner copy before launch.** Copy must cover: (1) what `_sym_brand` collects and on whose behalf, (2) what `_sym_net` collects and that it is cross-brand, (3) how to opt out later and that consent expires after 13 months, (4) that if the individual is already identified on the Symposia network and has previously consented, this banner may not appear, (5) links to the marketer's privacy policy and Symposia's network privacy policy. Jurisdiction-aware copy required (EU/UK vs. US vs. CA vs. others). Assign to legal counsel before tracking ships in any GDPR-covered market.
+>
+> **Placeholder copy (not legally reviewed — do not ship):**
+> "[Marketer name] uses Symposia to personalize your experience and, with your permission, to recognize you across other brands on the Symposia network. Two cookies may be set: a brand cookie for [Marketer name] and a Symposia network cookie for cross-brand recognition. Your choice applies for 13 months or until our policy changes. If you have previously consented on the Symposia network with a verified identity, your prior choice may carry over. [Accept all] [Decline] [Manage preferences] [Learn more →]"
 
 ### Consent Modes
 
 | Mode | Behavior |
 |---|---|
-| `cmp` | The tracker listens for consent events from a configured CMP (OneTrust, Cookiebot, Usercentrics, Osano). It only sets cookies after the CMP reports that the relevant consent category has been granted. |
-| `explicit` | The marketer manages consent themselves. They call `_sym('set_consent', { analytics: true, marketing: true })` after collecting consent. |
+| `cmp` | The tracker listens for consent events from a configured CMP (OneTrust, Cookiebot, Usercentrics, Osano). It only sets cookies after the CMP reports that the relevant consent category has been granted. The marketer's CMP banner must include Symposia cookie disclosures. |
+| `explicit` | The marketer manages consent themselves. They call `_sym('set_consent', { analytics: true, marketing: true })` after collecting consent via their own UI. |
 | `none` | No consent management. The tracker operates in full mode immediately. **Only valid in regions/contexts where consent is not legally required.** |
 
 ### Consent Categories Mapped to Tracking Behavior
 
-| Consent Category | What it Enables |
+| Consent Category | What It Enables |
 |---|---|
-| `necessary` / no consent | Nothing. The tracker loads but collects no data. |
+| `necessary` / no consent | Nothing. The tracker loads but sets no cookies and collects no data. |
 | `analytics` | Brand-level anonymous tracking (`_sym_brand` without `contact_id`). No cross-brand tracking. |
-| `marketing` / `targeting` | Brand-level identified tracking + Symposia network cookie (if individual has also consented at the Symposia level). |
+| `marketing` / `targeting` | Brand-level identified tracking + Symposia network cookie (if individual also consents at the Symposia level). |
 
-### Symposia Consent Banner
+### Consent Events
 
-When `enable_network_tracking: true` is set and the Symposia network cookie is not present, the tracker can surface a lightweight Symposia consent banner:
+Consent is a first-class event — both when shown and when recorded — for two reasons: (1) it feeds the individual's consent record on their profile, and (2) consent events are included in the Merkle commitment pipeline so they are tamper-evidently auditable. See [Event Integrity](../Platform/event-integrity.md).
 
-> "Malamute Adventures uses Symposia, a privacy-first marketing network. Symposia can link your activity here to other brands, giving you a single place to manage your data across the web. [Accept] [Decline] [Learn more]"
+**Four consent events are defined** (full schemas in [Event Schema](./event-schema.md#consent-events)):
 
-This banner is distinct from the marketer's cookie consent banner — it specifically asks for cross-brand tracking consent. The marketer can disable this banner (if they handle Symposia consent through their own CMP integration) or customize its wording.
+| Event | Emitted By | When |
+|---|---|---|
+| `cookie_consent_shown` | Marketer's banner / CMP | When the marketer's cookie consent UI is rendered to the visitor |
+| `cookie_consent_recorded` | Marketer's banner / CMP | When the visitor makes a choice (accept/decline/customize) in the marketer's banner |
+| `symposia_platform_cookie_consent_shown` | Symposia fallback banner | When the Symposia fallback banner is rendered (marketer banner not detected) |
+| `symposia_platform_cookie_consent_recorded` | Symposia fallback banner | When the visitor makes a choice in the Symposia fallback banner |
+
+### Consent Persistence
+
+When a `cookie_consent_recorded` or `symposia_platform_cookie_consent_recorded` event fires, the consent decision is persisted in three places:
+
+1. **Contact profile (Postgres)** — written to the contact's record as a permission grant entry (see [Permission Model](../Identity/user-data-ownership.md#permission-model)). If the visitor is anonymous (no `contact_id` yet), the consent is stored against the `brand_visitor_id` and migrated to the contact record when identification occurs.
+
+2. **NATS compliance stream** — a `compliance.consent_granted` or `compliance.consent_revoked` event is published to `sym.{tenant}.compliance.consent_granted` (see [Queue and Pub/Sub](../Platform/queue-and-pubsub.md)). This triggers the Merkle commitment pipeline and creates a tamper-evident on-chain record of the consent decision.
+
+3. **Symposia identity profile** — if the visitor has a linked `symposia_identity_id`, the consent grant is propagated to their cross-brand identity record, making it visible in the [Profile Portal](../Identity/user-profile-visibility.md) and enforceable across all marketers linked to that identity. For anonymous visitors without a linked identity, this propagation occurs at the time the identity link is established.
+
+The combination of (2) and (3) means: consent decisions are cryptographically committed to the blockchain (via Merkle root) and visible to the individual in their own profile. A marketer cannot retroactively claim consent was given if the commitment record shows otherwise, and the individual can prove consent was or was not granted at a specific time.
+
+### Banner Copy Versioning and Storage
+
+Every version of every consent banner is persisted to blob storage at the time it is deployed. The `banner_copy_version` field in consent events is a pointer to the exact copy the individual saw — making the consent legally tied to specific wording that can always be retrieved.
+
+**Marketer banner copy** (for marketers using `explicit` consent mode or a custom CMP integration):
+```
+{marketer-blob-account}/consent-banners/{banner_version}/copy.json
+```
+Marketers who use a third-party CMP (OneTrust, Cookiebot, etc.) are responsible for version-tracking their own copy within that system. The `banner_copy_version` they pass to the tracker is their CMP's version identifier.
+
+**Symposia fallback banner copy**:
+```
+{platform-blob-account}/consent-banners/symposia-fallback/{version}/copy.json
+```
+The platform maintains all historical versions. A version is never deleted — only superseded. This means any consent record in the Merkle commitment pipeline can always be matched to the exact copy that was shown, indefinitely.
+
+```json
+// Example copy blob: consent-banners/symposia-fallback/v1.0/copy.json
+{
+  "version": "v1.0",
+  "deployed_at": "2026-07-01T00:00:00Z",
+  "locales": {
+    "en": {
+      "headline": "...",
+      "body": "...",
+      "accept_label": "Accept",
+      "decline_label": "Decline",
+      "learn_more_url": "https://symposia.network/privacy"
+    }
+  }
+}
+```
+
+### Consent Expiry and Copy-Change Invalidation
+
+A consent decision (accept or decline) is valid for **13 months** from `recorded_at` — consistent with the anonymous data retention window and identity re-verification cadence (see [Identity Proof and Claim](../Identity/identity-proof-and-claim.md)).
+
+**Copy change takes precedence over the 13-month window.** When a new version of the banner copy is deployed — whether the marketer's copy or the Symposia fallback — any existing consent record issued under the previous version is marked `pending_reconsent`. On the individual's next visit, the banner is shown again regardless of how recently they last consented. The 13-month clock resets from the new consent decision.
+
+This rule exists because a change to consent copy may expand the scope of what is being consented to. Prior consent cannot be assumed to cover new or expanded scope — the individual must see and acknowledge the new wording.
+
+The consent record stored in Postgres carries both `banner_copy_version` (the version under which consent was given) and `expires_at` (13 months from `recorded_at`, or reset when copy changes). The tracker checks `expires_at` and `banner_copy_version` on each visit before deciding whether to suppress or show the banner.
+
+### Consent Inheritance via Identity Linking
+
+When two cookie IDs are determined to belong to the same individual — through the identity claim process (see [Identity Proof and Claim](../Identity/identity-proof-and-claim.md)) — the platform checks whether any of the linked identities already holds a valid, unexpired consent record for the current copy version.
+
+**If a valid consent record exists on any linked identity: consent is inherited.** The newly linked cookie ID adopts the existing consent decision. The individual is not shown the banner again. The inherited consent record is written with:
+- `consent_source: "inherited_from_identity_link"`
+- The original `recorded_at` timestamp (the 13-month clock continues from when consent was first given, not from when the link was established)
+- A reference to the source identity/cookie from which consent was inherited
+
+**If no valid consent exists on any linked identity**: the banner is shown on next visit as normal.
+
+Consent inheritance does not cross copy versions. If the linked identity consented under `v1.0` and the current copy is `v2.0`, the consent is not inherited — the individual must re-consent to the new copy.
 
 ---
 

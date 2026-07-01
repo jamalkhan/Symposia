@@ -20,6 +20,9 @@ service StorageNode {
 
   // Proof-of-possession: hash a requested byte range without transferring the full blob.
   rpc IntegrityChallenge(IntegrityChallengeRequest) returns (IntegrityChallengeResponse);
+
+  // Enumerate all CIDs this node holds, paginated. Used by the gateway for reconciliation.
+  rpc ListBlobs(ListBlobsRequest) returns (stream ListBlobsChunk);
 }
 
 message WriteBlobChunk {
@@ -78,4 +81,12 @@ message IntegrityChallengeRequest {
 
 message IntegrityChallengeResponse {
   string sha256_hex = 1;
+}
+
+message ListBlobsRequest {
+  string after_cid = 1; // empty = start from beginning; use last received CID to paginate
+}
+
+message ListBlobsChunk {
+  repeated string cids = 1;
 }

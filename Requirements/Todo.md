@@ -17,14 +17,16 @@ These gaps were identified after the initial 37-document requirement reorganizat
 | **Platform** | Serverless functions / edge compute | Not started | Lambda-like layer for webhooks, transforms, automation triggers |
 | **Platform** | API rate limiting and throttling | Not started | Not in any current document; needed for event ingestion at scale |
 | **Platform** | Real-time streaming / WebSockets | Not started | Live dashboards, real-time personalization |
-| **Platform** | Workflow orchestration | Not started | Drip sequences, multi-step automation flows, step functions-style state |
-| **Analytics** | DuckDB or ClickHouse analytical layer | Stub only | See Requirements/Analytics/todo-notes.md |
+| **Platform** | Workflow orchestration (Journeys) | **Done** | Requirements/Journeys/journeys.md — linear + branching, all trigger types, re-entry policy, cart abandon pattern |
+| **Analytics** | DuckDB analytical layer — report endpoints (v1) | **Done** | Requirements/Analytics/analytics-layer.md — DuckDB on Parquet + Postgres; 8 report endpoints; ad-hoc SQL is future phase |
 | **Database** | Postgres version policy | Not started | Which major versions; upgrade path |
 | **Database** | Postgres extensions policy | Not started | PostGIS, pgvector, pg_cron — what operators must provide |
 | **Database** | Read replica billing clarification | Open question | Shared page bucket → is intra-service page fetch billed as egress? |
 | **Database** | Compute overage handling | Open question | What happens mid-epoch if tenant exhausts compute credits? |
 | **Database** | Compute operator compensation split | Open question | Proposed 70/30 operator/platform; needs governance proposal |
-| **Blockchain** | Compute node staking minimums | Not started | Specific stake-per-vCPU numbers needed |
+| **Blockchain** | Node types, resource requirements, dynamic reward system | **Done** | Requirements/Platform/node-types-and-rewards.md — 4 node types (OLTP, Storage, Analytics, Consensus); dynamic reward multipliers; reliability scoring; 4 open questions (epoch length, token mechanics, staking, cross-type isolation) |
+| **Blockchain** | Compute node staking minimums | Not started | Specific stake amounts — see open question #3 in node-types-and-rewards.md |
+| **Blockchain** | Token emission schedule / tokenomics | Not started | Dynamic vs. fixed emission; intersects with reward system — see open question #2 in node-types-and-rewards.md |
 
 ---
 
@@ -53,11 +55,11 @@ These items were identified 2026-06-30 when the martech focus of the platform wa
 | Item | Status | File |
 |---|---|---|
 | Data ownership model (users own data; marketers have permission) | **In Progress** | Requirements/Identity/user-data-ownership.md |
-| Self-service subscription / preference management | **In Progress** | Requirements/Identity/subscription-management.md |
-| Right to delete / right to forget (GDPR Article 17, CCPA) | **In Progress** | Requirements/Identity/right-to-delete.md |
-| User profile visibility (which brands have data on me) | **In Progress** | Requirements/Identity/user-profile-visibility.md |
+| Self-service subscription / preference management | **Done** | Requirements/Identity/subscription-management.md — T1/T2 tier scoping, global opt-out requires T2, 13-month claim lapse behavior |
+| Right to delete / right to forget (GDPR Article 17, CCPA) | **Done** | Requirements/Identity/right-to-delete.md — T0-T3 scope table, two-layer erasure model, data escrow on deletion |
+| User profile visibility (which brands have data on me) | **Done** | Requirements/Identity/user-profile-visibility.md — portal access by tier, identity tier status display, cookie model integration |
 | Cross-tracking consent controls | **In Progress** | Requirements/Identity/user-data-ownership.md |
-| **Identity proof and claim** — how individuals prove ownership of email, phone, cookies, device IDs; pre-wallet identity lifecycle | **Needs decision** | Requirements/Identity/identity-proof-and-claim.md — 7 open questions listed; blocks right-to-delete, subscription-management, and profile-visibility specs |
+| **Identity proof and claim** — how individuals prove ownership of email, phone, cookies, device IDs; pre-wallet identity lifecycle | **Done** | Requirements/Identity/identity-proof-and-claim.md — all 7 questions resolved; right-to-delete, subscription-management, and profile-visibility now unblocked |
 
 ### Integrations
 | Item | Status | File |
@@ -91,12 +93,14 @@ These items were identified 2026-06-30 when the martech focus of the platform wa
 ### Tracking & Analytics Collection
 | Item | Status | File |
 |---|---|---|
-| Cookie-based tracking system (JS + pixel) | **In Progress** | Requirements/Tracking/tracking-architecture.md |
-| First-party (brand) + Symposia network cookie model | **In Progress** | Requirements/Tracking/tracking-architecture.md |
-| Standard event schema (pageview, scroll, focus, redirect) | **In Progress** | Requirements/Tracking/event-schema.md |
-| E-commerce event schema (purchase, cart add/remove) | **In Progress** | Requirements/Tracking/event-schema.md |
-| Custom event definition by marketers | **In Progress** | Requirements/Tracking/event-schema.md |
-| Event data routing (where data lands) | Not started | |
+| Cookie-based tracking system (JS + pixel) | **Done** | Requirements/Tracking/tracking-architecture.md |
+| First-party (brand) + Symposia network cookie model | **Done** | Requirements/Tracking/tracking-architecture.md |
+| Consent banner model (marketer-primary, Symposia fallback, 4 consent events) | **Done** | Requirements/Tracking/tracking-architecture.md — TODO: legal copy for fallback banner |
+| Standard event schema (pageview, scroll, focus, redirect) | **Done** | Requirements/Tracking/event-schema.md |
+| E-commerce event schema (purchase, cart add/remove) | **Done** | Requirements/Tracking/event-schema.md |
+| Consent event schema (4 events, Merkle-committed) | **Done** | Requirements/Tracking/event-schema.md |
+| Custom event definition by marketers | **Done** | Requirements/Tracking/event-schema.md |
+| Event data routing (where data lands) | **Done** | Requirements/Tracking/tracking-architecture.md#data-storage-routing, Requirements/Platform/queue-and-pubsub.md |
 | Attribution modeling | Not started | Future |
 
 ---
@@ -109,8 +113,8 @@ These require decisions before specs can be finalized.
 
 2. **Symposia user identity and wallets**: ~~Is the Symposia-level user identity tied to a blockchain wallet address?~~ **Resolved**: Yes. Symposia identity is a blockchain wallet keypair. Consent grants and capability tokens are on-chain. Non-crypto-native UX is handled by an embedded custodial or self-custody wallet in the Symposia client. See [User Data Ownership](./Identity/user-data-ownership.md) and [Security](./Platform/security.md).
 
-3. **Contact database technology**: The contact database needs to support operational queries (segmentation, filtering), bulk imports, and fast individual lookups. Current candidates: (a) Postgres (already specced) for operations + blob for imports, (b) A specialized contact store built on blob storage with Postgres for indexing. Recommendation leans strongly toward Postgres.
+3. ~~**Contact database technology**~~ **Resolved**: Postgres. Already implemented throughout the contact-database.md schema. Blob storage handles bulk imports and event archival; Postgres handles operational queries, segmentation, and individual lookups.
 
-4. **Tracking pixel and JS — MVP or phase 2?**: The tracking system is complex (cookie consent flows, cross-domain coordination, event pipelines). Is this required for the first marketing module launch, or is it post-MVP?
+4. ~~**Tracking pixel and JS — MVP or phase 2?**~~ **Resolved**: MVP. The JS tracker and tracking pixel are required for the first marketing module launch.
 
-5. **Symposia cookie and consent UX**: When a user visits a site with the Symposia tracker, does Symposia show its own consent banner, or does the marketer's consent mechanism cover Symposia tracking? If both cookies need separate consent, this creates UX complexity.
+5. ~~**Symposia cookie and consent UX**~~ **Resolved**: The marketer's banner is the primary consent surface and must explicitly disclose both the brand cookie (`_sym_brand`) and the Symposia network cookie (`_sym_net`). If no marketer banner is detected within 3 seconds of tracker load, the Symposia tracker renders its own fallback banner. TODO: legal copy for the fallback banner must be reviewed before tracking ships in any GDPR-covered market — see [tracking-architecture.md](./Tracking/tracking-architecture.md#consent-integration). Four consent events are emitted and persisted to the individual's profile and Merkle commitment pipeline: `cookie_consent_shown`, `cookie_consent_recorded`, `symposia_platform_cookie_consent_shown`, `symposia_platform_cookie_consent_recorded`.

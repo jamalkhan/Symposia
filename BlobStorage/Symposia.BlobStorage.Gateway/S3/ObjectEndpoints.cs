@@ -1,8 +1,10 @@
+using System.Security.Cryptography;
 using Google.Protobuf;
 using Grpc.Core;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Gateway.Nodes;
 using Symposia.BlobStorage.Gateway.Quorum;
+using Symposia.BlobStorage.Gateway.Repair;
 using Symposia.BlobStorage.Protocol;
 
 namespace Symposia.BlobStorage.Gateway.S3;
@@ -79,7 +81,9 @@ internal static class ObjectEndpoints
 
     private static async Task<IResult> GetObject(
         string bucket, string key, HttpContext ctx,
-        GatewayMetadataStore store, INodeRegistry nodes)
+        GatewayMetadataStore store, INodeRegistry nodes,
+        ILogger<Program> logger,
+        RepairQueue repairQueue)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
 
@@ -121,12 +125,49 @@ internal static class ObjectEndpoints
             Length = isRange ? length : 0,
         };
 
-        var call = node.Client.ReadBlob(request,
-            cancellationToken: ctx.RequestAborted);
+        var call = node.Client.ReadBlob(request, cancellationToken: ctx.RequestAborted);
 
-        await foreach (var chunk in call.ResponseStream.ReadAllAsync(ctx.RequestAborted))
+        // Stream to client while computing SHA-256 for CID verification.
+        // Per Requirements/BlobStorage/redundancy-and-data-integrity.md: a read returning data
+        // that doesn't match the stored CID fails immediately and triggers read repair.
+        // We can only detect the mismatch at end-of-stream; at that point we abort the connection
+        // so the client SDK sees a broken transfer and retries. The corrupt replica is then
+        // flagged for removal and re-replication.
+        using var hasher = isRange ? null : IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        try
         {
-            await ctx.Response.Body.WriteAsync(chunk.Data.Memory, ctx.RequestAborted);
+            await foreach (var chunk in call.ResponseStream.ReadAllAsync(ctx.RequestAborted))
+            {
+                hasher?.AppendData(chunk.Data.Span);
+                await ctx.Response.Body.WriteAsync(chunk.Data.Memory, ctx.RequestAborted);
+            }
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
+        {
+            // Node claims it doesn't have the blob — it's missing from this replica.
+            logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair.", node.Url, record.Cid);
+            repairQueue.EnqueueMissingReplica(record, node.Url, store, nodes);
+            ctx.Abort();
+            return Results.Empty;
+        }
+
+        // Full-object CID verification (skipped for range requests; partial hash is meaningless).
+        if (hasher is not null)
+        {
+            var actualHex = Convert.ToHexStringLower(hasher.GetHashAndReset());
+            if (!actualHex.Equals(record.Cid, StringComparison.Ordinal))
+            {
+                logger.LogError(
+                    "CID mismatch on GET {Bucket}/{Key}: expected {Expected}, got {Actual}. " +
+                    "Aborting connection and flagging node {Url} for repair.",
+                    bucket, key, record.Cid, actualHex, node.Url);
+
+                repairQueue.EnqueueCorruptReplica(record, node.Url, store, nodes);
+                // Abort the underlying connection — the client receives a broken transfer and must retry.
+                ctx.Abort();
+                return Results.Empty;
+            }
         }
 
         return Results.Empty;
@@ -151,14 +192,51 @@ internal static class ObjectEndpoints
 
     // ── DeleteObject ──────────────────────────────────────────────────────────
 
-    private static IResult DeleteObject(
-        string bucket, string key, HttpContext ctx, GatewayMetadataStore store)
+    private static async Task<IResult> DeleteObject(
+        string bucket, string key, HttpContext ctx,
+        GatewayMetadataStore store, INodeRegistry nodes, ILogger<Program> logger)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
 
-        // S3 DeleteObject is always 204, even if the key did not exist.
+        var record = store.GetObject(bucket, key);
+
+        // Remove from metadata immediately (makes object invisible to LIST/GET).
         store.DeleteObject(bucket, key);
+
+        if (record is not null && !store.IsCidReferenced(record.Cid))
+        {
+            // No other object shares this CID — attempt to delete the blob from each node.
+            // Fire-and-forget: failures are queued in gc_queue for retry by GcWorker.
+            foreach (var nodeUrl in record.NodeIds)
+            {
+                var node = nodes.All.FirstOrDefault(n =>
+                    n.Url.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+
+                if (node is not null)
+                    _ = DeleteFromNodeAsync(node, record.Cid, store, logger);
+                else
+                    store.EnqueueNodeDeletion(record.Cid, nodeUrl);
+            }
+        }
+
+        // S3 DeleteObject is always 204, even if the key did not exist.
         return Results.StatusCode(204);
+    }
+
+    private static async Task DeleteFromNodeAsync(
+        NodeConnection node, string cid, GatewayMetadataStore store, ILogger logger)
+    {
+        try
+        {
+            await node.Client.DeleteBlobAsync(new DeleteBlobRequest { Cid = cid });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                "Failed to delete blob {Cid} from node {Url}: {Message}. Queued for retry.",
+                cid, node.Url, ex.Message);
+            store.EnqueueNodeDeletion(cid, node.Url);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

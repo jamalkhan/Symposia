@@ -8,9 +8,34 @@ The vehicle for this is the **Symposia Profile Portal** — a web interface wher
 
 ---
 
+## Portal Access by Identity Tier
+
+The profile portal is tiered — what an individual can see and do scales with how strongly they have proved their identity. See [Identity Proof and Claim](./identity-proof-and-claim.md) for full tier definitions.
+
+| Tier | Portal Access | What They Can See and Do |
+|---|---|---|
+| **T0** (anonymous) | No portal access. Anonymous visitors have no Symposia account and no claimed identity. | Nothing. Consent and tracking preferences are managed in the browser (cookie opt-out via tracker API). |
+| **T1** (OTP-verified email or phone) | Portal access for a **single marketer** per session. Accessed via the preference center URL embedded in a marketing email — no Symposia account required, but an OTP is required. | Data held by that one marketer, subscription preferences for that marketer, category preferences, deletion request for that marketer. Cannot see other marketers. |
+| **T2** (wallet + ≥1 OTP-verified address) | Full portal access via Symposia account login. | All linked marketers, cross-brand preference management, global opt-out, claim additional records, full behavioral timeline across brands, third-party integration disclosures. |
+| **T3** (wallet signature over all claimed surfaces) | Full portal access + on-chain consent token generation and cryptographic proof requests. | Everything T2 can see, plus verifiable proof artifacts for any compliance event in their history. |
+
+The portal detects which tier the authenticated session is operating at and shows/hides features accordingly. A T1 session via preference center URL is scoped to a single tenant and shows only that marketer's panel — the cross-brand sections are not visible.
+
+### Identity Tier Status in the Portal
+
+The portal displays the individual's current tier prominently, with:
+- The verified surfaces (which email addresses and phone numbers have OTP confirmation).
+- The last verification date for each claimed surface.
+- A warning badge if any claimed surface is within 60 days of its 13-month re-verification due date.
+- A prominent re-verification prompt if any claimed surface has lapsed (triggering a `compliance.identity_verification_lapsed` event).
+
+When a T2 claim lapses, the portal clearly displays: *"Your cross-brand identity verification has expired. Re-verify to manage preferences across all your marketers."* Existing preferences (including the global opt-out if set) remain active; the individual simply cannot modify cross-brand preferences until re-verified.
+
+---
+
 ## Profile Portal
 
-The profile portal is accessible at `https://profile.symposia.network`. It requires login with the individual's Symposia account.
+The profile portal is accessible at `https://profile.symposia.network`. It requires login with the individual's Symposia account (T2+). T1 sessions access the per-marketer view via the preference center URL (`https://prefs.symposia.network/{tenant-slug}/{contact-token}`).
 
 ### What the Portal Shows
 
@@ -40,10 +65,12 @@ A list of all permission grants — which marketers have been granted which perm
 
 **My Tracking Settings**
 
-Controls for cross-brand tracking:
-- Symposia network tracking preference (allowed / brand_only / blocked)
-- Individual browser fingerprint IDs associated with this identity (can be disassociated)
-- Cookie status across known browsers/devices
+Controls for cross-brand tracking. Requires T2 identity to manage cross-brand settings; T1 sessions can only see and modify settings scoped to the single marketer they are accessing.
+
+- **Symposia network tracking preference**: `allowed` (both `_sym_brand` and `_sym_net` cookies active) / `brand_only` (`_sym_brand` per marketer, no `_sym_net` cross-brand cookie) / `blocked` (no Symposia tracking). See [Tracking Architecture — Cookie Model](../Tracking/tracking-architecture.md#cookie-model).
+- **Consent history**: a timeline of all `cookie_consent_shown` and `cookie_consent_recorded` events across all brands, with the banner copy version and decision recorded. Each event links to its Merkle proof.
+- **Individual browser/device IDs** associated with this identity (can be disassociated). Disassociating a browser ID severs the link between that `brand_visitor_id` / `network_visitor_id` and the Symposia identity — future events from that browser will be anonymous until re-identified.
+- **Cookie status across known browsers/devices**: which browsers have an active `_sym_brand` or `_sym_net` cookie, when consent was last recorded, and when consent expires (13 months from `recorded_at` or sooner if banner copy version changes).
 
 **Third-Party Integration Disclosures**
 
@@ -128,4 +155,4 @@ The export is delivered as a JSON file (machine-readable) and a human-readable H
 > Marketers should collect identifiers ONLY as identifiers. Collecting such identifiers without the proper classification is considered a breach of the usage policy, and is subject to penality including but not limited to financial penalty, dejection from the platform, and referral to law enforcement for breach of compliance (e.g., GDPR, CCPA, etc.)
 
 - **Third-party ad platform data**: If a marketer has synced a contact to Facebook or Google Ads, the platform can show the individual that this sync exists (via the marketer's integration list), but it cannot show them what Facebook or Google holds. Should the platform surface third-party sync destinations even if it can't show the data?
-> When a marketer activates platform features or applications, such as integrations with Facebook or Google, the platform will log feature activation and usage data, and this activation will be presented to the user. For example, if Marketer A turned on Facebook integration on 7/1/2026 and synchronized 7,543,123 contacts between 7/1/2026 and today AND Marketer A turned on Google Ads integration on 7/1/2026, sychronized 7,543,123 contacts between 7/1/2026 and 9/1/2026, but then deactivated it on 9/1/2026, this should be visible to the individual. Aggregate data only.
+> Yes. When a marketer activates platform features or applications, such as integrations with Facebook or Google, the platform will log feature activation and usage data, and this activation will be presented to the user. For example, if Marketer A turned on Facebook integration on 7/1/2026 and synchronized 7,543,123 contacts between 7/1/2026 and today AND Marketer A turned on Google Ads integration on 7/1/2026, synchronized 7,543,123 contacts between 7/1/2026 and 9/1/2026, but then deactivated it on 9/1/2026, this should be visible to the individual. Aggregate data only. The platform cannot confirm whether the individual specifically was included in a sync — the portal surfaces links to each platform's own data-access tools (Meta's Off-Facebook Activity, Google's My Ad Center) alongside the disclosure. See the Third-Party Integration Disclosures panel above.

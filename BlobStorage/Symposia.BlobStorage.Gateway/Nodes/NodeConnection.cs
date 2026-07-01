@@ -48,5 +48,14 @@ public sealed class NodeConnection : IDisposable
         LastProbe?.Healthy == true &&
         (DateTimeOffset.UtcNow - LastProbeTime).TotalSeconds < 90;
 
+    /// <summary>
+    /// Set to true by NodeRegistry when this node first comes back online after a failed probe.
+    /// NodeReconciler reads and clears this flag to schedule reconciliation.
+    /// </summary>
+    public bool JustReconnected { get; set; }
+
+    /// <summary>Time when the node was last observed to be unhealthy (or never). Used for grace-period checks.</summary>
+    public DateTimeOffset LastUnhealthyAt { get; set; } = DateTimeOffset.MinValue;
+
     public void Dispose() => _channel.Dispose();
 }

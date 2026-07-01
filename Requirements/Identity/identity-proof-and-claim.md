@@ -86,6 +86,20 @@ The Apple IDFA and Google GAID are advertiser-scoped device identifiers. Post-AT
 - Device IDs can be reset by the user deliberately — this severs existing links and should be treated like a cookie deletion.
 - Symposia should treat device IDs as **medium-strength, device-scoped identifiers** rather than durable person identifiers. They are useful for in-app attribution but not reliable as long-term identity anchors.
 
+### Proof Strength Hierarchy
+
+Not all evidence of "this person is associated with this address" is equal. The platform maintains a formal ranking of proof strength for every link between an identity surface and a contact address. This ranking determines what rights the individual can exercise and what the platform can do with the association:
+
+| Rank | How Established | Platform Treatment | Rights Enabled |
+|---|---|---|---|
+| **First-class (OTP)** | Individual received a code at the address and entered it, or clicked a signed magic link sent to the address | Authoritative identity link. Recorded with timestamp and method. | Full T1 rights at that marketer; eligible for wallet pairing to reach T2 |
+| **Medium (form entry)** | Email or phone submitted via a form with no verification step | Tentative identity association. The platform cannot confirm the individual controls the address. | Limited: can be used by the marketer for sending, but does not unlock rights-exercise flows until OTP-verified |
+| **Fuzzy (click-through)** | Tracked link click in an email or web session associates a cookie/device with an email address | **Association only — not identity.** Recorded as a candidate link, not a confirmed link. | None for rights exercise. Can inform probabilistic personalization. Cannot be used to propagate deletion or access requests. |
+
+**Why click-through is only an association**: nothing prevents an individual from forwarding a marketing email to another person, who then clicks a tracked link. If click-through established identity, two different people's profiles would be explicitly merged — when the correct model is that they are merely *associated* (the same email was forwarded; the clicker is a different person). Click-through can increase the confidence score of an existing probabilistic link, but it cannot by itself create an identity claim.
+
+Every link in the system — cookie-to-email, address-to-wallet, device-to-contact — is stored with its proof rank and the timestamp and method of establishment. This is the audit trail that makes incorrect links traceable and reversible.
+
 ### Tracking Cookies (`_sym_net`, `_sym_brand`)
 
 Set in the browser by the JS tracker when the individual visits a marketer's site. The Symposia cookie (`_sym_net`) is the network-level identifier; the marketer cookie (`_sym_brand`) is the brand-level identifier.
@@ -135,9 +149,11 @@ Define a formal hierarchy of identity assurance levels, and tie platform capabil
 | Tier | Identity Basis | How Established | Capabilities Enabled |
 |---|---|---|---|
 | **T0 — Anonymous** | Tracking cookie / device ID only | Browser visit / app install | Per-marketer analytics, session continuity only |
-| **T1 — Verified Contact** | Email or phone, OTP-verified | OTP flow from marketer's form or platform | Marketer-scoped deletion, marketer-scoped access, unsubscribe, subscription management |
-| **T2 — Symposia Account** | Symposia wallet (custodial or self-custody) | Wallet creation + at least one verified contact | Cross-brand profile visibility, cross-brand deletion propagation, consent grant management, data portability |
+| **T1 — Verified Contact** | Email or phone, OTP-verified | OTP flow (marketer's or platform's — see Q2 below) | Marketer-scoped deletion, marketer-scoped access, unsubscribe, subscription management — one marketer at a time |
+| **T2 — Symposia Account** | Symposia wallet + at least one OTP-verified address | Wallet creation, then OTP-verify one or more emails/phones | Cross-brand profile visibility, cross-brand deletion propagation, consent grant management, data portability — across **all** addresses paired to the wallet simultaneously |
 | **T3 — Cryptographic Ownership** | Wallet signature over all claimed surfaces | Explicit wallet-signed claim for each surface | Maximum: all T2 rights + on-chain consent tokens + capability token issuance |
+
+**How T1 and T2 relate**: T1 is per-address, per-marketer. An individual can exercise T1 rights against Walmart using `jamal@gmail.com` and T1 rights against Hyatt using `jamal@hotmail.com` — separately, one at a time, each verified by its own OTP. T2 is what happens when a wallet *owns* both of those addresses: logging in with any one of the wallet's paired identities lets the individual manage subscriptions and exercise rights across all marketers connected to any of the wallet's verified addresses, simultaneously. The wallet doesn't replace OTP — it aggregates multiple OTP-verified addresses under a single controllable identity.
 
 Capabilities map to tiers: deletion from a single marketer requires T1. Cross-brand deletion requires T2. Issuing or revoking on-chain capability tokens requires T3.
 
@@ -233,19 +249,21 @@ Any design must handle these:
 
 ## Open Questions
 
-1. **Minimum identity for rights exercise**: What is the lowest-friction path to exercising a deletion right? Is email OTP sufficient for a deletion request against a single marketer, or does Symposia require a full account (wallet)?
+All questions resolved.
 
-2. **Auto-claiming at contact acquisition**: When a marketer collects an email via a verified OTP flow (e.g., a double opt-in welcome series), should that OTP verification count as a T1 identity claim, or does the individual need to re-verify separately through Symposia's own flow?
+1. ~~**Minimum identity for rights exercise**~~ **Resolved**: Email or phone OTP alone is sufficient for deletion and access requests against a single marketer — no wallet required. Rights can be exercised marketer-by-marketer, one at a time, each requiring its own OTP verification for that address. Once a wallet is established, OTP-verified addresses are paired to the wallet, and logging in via any one of those paired identities lets the individual manage rights across all marketers connected to all of the wallet's verified addresses simultaneously. See updated T1/T2 tier table above.
 
-3. **Unclaimed data retention policy**: How long do we hold anonymous tracking data (cookie-only, no contact address) before auto-purging? 13 months (GA4 standard)? 24 months? This has both privacy and marketer analytics implications.
+2. ~~**Auto-claiming at contact acquisition**~~ **Resolved**: A marketer's own verified OTP flow (e.g., double opt-in) counts as a T1 identity claim — the individual does not need to re-verify through a separate Symposia flow. The marketer's platform integration must pass a verification signal to the platform at the time of verification: `{ email, verified_at, method: "double_opt_in" }`. This is recorded as a first-class OTP proof with the marketer as the verifying party. The platform trusts this signal because the marketer bears AUP liability for falsely reporting a verification.
 
-4. ~~**Data-to-identity link on claim**~~ **Resolved**: First-party marketer contact records (those where the marketer collected the email directly from the individual) auto-link and are surfaced to the individual upon email claim, with a summary view and the ability to dispute any unrecognized brand. Non-first-party records (list purchases, broker data) do not auto-link. See Option 2.
+3. ~~**Unclaimed data retention policy**~~ **Resolved**: Anonymous tracking data (cookie-only, no contact address) auto-purges after **13 months** — consistent with the GA4 standard and the re-verification cadence (Q5). This is not currently configurable per marketer, but the data model must support a per-marketer retention override so this can be made configurable in a future release without a schema change. Marketer-created data (orders, purchase history, custom properties) is not subject to this purge — it follows the [created-data ownership rules](../MarketingData/contact-database.md#data-ownership-model).
 
-5. **Conflict resolution**: Two people claim the same email (e.g., after a provider recycles an address). What does the platform do? First-claimant wins? Require re-verification after N months?
+4. ~~**Data-to-identity link on claim**~~ **Resolved**: First-party marketer contact records auto-link and are surfaced to the individual upon email claim, with a summary view and the ability to dispute any unrecognized brand. Non-first-party records do not auto-link. See Option 2 and [User Profile Visibility](./user-profile-visibility.md#claim-my-records-flow).
 
-6. **Corporate vs. personal address handling**: Is there a distinction between personal email addresses and corporate/alias addresses in terms of what identity tier they can support?
+5. ~~**Conflict resolution**~~ **Resolved**: Every active T1 and T2 identity claim requires re-verification every **13 months** — consistent with the anonymous data retention window. If a new individual claims an address that already has an active claim, they must complete OTP verification; on success, the new claim takes ownership, the previous holder's link is severed, and their data becomes unclaimed (not deleted) until they re-verify with a current address. Re-verification is prompted proactively by the platform before expiry; claims that lapse without re-verification revert to unclaimed status automatically. When a claim lapses, the platform emits a `compliance.identity_verification_lapsed` event to the NATS bus (subject: `sym.{tenant}.compliance.identity_verification_lapsed`) containing the address type, the address hash, and the lapse timestamp. This event can be used to trigger a re-verification prompt Journey, notify the marketer that a previously verified contact has dropped to unclaimed status, and update the contact record's proof rank accordingly.
 
-7. **Platform liability for incorrect links**: If the platform incorrectly links a surface to the wrong wallet (probabilistic linking gone wrong), and data is deleted or accessed as a result, what is the remediation process?
+6. ~~**Corporate vs. personal address handling**~~ **Resolved**: Addresses where the local part matches a known role-name pattern (`info`, `billing`, `hello`, `admin`, `support`, `noreply`, `team`, `contact`, `help`, `sales`, `no-reply`, etc.) are flagged as likely shared addresses and capped at T1 (single-marketer rights only). T2/T3 cross-brand claims are blocked for flagged addresses. An individual can override the flag by asserting the address is personal — the platform records the assertion and the individual accepts that the platform's liability protection for shared-address misuse does not apply to their account.
+
+7. ~~**Platform liability for incorrect links**~~ **Resolved**: Three-part answer. (1) **Audit log**: every link is stored with its proof rank (OTP first-class / form-entry medium / click-through fuzzy), verifying party, and timestamp — making any incorrect link traceable and reversible. (2) **ToS**: platform liability for incorrect probabilistic links is limited when the probabilistic linking mechanism was disclosed to the individual at opt-in; ToS covers this. (3) **Technical proof ranking** (see [Proof Strength Hierarchy](#proof-strength-hierarchy) above): OTP is first-class and authoritative; form entry without OTP is medium and does not unlock rights-exercise flows; click-through is fuzzy and creates only an association, never an identity claim. This ranking structurally prevents the most common incorrect-link scenario (click-through falsely establishing identity) from having rights-exercise consequences.
 
 ---
 

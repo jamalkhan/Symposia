@@ -10,4 +10,7 @@ public sealed class StorageNodeOptions
 
     /// <summary>Total bytes this node offers to the network (operator-configured).</summary>
     public long MaxCapacityBytes { get; set; } = 10L * 1024 * 1024 * 1024;
+
+    /// <summary>How often the node verifies all stored blob hashes (seconds). Default 3600 = 1 hour.</summary>
+    public int IntegrityCheckIntervalSeconds { get; set; } = 3600;
 }

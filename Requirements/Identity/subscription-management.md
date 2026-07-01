@@ -11,6 +11,35 @@ Subscription management is handled at two levels:
 
 ---
 
+## Identity Tier Requirements
+
+The scope of subscription management operations depends on the individual's identity tier. See [Identity Proof and Claim](./identity-proof-and-claim.md) for full tier definitions.
+
+| Tier | What They Can Manage | Proof Required |
+|---|---|---|
+| **T0** (anonymous) | Nothing. No verified identity means no subscription management. | — |
+| **T1** (OTP-verified email or phone) | Unsubscribe, category preferences, frequency preferences, and deletion request for **one marketer at a time**. Must repeat per marketer. | Email or phone OTP for each marketer. |
+| **T2** (wallet + ≥1 OTP-verified address) | All T1 operations plus the **global opt-out** (no marketing from any Symposia marketer for all linked addresses simultaneously) and cross-brand preference synchronization. | Wallet authentication in the Symposia profile portal. |
+| **T3** | Same as T2. | Wallet signature. |
+
+### One-Click Unsubscribe Token as T1-Equivalent
+
+The one-click unsubscribe token embedded in the `List-Unsubscribe` header is functionally equivalent to T1 proof for the email address that received the message. The token is HMAC-signed, encodes the contact ID and tenant, and can only have been received by someone with access to that email inbox. This is treated as **OTP-equivalent** — first-class proof for the purposes of unsubscribing from that specific marketer.
+
+This is consistent with the [proof strength hierarchy](./identity-proof-and-claim.md#proof-strength-hierarchy): inbox access (via a token delivered to the inbox) equals OTP strength.
+
+### 13-Month Claim Expiry and Cross-Brand Preferences
+
+T2 identity claims (wallet + OTP-verified addresses) expire after 13 months without re-verification (consistent with the [13-month platform timeout](./identity-proof-and-claim.md#claim-expiry)). When a T2 claim lapses:
+
+- The global opt-out preference remains **active and enforced** — it was set by a verified individual and the platform continues to honor it until actively revoked.
+- The individual's ability to **modify** cross-brand preferences (add new addresses to the opt-out, change the global preference, claim new marketers) is **suspended** until re-verification.
+- A `compliance.identity_verification_lapsed` event is emitted, and the profile portal displays a banner prompting re-verification.
+
+This means the individual is protected (the opt-out holds) but cannot make new cross-brand changes until they re-verify their wallet identity.
+
+---
+
 ## Unsubscribe Mechanisms
 
 ### 1. One-Click Unsubscribe (RFC 8058)
@@ -56,6 +85,8 @@ The `contact-token` is HMAC-signed with the tenant's key, encodes the contact ID
 ---
 
 ## Global Unsubscribe (Symposia-Level)
+
+Requires **T2 identity** (wallet + at least one OTP-verified address). The global opt-out applies to all addresses the individual has claimed under their wallet — a single action covers every linked email and phone across every marketer simultaneously.
 
 An individual with a Symposia identity can set a global marketing preference in their Symposia profile:
 

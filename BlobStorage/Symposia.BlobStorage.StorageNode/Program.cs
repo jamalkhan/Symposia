@@ -17,6 +17,7 @@ builder.Services.Configure<StorageNodeOptions>(builder.Configuration.GetSection(
 builder.Services.AddSingleton<NodeIdentity>();
 builder.Services.AddSingleton<LocalBlobStore>();
 builder.Services.AddSingleton<ManifestStore>();
+builder.Services.AddHostedService<IntegritySelfCheckWorker>();
 builder.Services.AddGrpc();
 
 var app = builder.Build();

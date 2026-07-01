@@ -135,6 +135,64 @@ public sealed class ManifestStore
         return (long)(command.ExecuteScalar() ?? 0L);
     }
 
+    /// <summary>Returns a page of CIDs ordered lexicographically, starting after <paramref name="afterCid"/>.</summary>
+    public IReadOnlyList<string> ListCidsPaged(string afterCid, int limit)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = afterCid.Length == 0
+            ? "SELECT cid FROM blob_manifest ORDER BY cid LIMIT $limit"
+            : "SELECT cid FROM blob_manifest WHERE cid > $after ORDER BY cid LIMIT $limit";
+        command.Parameters.AddWithValue("$limit", limit);
+        if (afterCid.Length > 0)
+            command.Parameters.AddWithValue("$after", afterCid);
+
+        using var reader = command.ExecuteReader();
+        var results = new List<string>();
+        while (reader.Read()) results.Add(reader.GetString(0));
+        return results;
+    }
+
+    /// <summary>Returns all blobs with the given status.</summary>
+    public IReadOnlyList<BlobRecord> ListByStatus(BlobStatus status)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT cid, size_bytes, tenant_id, bucket, key, region_tags, stored_at, checksum_verified_at, status " +
+            "FROM blob_manifest WHERE status = $status";
+        command.Parameters.AddWithValue("$status", status.ToString());
+
+        using var reader = command.ExecuteReader();
+        var results = new List<BlobRecord>();
+        while (reader.Read())
+        {
+            if (Cid.TryParse(reader.GetString(0), out var cid))
+                results.Add(MapRecord(cid, reader));
+        }
+        return results;
+    }
+
+    public void SetStatus(Cid cid, BlobStatus status)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE blob_manifest SET status = $status WHERE cid = $cid";
+        command.Parameters.AddWithValue("$status", status.ToString());
+        command.Parameters.AddWithValue("$cid", cid.Value);
+        command.ExecuteNonQuery();
+    }
+
+    public void UpdateChecksumVerifiedAt(Cid cid, DateTimeOffset verifiedAt)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE blob_manifest SET checksum_verified_at = $t WHERE cid = $cid";
+        command.Parameters.AddWithValue("$t", verifiedAt.ToString("O"));
+        command.Parameters.AddWithValue("$cid", cid.Value);
+        command.ExecuteNonQuery();
+    }
+
     private static BlobRecord MapRecord(Cid cid, SqliteDataReader reader)
     {
         var regionTagsRaw = reader.GetString(4);

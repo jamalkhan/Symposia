@@ -43,6 +43,26 @@ public sealed class GatewayMetadataStore
             );
 
             CREATE INDEX IF NOT EXISTS idx_objects_bucket_key ON objects (bucket, key);
+            CREATE INDEX IF NOT EXISTS idx_objects_cid ON objects (cid);
+
+            -- Pending node-side blob deletions: queued when DeleteObject is called but a node is
+            -- unreachable, or when a replica is confirmed corrupt and must be purged.
+            CREATE TABLE IF NOT EXISTS gc_queue (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                cid           TEXT NOT NULL,
+                node_url      TEXT NOT NULL,
+                queued_at     TEXT NOT NULL,
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                last_attempt  TEXT NULL
+            );
+
+            -- Dynamically registered nodes (added via admin API or auto-discovered).
+            -- Config-file nodes are not persisted here; they are merged at startup.
+            CREATE TABLE IF NOT EXISTS nodes (
+                url        TEXT PRIMARY KEY,
+                added_at   TEXT NOT NULL,
+                source     TEXT NOT NULL   -- 'config' | 'admin'
+            );
             """);
     }
 
@@ -114,6 +134,138 @@ public sealed class GatewayMetadataStore
         return Execute(Query(conn,
             "DELETE FROM objects WHERE bucket = $b AND key = $k",
             ("$b", bucket), ("$k", key))) > 0;
+    }
+
+    // ── CID reference counting ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true if any object still references this CID.
+    /// Used by GcWorker to skip blob deletion when multiple keys share the same content (dedup).
+    /// </summary>
+    public bool IsCidReferenced(string cid)
+    {
+        using var conn = Open();
+        return Query(conn, "SELECT 1 FROM objects WHERE cid = $cid LIMIT 1",
+            ("$cid", cid)).ExecuteScalar() is not null;
+    }
+
+    /// <summary>Returns the first object record that matches the given CID, or null if none exists.</summary>
+    public ObjectRecord? GetObjectByCid(string cid)
+    {
+        using var conn = Open();
+        using var cmd = Query(conn,
+            "SELECT bucket, key, size_bytes, content_type, last_modified, node_ids FROM objects WHERE cid = $cid LIMIT 1",
+            ("$cid", cid));
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        return new ObjectRecord(
+            r.GetString(0), r.GetString(1), cid,
+            r.GetInt64(2), r.GetString(3),
+            DateTimeOffset.Parse(r.GetString(4)),
+            SplitNodeIds(r.GetString(5)));
+    }
+
+    /// <summary>
+    /// Updates the node_ids list for an existing object record.
+    /// Used by RepairWorker after successfully re-replicating a blob to a new node.
+    /// </summary>
+    public void UpdateNodeIds(string bucket, string key, IReadOnlyList<string> nodeIds)
+    {
+        using var conn = Open();
+        Execute(Query(conn,
+            "UPDATE objects SET node_ids = $ni WHERE bucket = $b AND key = $k",
+            ("$ni", string.Join(',', nodeIds)), ("$b", bucket), ("$k", key)));
+    }
+
+    /// <summary>
+    /// Pages through all objects in the metadata store.
+    /// Used by the ReplicationMonitor and NodeReconciler.
+    /// </summary>
+    public IReadOnlyList<ObjectRecord> ListAllObjectsPaged(string afterKey, int limit)
+    {
+        using var conn = Open();
+        using var cmd = afterKey.Length == 0
+            ? Query(conn,
+                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects ORDER BY bucket, key LIMIT $limit",
+                ("$limit", limit))
+            : Query(conn,
+                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE (bucket || '/' || key) > $after ORDER BY bucket, key LIMIT $limit",
+                ("$after", afterKey), ("$limit", limit));
+
+        using var r = cmd.ExecuteReader();
+        var results = new List<ObjectRecord>();
+        while (r.Read())
+        {
+            results.Add(new ObjectRecord(
+                r.GetString(0), r.GetString(1), r.GetString(2),
+                r.GetInt64(3), r.GetString(4),
+                DateTimeOffset.Parse(r.GetString(5)),
+                SplitNodeIds(r.GetString(6))));
+        }
+        return results;
+    }
+
+    // ── GC queue ──────────────────────────────────────────────────────────────
+
+    public void EnqueueNodeDeletion(string cid, string nodeUrl)
+    {
+        using var conn = Open();
+        Execute(Query(conn,
+            "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at) VALUES ($cid, $url, $t)",
+            ("$cid", cid), ("$url", nodeUrl), ("$t", Now())));
+    }
+
+    public IReadOnlyList<(long Id, string Cid, string NodeUrl, int Attempts)> GetPendingDeletions(int limit)
+    {
+        using var conn = Open();
+        using var cmd = Query(conn,
+            "SELECT id, cid, node_url, attempts FROM gc_queue ORDER BY attempts, id LIMIT $limit",
+            ("$limit", limit));
+        using var r = cmd.ExecuteReader();
+        var results = new List<(long, string, string, int)>();
+        while (r.Read())
+            results.Add((r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetInt32(3)));
+        return results;
+    }
+
+    public void RemoveFromGcQueue(long id)
+    {
+        using var conn = Open();
+        Execute(Query(conn, "DELETE FROM gc_queue WHERE id = $id", ("$id", id)));
+    }
+
+    public void IncrementGcAttempt(long id)
+    {
+        using var conn = Open();
+        Execute(Query(conn,
+            "UPDATE gc_queue SET attempts = attempts + 1, last_attempt = $t WHERE id = $id",
+            ("$t", Now()), ("$id", id)));
+    }
+
+    // ── Dynamic node registry ─────────────────────────────────────────────────
+
+    public IReadOnlyList<string> GetPersistedNodes()
+    {
+        using var conn = Open();
+        using var cmd = Query(conn, "SELECT url FROM nodes ORDER BY added_at");
+        using var r = cmd.ExecuteReader();
+        var results = new List<string>();
+        while (r.Read()) results.Add(r.GetString(0));
+        return results;
+    }
+
+    public void PersistNode(string url, string source)
+    {
+        using var conn = Open();
+        Execute(Query(conn,
+            "INSERT OR IGNORE INTO nodes (url, added_at, source) VALUES ($url, $t, $src)",
+            ("$url", url), ("$t", Now()), ("$src", source)));
+    }
+
+    public void RemovePersistedNode(string url)
+    {
+        using var conn = Open();
+        Execute(Query(conn, "DELETE FROM nodes WHERE url = $url", ("$url", url)));
     }
 
     public (IReadOnlyList<ObjectRecord> Objects, bool IsTruncated, string? NextContinuationToken) ListObjects(
