@@ -31,7 +31,7 @@ Storage fees are denominated in the native token. When a tenant pays with a stab
 ### Oracle Design
 
 - The platform uses a **time-weighted average price (TWAP)** oracle reading from the deepest liquidity pool for the native token on Base DEXes (initially Uniswap v3 on Base or Aerodrome).
-- The TWAP window is **1 hour** (6 epochs of 10 minutes each). This smooths short-term price spikes that could advantage or disadvantage either the tenant or the network.
+- The TWAP window is **1 hour wall-clock** (not tied to reward epoch length; reward epochs are 24h — see [Tokenomics MVP](../Blockchain/tokenomics-mvp.md)). This smooths short-term price spikes that could advantage or disadvantage either the tenant or the network.
 - Oracle reads are recorded on-chain at each epoch boundary so that any participant can independently verify the rate applied to their settlement.
 - The oracle is not operated by the platform — it is a read from the public on-chain price feed. The platform does not have custody of oracle data.
 

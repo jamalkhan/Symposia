@@ -23,7 +23,8 @@ Every event includes these fields regardless of type:
   "event_type": "page_view",
   "occurred_at": "2026-06-30T12:34:56.789Z",
   "source": "web",                    // web | email | api | import
-  "session_id": "uuid",               // groups events into sessions (30-min inactivity = new session)
+  "session_id": "uuid",               // groups events into sessions; inactivity TTL is marketer-configured per tenant/site (default 30 min) — see session-model.md
+  "site_id": "uuid",                  // tracked property under the tenant
 
   // Server-side enriched (never stored raw):
   "geo": {
@@ -551,6 +552,66 @@ POST /marketing/event-definitions
 ```
 
 Registering a definition is optional — unregistered custom events are stored as-is. Registration enables the segmentation engine UI to surface the event type and its properties as filterable fields.
+
+---
+
+## Session Events (Server-Produced)
+
+### `session_expired`
+
+Emitted when a site session exceeds the marketer-configured inactivity TTL. **TTL is not platform-global** — tenant default with optional per-site override. Full mechanics: [Session Model](./session-model.md).
+
+Used as the primary trigger for cart-abandon and browse-abandon Campaigns.
+
+```json
+{
+  "event_type": "session_expired",
+  "source": "web",
+  "site_id": "uuid",
+  "session_id": "uuid",
+  "properties": {
+    "inactivity_ttl_seconds": 1800,
+    "had_cart_activity": true,
+    "had_purchase": false,
+    "cart_id": "cart-uuid",
+    "config_source": "site"
+  }
+}
+```
+
+---
+
+## Automation Activity Events (Server-Produced)
+
+Not emitted by the JS tracker. Produced by the Campaign and Journey executors and written to the same `marketing.contact_events` store so history branching, segmentation, and analytics share one timeline with web and email events.
+
+Canonical list and property requirements: [Journeys — Activity Events and History Branching](../Journeys/journeys.md#activity-events-and-history-branching).
+
+| `event_type` | Source |
+|---|---|
+| `journey_enrolled`, `journey_step_entered`, `journey_step_completed`, `journey_step_failed`, `journey_exited`, `journey_reentry_blocked` | Journey executor |
+| `campaign_enrolled`, `campaign_send_queued`, `campaign_send_skipped`, `campaign_job_included` | Campaign executor / Broadcast freeze |
+| `trigger_matched` | Trigger evaluator |
+
+Example:
+
+```json
+{
+  "event_type": "journey_step_completed",
+  "source": "api",
+  "contact_id": "uuid",
+  "properties": {
+    "journey_id": "uuid",
+    "journey_version": 3,
+    "campaign_id": "uuid",
+    "step_id": "uuid",
+    "step_name": "Welcome Email",
+    "step_type": "action",
+    "enrollment_id": "uuid",
+    "outcome": "advanced"
+  }
+}
+```
 
 ---
 

@@ -50,9 +50,9 @@ Requirements:
 SPF authorizes which IP addresses may send mail on behalf of the sending domain.
 
 Requirements:
-- Tenants using a Symposia subdomain for sending (e.g., `mail.malamute.via.symposia.network`) inherit the platform's SPF record.
-- Tenants using a custom sending domain must add an SPF include record: `include:spf.symposia.network`.
-- The platform publishes and maintains the `spf.symposia.network` record covering all platform sending IPs.
+- Tenants on the **shared IP pool** use platform-managed SPF (`include:spf.symposia.network` or equivalent covering shared pool IPs).
+- Tenants on **Email IP Address nodes** must publish SPF that authorizes **those node IP(s)** (explicit `ip4:` / `ip6:` and/or a tenant-specific include maintained from registered node IPs). The platform generates the recommended SPF string from the tenant’s registered Email IP Address nodes.
+- The platform publishes and maintains records covering **shared pool** IPs only for shared-pool senders — not a substitute for marketer node IPs on the dedicated path.
 - SPF alignment: the envelope `MAIL FROM` domain must align with the `From:` header domain (relaxed alignment acceptable).
 
 ### DMARC
@@ -69,9 +69,11 @@ Requirements:
 
 ## Sending Domains and IP Strategy
 
-**Resolved: every marketer owns their own IP address.** When a marketer onboards to the platform, part of their onboarding process is provisioning one or more dedicated sending IP addresses assigned to their account. Their sending reputation is entirely their own — they cannot be affected by another marketer's behavior, and they cannot affect others. This is the model for any marketer who meets the sending volume threshold for a dedicated IP (see [Shared IP Pool — Small Marketer Definition](#shared-ip-pool--small-marketer-definition) below).
+**Resolved: every marketer owns their own sending IP path via one or more Email IP Address nodes.** Marketers (tenants) **provide** node(s) that supply at minimum their email sending IP address(es) to the network. Those nodes are the **inbound and outbound proxy** for mail associated with the marketer’s sending domain(s). Reputation stays with the marketer’s IP(s); other marketers cannot pollute them.
 
-Small marketers who do not yet meet the volume threshold are assigned to the **shared IP pool** — a platform-managed set of IPs shared across vetted, low-volume senders with stricter behavioral guardrails. The shared pool is an onramp, not a permanent tier: as a marketer's volume grows past the threshold, they are migrated to a dedicated IP as part of the account upgrade process.
+See [Email IP Address Nodes](#email-ip-address-nodes) for the full node model (multi-IP, no token rewards, relay-only).
+
+Small marketers who do not yet run their own IP node may use a **shared IP pool** — a platform-managed onramp with stricter guardrails (see [Shared IP Pool](#shared-ip-pool--small-marketer-definition)). Graduating off the shared pool means registering at least one Email IP Address node and binding sending domains to it.
 
 ### Shared IP Pool — Small Marketer Definition
 
@@ -93,15 +95,18 @@ If a marketer exceeds any of these thresholds, they are migrated off the shared 
 - Complaint rate above 0.08% pauses sends and requires support review to resume
 - Daily send cap on the shared pool per marketer is enforced at 2,000/day regardless of the monthly allowance (burst sending on a shared IP is the fastest way to damage pool reputation)
 
-### Dedicated IP Onboarding
+### Dedicated path: Email IP Address node onboarding
 
-When a marketer provisions a dedicated IP — either at onboarding (if above the shared pool threshold) or upon graduating from the shared pool — the onboarding steps are:
+When a marketer runs their own sending IP(s) — at onboarding (if above the shared pool threshold) or upon graduating from the shared pool — the steps are:
 
-1. **IP provisioning**: the platform allocates a dedicated IP address to the marketer's account. The IP is registered with major ISP postmaster programs (Gmail Postmaster Tools, Outlook SNDS, Yahoo) under the marketer's sending domain.
-2. **rDNS configuration**: the platform configures reverse DNS for the IP to resolve to the marketer's primary sending domain (e.g., `mail.malamute-adventures.com`). Correct rDNS is a basic deliverability requirement.
-3. **SPF record update**: the platform updates `spf.symposia.network` (if using a Symposia subdomain) or provides updated SPF records for the marketer's custom sending domain.
-4. **Warm-up enrollment**: the IP is placed into the warm-up schedule (see below). Sends above the daily cap are queued to the next day, not rejected.
-5. **Postmaster verification**: for custom sending domains, the marketer is prompted to verify their domain in Google Postmaster Tools (DNS TXT record) and grant the platform read access. This surfaces Google's domain reputation score in the deliverability dashboard.
+1. **Provide an Email IP Address node**: marketer deploys (or designates) a node that announces at least one public IPv4/IPv6 address used for SMTP. See [Email IP Address Nodes](#email-ip-address-nodes).
+2. **Bind domains**: associate sending domain(s) with that node (or with a set of nodes for multi-IP). All outbound and inbound mail for those domains is proxied through the bound node(s).
+3. **rDNS**: marketer (or their infra provider) configures reverse DNS so the sending IP resolves to the appropriate mail hostname (e.g. `mail.malamute-adventures.com`). Platform verifies rDNS before enabling production volume.
+4. **SPF / DKIM / DMARC**: platform generates required DNS records; marketer publishes them. SPF must authorize the Email IP Address node’s IP(s).
+5. **Warm-up enrollment**: each new IP on a node enters the warm-up schedule (see below).
+6. **Postmaster verification**: marketer verifies domains in Gmail Postmaster Tools / equivalent and may grant the platform read access for deliverability dashboards.
+
+The platform does **not** mint token rewards for these nodes. They exist solely to relay mail.
 
 ### Sending Domain Options
 
@@ -123,14 +128,16 @@ When a marketer provisions a dedicated IP — either at onboarding (if above the
 4. Platform polls DNS (every 5 minutes for 24 hours, then every hour) and marks verified when records are detected.
 5. First send is only permitted after verification.
 
+Sending domains are **infrastructure** (DNS + auth + IP binding). What the recipient sees as “who sent this” is a **Sender Profile** — see [Sender Profiles](#sender-profiles-multi-sender).
+
 ### IP Pools
 
 | Pool Tier | Who | Description |
 |---|---|---|
 | **Shared Pool** | Small marketers (see definition above) | Platform-managed. IP shared across vetted low-volume senders. Stricter real-time guardrails. Onramp tier only. |
-| **Dedicated IP** | All other marketers | Default for any marketer above the shared pool threshold. Single tenant per IP. Full warm-up required. Marketer owns their own reputation. |
+| **Email IP Address node(s)** | All other marketers (and any marketer who opts in early) | Marketer-provided node(s). One or more IPs. Full warm-up required. Marketer owns reputation. Inbound + outbound proxy for bound domains. **No token rewards.** Multiple [sender profiles](#sender-profiles-multi-sender) may share the same node/IP. |
 
-IP warm-up schedule (for new IPs, including dedicated):
+IP warm-up schedule (for new IPs, including marketer-provided Email IP Address nodes):
 
 | Day Range | Max Daily Volume |
 |---|---|
@@ -141,7 +148,411 @@ IP warm-up schedule (for new IPs, including dedicated):
 | Days 22–30 | 50,000 |
 | Day 31+ | Uncapped (subject to rate limits) |
 
-Warm-up is enforced by the sending rate limiter. Attempts to send above the daily cap are queued to the next calendar day.
+Warm-up is enforced by the sending rate limiter **per mail IP** (all sender profiles using that IP count toward the same cap). Attempts to send above the daily cap are queued to the next calendar day.
+
+---
+
+## Sender Profiles (multi-sender)
+
+### Purpose
+
+Many tenants need **multiple sender identities** under one account: brands, sub-brands, regional offices, product lines, transactional vs marketing From addresses, or agencies sending for several clients under one platform tenant (where policy allows).
+
+**Resolved: the platform supports multi-sender profiles per tenant.** Each Campaign / Journey email action / API send selects a **sender profile**. Profiles may **share** one or more Email IP endpoints and may **share** a sending domain (different local-parts or display names), or use separate domains/IPs when isolation is required.
+
+### Hierarchy
+
+```
+Tenant
+├── Email IP endpoint(s)     ← sendable/receivable IP path (cluster optional)
+├── Sending domain(s)        ← verified DNS (SPF/DKIM/DMARC), bound to IP endpoint(s)
+└── Sender profile(s)        ← From identity + compliance identity + routing prefs
+         │
+         └── used by Campaigns, Journeys, transactional sends, API
+```
+
+| Object | Answers |
+|---|---|
+| **Email IP endpoint** | Which IP(s) touch the internet for this mail? |
+| **Sending domain** | Which domain is authenticated (DKIM/SPF/DMARC)? |
+| **Sender profile** | Who is this message *from* (address, name, reply-to, postal, defaults)? |
+
+### What a sender profile contains
+
+| Field | Required | Notes |
+|---|---|---|
+| `sender_profile_id` | yes | UUID |
+| `tenant_id` | yes | Owning marketer |
+| `name` | yes | Internal label (e.g. "Malamute Marketing", "Malamute Receipts") |
+| `from_email` | yes | Must be on a **verified** sending domain for this tenant (or allowed subdomain alias) |
+| `from_name` | yes | Display name in the From header |
+| `reply_to_email` | optional | Defaults to `from_email` if unset |
+| `reply_to_name` | optional | |
+| `sending_domain_id` | yes | Domain used for DKIM signing / alignment |
+| `postal_address` | yes for marketing | CAN-SPAM physical address; may differ per profile (subsidiary) |
+| `default_category` | optional | Suggested `marketing` \| `transactional` for sends using this profile (soft default; Campaign still sets category) |
+| `email_ip_endpoint_ids[]` | optional | Prefer these endpoints; if empty, inherit **all** endpoints bound to `sending_domain_id` |
+| `routing_strategy` | optional | `inherit` \| `primary_failover` \| `weighted` among the profile’s endpoints |
+| `status` | yes | `draft` \| `active` \| `disabled` |
+| `locale` / `timezone` | optional | Defaults for that brand voice / scheduling hints |
+
+Liquid/personalization exposes profile fields as `{{ sender.name }}`, `{{ sender.email }}`, `{{ sender.address }}` (already referenced in the personalization engine) — resolved from the **selected sender profile** at send time, not a single tenant-global sender.
+
+### Multi-profile, shared IP (core requirement)
+
+**Many sender profiles may share one or more Email IP addresses.**
+
+| Pattern | Example |
+|---|---|
+| **Shared IP, shared domain, different From** | `hello@brand.com`, `deals@brand.com`, `news@brand.com` → same domain, same IP endpoint(s) |
+| **Shared IP, multiple domains** | `mail.brand-a.com` and `mail.brand-b.com` both bound to the same IP endpoint (common for multi-brand tenants consolidating infrastructure) |
+| **Shared IP pool of endpoints, profile prefers subset** | Profiles A/B use endpoints {1,2}; profile C (transactional) uses endpoint {3} only |
+| **Isolated IP per profile** | High-risk promo profile on its own warm-up IP; receipts profile on a clean IP |
+
+Sharing IPs is a **first-class, supported** configuration — not an edge case. Isolation is opt-in for reputation or organizational reasons.
+
+```
+Sender profile "Newsletter"  ──┐
+Sender profile "Promo"       ──┼──► sending domain brand.com ──► Email IP endpoint (IP 203.0.113.10 ± cluster)
+Sender profile "Win-back"    ──┘
+
+Sender profile "Order confirms" ──► domain receipts.brand.com ──► same IP endpoint OR different endpoint
+```
+
+### Binding rules
+
+1. **`from_email` domain** must match (or be an authorized alias of) the profile’s `sending_domain_id`. Platform rejects activate/send if alignment would break DKIM/DMARC.
+2. **IP path:** effective endpoints = profile’s `email_ip_endpoint_ids` if non-empty; else domain-level bindings; else tenant default endpoint. Empty at all levels → cannot send (except shared-pool eligibility).
+3. **Multiple profiles → same endpoint:** allowed without limit beyond abuse/rate policy. Warm-up and reputation are tracked **per mail IP** (and optionally reported per domain); volume from all profiles on that IP **sums** toward warm-up and ISP reputation.
+4. **Inbound:** bounce/FBL for a domain still hits endpoints bound to that **domain** (or explicit inbound binding). Profiles do not each need a private inbound IP unless the domain is split.
+5. **Campaign / Journey / API** must set `sender_profile_id` (or inherit a tenant default profile). Missing profile → send rejected.
+
+### Defaults and onboarding
+
+- On tenant create: one **default sender profile** is created (or required before first send) once a sending domain is verified.
+- Additional profiles: unlimited for product purposes; soft limits may apply for abuse (e.g. rate of new From addresses).
+- Disabling a profile blocks new sends that reference it; in-flight jobs keep the profile snapshot from queue time.
+
+### Content snapshot
+
+At schedule/activate/send, the delivery pipeline snapshots:
+
+- `from_name`, `from_email`, `reply_to_*`, `postal_address`, `sending_domain_id`, `sender_profile_id`
+- Chosen `email_ip_endpoint_id` / mail IP (or selection policy)
+
+so later profile edits do not rewrite in-flight messages (same idea as Campaign content snapshots).
+
+### API (sketch)
+
+```
+GET    /marketing/sender-profiles
+POST   /marketing/sender-profiles
+GET    /marketing/sender-profiles/{id}
+PATCH  /marketing/sender-profiles/{id}
+POST   /marketing/sender-profiles/{id}/activate
+POST   /marketing/sender-profiles/{id}/disable
+
+# Optional: list profiles using a given IP endpoint or domain
+GET    /marketing/email-ip-nodes/{id}/sender-profiles
+GET    /marketing/sending-domains/{id}/sender-profiles
+```
+
+Campaign / send payloads include:
+
+```json
+{
+  "sender_profile_id": "uuid",
+  "campaign_id": "uuid",
+  ...
+}
+```
+
+### Compliance notes
+
+- Each marketing profile needs a valid **postal address** (CAN-SPAM); subsidiaries can differ per profile.
+- Unsubscribe and preference-center links remain platform-issued but are scoped to the **tenant + list/category**; From identity is the profile.
+- Misrepresenting From (spoofing domains not verified on the tenant) is blocked at send time and is an AUP violation.
+
+### Relationship to Email IP nodes
+
+| Concern | Owned by |
+|---|---|
+| Who appears in From / Reply-To | **Sender profile** |
+| DNS auth (SPF/DKIM/DMARC) | **Sending domain** |
+| Wire IP, cluster, inbound/outbound roles | **Email IP endpoint** |
+| Many identities, few IPs | **N profiles → 1..M endpoints** (supported) |
+
+---
+
+## Email IP Address Nodes
+
+### Purpose
+
+An **Email IP Address node** is a marketer/tenant-supplied network participant that:
+
+1. **Registers at least one public IP address** used for email (IPv4 required for broad ISP reach; IPv6 optional when dual-stacked).
+2. **Relays all outbound SMTP** for sending domains bound to that node (or to the marketer’s node set) — platform → node → recipient MX.
+3. **Relays all inbound SMTP** for those domains that the platform must receive on the marketer’s IP — bounces (DSN), FBL/ARF complaints, inbound reply/unsub mailto handling, and any other MX-facing mail the product requires — node → platform processors.
+
+Without at least one healthy Email IP Address node (or shared-pool eligibility), a tenant **cannot** send production marketing volume from a dedicated reputation path.
+
+### Who operates them
+
+| Operator | Notes |
+|---|---|
+| **Marketer / tenant** | Primary model: brand or their MSP/hosting provider runs the node and owns the IP(s). |
+| **Multiple nodes per marketer** | Allowed and expected at scale (geo split, warm-up isolation, reputation separation per brand/subdomain, failover). |
+| **Not a mining operator role** | These nodes are **not** Storage / OLTP / Analytics / Consensus workers. |
+
+### Explicit non-goals (rewards)
+
+| Rule | Detail |
+|---|---|
+| **No token earnings** | Email IP Address nodes **do not earn** native token rewards, epoch emission, or reliability bonuses from the platform mining system. |
+| **No stake-for-yield** | Participation is not compensated via staking yield. Any stake/deposit required for abuse prevention (if introduced later) is collateral only, not a mining bond. |
+| **Function = relay only** | The **only** function of this node type is outbound and inbound message relay (plus health/heartbeat so the platform can route and fail over). No blob storage, no Postgres, no analytics query serving. |
+
+See [Node Types and Dynamic Rewards — Email IP Address Node](../Platform/node-types-and-rewards.md#email-ip-address-node).
+
+### Minimum requirements
+
+| Requirement | Minimum |
+|---|---|
+| Public mail IP | ≥ 1 stable **sendable and receivable** public IP registered to the network for the tenant’s mail path (IPv4 required for broad ISP reach; IPv6 optional) |
+| Outbound SMTP | Egress to arbitrary recipient MX presents as that public mail IP (single instance **or** cluster behind it) |
+| Inbound SMTP | MX / bounce / FBL traffic to that public IP is accepted and handed to the platform |
+| Reachability | Platform control plane can reach the node **or cluster control plane** for job dispatch, health checks, and config push |
+| Software | Platform-distributed Email IP node agent (container or binary); version-gated for protocol compatibility |
+| TLS | TLS for platform↔node control and preferred for SMTP where applicable |
+| Auth | Node/cluster identity registered to the tenant; only that tenant’s domains may bind |
+
+What the network and ISPs care about is the **public mail IP** (reputation, SPF, rDNS, MX). How many processes sit behind it is an implementation detail of the marketer’s deployment — see [Clustering](#clustering-behind-a-mail-ip).
+
+### Clustering behind a mail IP
+
+Email IP Address nodes **may be clustered**. Large tenants need local buffering and horizontal capacity for both outbound blast volume and inbound bounce/FBL bursts without exposing every worker as a separate sending IP.
+
+**Requirement:** whatever topology the marketer runs, the IP address **registered to the Symposia network** and used as the tenant’s email sending/receiving identity must be a **real, sendable, and receivable mail IP**:
+
+| Property | Meaning |
+|---|---|
+| **Sendable** | Outbound SMTP to recipient MX leaves the internet with that IP as the connecting source (or an IP explicitly in the same registered set / SPF). ISPs attribute reputation to this IP. |
+| **Receivable** | Inbound SMTP for MX (and bounce/FBL endpoints) can be delivered to that IP; something in the cluster accepts port 25/465/587 as configured and forwards to the platform. |
+| **Stable** | Not an ephemeral NAT that changes per connection in a way that breaks rDNS/SPF alignment. |
+
+#### Allowed topologies (illustrative)
+
+```
+                    ┌─ worker-1 (agent) ─┐
+platform ──► LB / VIP / anycast IP ──────┼─ worker-2 (agent) ─┼──► recipient MX
+(public mail IP registered to network)   └─ worker-N (agent) ─┘
+         ▲
+         │ inbound MX / DSN / FBL
+         └── remote MTAs
+```
+
+| Topology | Notes |
+|---|---|
+| **Single host** | One agent, one public IP — fine for smaller dedicated senders. |
+| **Active-active cluster** | Multiple agents behind L4/L7 load balancer or shared VIP; **one** (or few) public mail IP(s) registered. Workers share outbound connection pools and inbound accept. |
+| **Active-passive HA** | Standby agents; VIP floats on failover; same public IP retained so reputation and DNS do not move. |
+| **Multi-IP cluster set** | Cluster A on IP₁, cluster B on IP₂ — still “clustered” per IP; tenant has multiple registered mail IPs for isolation/warm-up. |
+
+#### Buffering (why cluster)
+
+| Direction | Cluster role |
+|---|---|
+| **Outbound** | Accept relay jobs from the platform faster than MX delivery completes; spool/buffer on cluster disk/memory; pace connections per ISP; absorb Campaign blasts without backing up the whole platform queue on one process. |
+| **Inbound** | Absorb bounce/FBL storms after large sends; queue before platform processors; avoid MX deferrals that look like receiver problems. |
+
+Platform-side queues still exist (personalization, compliance, DKIM). Cluster buffering is **additional capacity at the mail edge**, owned by the tenant, so large customers are not limited to a single SMTP process on one box.
+
+#### What is registered vs what is internal
+
+| Registered to Symposia / DNS / SPF / rDNS | Internal only (not required on-chain / not in SPF) |
+|---|---|
+| Public mail IP(s) | Private worker IPs, pod IPs, east-west mesh |
+| Node or **cluster** identity bound to tenant | Autoscaling replicas behind the VIP |
+| Health of the **mail IP path** (can send + receive) | Per-worker metrics (optional, for tenant ops) |
+
+The platform may treat a cluster as a single **Email IP endpoint** (one registration, one mail IP, many workers) or as multiple agents that all advertise the **same** `mail_ip` with a shared `cluster_id`. Either model is valid; the invariant is: **egress and ingress for that mail identity use a sendable/receivable IP known to the network.**
+
+#### Constraints
+
+- Open relays and “send from random worker public IPs not in SPF” are forbidden — breaks deliverability and violates registration.
+- If the cluster SNATs outbound through a different IP than the registered mail IP, that SNAT IP **must** be the registered one (or an additional registered IP).
+- Warm-up and reputation accounting are per **registered mail IP**, not per worker.
+- Still **no token rewards** for clusters or workers.
+
+### Inbound vs outbound roles (logical split, flexible deployment)
+
+**Recommendation: split capabilities, not necessarily machines.**
+
+Inbound SMTP (MX, DSN/bounces, FBL-over-SMTP, mailto unsub) and outbound SMTP (relay to recipient MX) have different load shapes, threat models, and failure modes. They should be **first-class roles** on the Email IP edge so large tenants can scale and isolate them. They should **not** be forced into two unrelated products that always require two servers.
+
+| Dimension | Outbound role | Inbound role |
+|---|---|---|
+| **Job** | Accept platform relay jobs → deliver to recipient MX | Accept internet SMTP on mail IP → forward to platform processors |
+| **Load shape** | Bursty with Campaign/Journey blasts; many concurrent egress connections; ISP pacing | Bursty **after** large sends (bounce/FBL storms); many short inbound connections |
+| **Threat model** | Abuse of send path, credential theft for open relay | Unsolicited connections, dictionary attacks, inbound floods, spam to bounce addresses |
+| **Failure impact** | Sends delay/fail; reputation if forced through wrong IP | Bounce/FBL loss or deferral; compliance/suppression lag; MX reputation as a receiver |
+| **Scaling knob** | Egress workers, connection pools, outbound spool | Accept workers, inbound spool, rate-limit by source |
+
+#### What to split (logical)
+
+Each Email IP **endpoint** (registered mail identity) declares which roles it provides:
+
+| Mode | Roles enabled | Typical use |
+|---|---|---|
+| **`combined`** (default) | Outbound + inbound | Single agent or cluster handles both; fine for most tenants; same process allowed |
+| **`outbound_only`** | Outbound only | Dedicated send fleet; inbound handled by another endpoint |
+| **`inbound_only`** | Inbound only | Dedicated receive/MX fleet; outbound handled by another endpoint |
+
+A **sending domain** binding must resolve to:
+
+1. At least one healthy endpoint (or cluster) with **outbound** for that domain’s mail IP path, and  
+2. At least one healthy endpoint with **inbound** for the domain’s bounce/MX layout (may be the same endpoint).
+
+If either role is missing or all endpoints providing it are down, that direction fails independently (outbound queues; inbound MX defers — monitor both).
+
+#### What not to require (physical)
+
+| Allowed | Not required |
+|---|---|
+| Both roles in **one process** on one server | Separate VMs for every tenant |
+| Both roles on **one cluster** behind one VIP | Separate public IPs for in vs out |
+| **Split fleets**: outbound cluster on IP₁, inbound cluster on IP₂ (or same IP with role-specialized pools) | Different node *types* in the mining catalog — still **Email IP Address** edge, role flags only |
+
+**Same server is explicitly supported:** one host runs outbound + inbound roles (combined mode). Large customers **may** deploy separate outbound and inbound pools (possibly still under one registered mail IP via VIP/ports, or under two registered IPs if they want isolation).
+
+#### Same IP vs separate IPs for in/out
+
+| Pattern | When to use |
+|---|---|
+| **Same sendable/receivable IP for both roles** (recommended default) | Simplest SPF/rDNS/MX story; common MTA practice; one reputation identity |
+| **Separate outbound IP vs inbound/MX IP** | Enterprise isolation, different network zones (egress VPC vs DMZ receive), or inbound under heavier attack surface | 
+
+If IPs differ:
+
+- Outbound IP remains the reputation-critical **sending** IP (SPF, warm-up, Postmaster).  
+- Inbound IP must still be **receivable** and correctly published in MX for bounce/FBL domains.  
+- Return-Path / envelope domains must route inbound to an endpoint that actually accepts that mail.  
+- Platform records both IPs on the tenant’s email edge config; warm-up still tracks **sending** IPs.
+
+#### Large-customer pattern (split roles, optional shared IP)
+
+```
+                    ┌─ outbound workers (spool + MX egress) ─┐
+platform ──► VIP / mail IP  (or dual IP)                    ├──► internet
+                    └─ inbound workers  (accept + spool)  ──┘
+                         │
+                         └──► platform DSN / FBL processors
+```
+
+- Scale outbound workers for send volume; scale inbound workers for bounce storms.  
+- Buffer each direction independently.  
+- Co-locate on one server until metrics justify a split.
+
+#### Product / API shape
+
+```json
+{
+  "endpoint_id": "uuid",
+  "mail_ips": ["203.0.113.10"],
+  "roles": ["outbound", "inbound"],
+  "deployment": "combined" | "split_roles",
+  "cluster_id": "optional"
+}
+```
+
+Role changes are config updates, not a new node type. Still **no token rewards** for either role.
+
+### Multiple IP address nodes / endpoints per marketer
+
+A tenant may register **N mail endpoints** (each endpoint = one registered mail IP, optionally backed by a cluster of agents).
+
+| Use case | Pattern |
+|---|---|
+| **Domain isolation** | `news.brand.com` → endpoint A (IP₁ ± cluster); `receipts.brand.com` → endpoint B |
+| **Warm-up / new IP** | New mail IP (new endpoint/cluster) while old IP keeps steady volume |
+| **Failover** | Secondary endpoint or HA VIP on the same IP |
+| **Throughput** | Scale **workers inside a cluster** on one IP; and/or shard across multiple mail IPs |
+| **Large-customer buffering** | Cluster behind one sendable/receivable IP for outbound + inbound spool |
+
+**Routing rules:**
+
+- Each **sending domain** binds to one or more registered mail endpoints (IP ± cluster).
+- Outbound: delivery pipeline selects a bound endpoint that is healthy and within warm-up/rate limits for the **mail IP**.
+- Inbound: DNS MX (or bounce subdomain MX) points at a **receivable** registered mail IP; cluster accepts and forwards.
+- Unbound domain → send blocked (or shared-pool only if tenant still eligible).
+
+### Traffic paths
+
+```
+OUTBOUND
+  Campaign / Journey / API
+       → platform delivery queue (personalize, compliance, DKIM)
+       → Email IP endpoint (cluster optional; public mail IP)
+              └─ buffer / workers ─► recipient MX
+                 (source IP = registered sendable mail IP)
+
+INBOUND (bounces, FBL, unsub mailto, etc.)
+  remote MTA
+       → registered receivable mail IP (MX)
+       → cluster accept + buffer
+       → platform inbound processors (DSN, FBL, preference)
+```
+
+The platform still performs personalization, compliance, DKIM signing, queueing, and event emission. The Email IP edge does **not** need the contact database; it is a **relay + buffer** with tenant isolation and policy hooks (max connections, TLS, reject unauthorized envelope senders).
+
+### Platform responsibilities vs node responsibilities
+
+| Platform | Email IP Address node / cluster |
+|---|---|
+| Queue, personalize, compliance gate, DKIM | Present **sendable/receivable** public mail IP(s) to the internet |
+| Choose endpoint by binding + health + warm-up | Accept outbound relay jobs from platform only; buffer and deliver |
+| Parse DSN/FBL after inbound handoff | Accept inbound SMTP on registered IP; buffer; forward to platform |
+| Warm-up caps, throttling, cancellation (per mail IP) | Enforce local connection limits; report endpoint + optional worker health |
+| Tenant UI for bind/unbind domains | No cross-tenant mail; no arbitrary open relay; SNAT must match registered IP |
+
+### Health, failover, and suspension
+
+- Endpoints (and optionally workers) heartbeat to the platform. Unhealthy endpoints are removed from outbound selection.
+- Cluster HA that **keeps the same mail IP** is transparent to the platform if health checks still pass.
+- If all endpoints for a domain are down: outbound queues with retry; alerts to marketer; optional temporary shared-pool fallback **only** if policy allows and SPF still aligns (usually **no** — prefer queue/delay over reputation contamination).
+- Platform may **suspend** an endpoint/mail IP from sending (spam, abuse, critical bounce/complaint rates) without deleting the tenant account.
+- Decommission: marketer drains queues, rebinds domains to another endpoint, then deregisters.
+
+### Registration API (sketch)
+
+```
+GET    /marketing/email-ip-nodes
+POST   /marketing/email-ip-nodes                 Register endpoint (returns join token / config)
+GET    /marketing/email-ip-nodes/{id}
+PATCH  /marketing/email-ip-nodes/{id}            Labels, cluster_id, capacity hints
+DELETE /marketing/email-ip-nodes/{id}            Deregister (must rebind domains first)
+POST   /marketing/email-ip-nodes/{id}/ips        Register mail IP(s) on endpoint
+DELETE /marketing/email-ip-nodes/{id}/ips/{ip}
+POST   /marketing/email-ip-nodes/{id}/workers    Optional: join additional agents to same cluster/mail IP
+
+GET    /marketing/sending-domains/{id}/ip-bindings
+PUT    /marketing/sending-domains/{id}/ip-bindings
+{
+  "endpoint_ids": ["endpoint_a", "endpoint_b"],
+  "strategy": "primary_failover" | "weighted",
+  "weights": { "endpoint_a": 80, "endpoint_b": 20 }
+}
+```
+
+Agent(s) register public key + **mail IP** (the sendable/receivable address). Platform verifies IP ownership via challenge. Additional workers in a cluster join with the same `cluster_id` / `mail_ip` without each needing a distinct public IP.
+
+### Relationship to shared IP pool
+
+| Stage | Mail path |
+|---|---|
+| Small marketer on shared pool | Platform shared IPs; no Email IP Address node required yet |
+| Above threshold / dedicated | **≥ 1 Email IP Address node required** before full dedicated sending |
+| Hybrid warm-up | During new-IP warm-up, excess volume may still use shared pool per existing graduation rules — only if still SPF-valid |
 
 ---
 
@@ -197,6 +608,7 @@ The delivery queue is backed by the tenant's Postgres database (if provisioned) 
 - `recipient_contact_id`: reference to the contact record
 - `from_address`: the sending address
 - `sending_domain_id`: reference to the sending domain config
+- `sender_profile_id`: multi-sender identity (From, reply-to, postal); may share IP with other profiles
 - `template_id` + `merge_data`: JSON, the merge context for personalization (see [Personalization Engine](./personalization-engine.md))
 - `rendered_subject`: final subject line (post-personalization)
 - `rendered_html_body` / `rendered_text_body`: final content

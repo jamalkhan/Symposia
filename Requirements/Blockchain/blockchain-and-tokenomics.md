@@ -26,7 +26,7 @@ The chain launches as a **Layer 3 (L3) on top of Base** (Coinbase's L2), using t
   1. **Payment**: Tenants pay for storage and retrieval in the token (or a supported stablecoin, auto-swapped at settlement).
   2. **Staking**: Node operators stake tokens as collateral to participate and earn rewards.
   3. **Governance**: Token holders vote on protocol parameters (region definitions, reward weights, slashing conditions, etc.).
-- Token supply, emission schedule, and inflation parameters are defined in the Token Distribution and Launch Economics requirements. The architecture must support configurable emission and not hardcode values.
+- Token supply, emission schedule, and inflation parameters are defined in [Token Distribution](./token-distribution-and-launch-economics.md) and locked for MVP in [Tokenomics MVP Genesis Parameters](./tokenomics-mvp.md). Contracts should read parameters from config/governance storage rather than scattering magic numbers in business logic.
 
 ## User Payment Model
 

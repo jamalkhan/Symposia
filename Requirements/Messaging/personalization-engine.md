@@ -71,9 +71,11 @@ When a message is rendered for a recipient, the engine is given a **merge contex
 {{ campaign.name }}                → "June Newsletter"
 {{ campaign.sent_at | date: "%B %e, %Y" }}  → "June 30, 2026"
 
-{{ sender.name }}                  → "Malamute Adventures"
-{{ sender.email }}                 → "hello@malamute.com"
-{{ sender.address }}               → "123 Trail Rd, Denver CO 80201"
+{{ sender.name }}                  → "Malamute Adventures"   (from selected sender profile)
+{{ sender.email }}                 → "hello@malamute.com"    (profile from_email)
+{{ sender.address }}               → "123 Trail Rd, Denver CO 80201"  (profile postal_address)
+{{ sender.reply_to }}              → optional reply-to from profile
+# Multi-sender: each Campaign/send picks a sender_profile_id; see outbound-email-delivery.md
 
 {{ unsubscribe_url }}              → one-click unsubscribe link (always injected)
 {{ preferences_url }}              → preference center link

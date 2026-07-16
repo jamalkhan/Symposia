@@ -18,7 +18,7 @@ Token rewards are calculated per **epoch** (a defined time period, e.g., 1 hour 
 | **Used Storage** | Proportion of offered capacity actively storing data for tenants. |
 | **Retrieval Speed** | End-to-end blob delivery speed as measured by verifiers and clients. This is the primary performance metric and carries the highest reward weight. |
 
-- The exact weighting of each factor is a governance parameter (see [Blockchain and Tokenomics](../Blockchain/blockchain-and-tokenomics.md)).
+- MVP factor weights for Storage (and type-pool rules) are locked in [Tokenomics MVP](../Blockchain/tokenomics-mvp.md); governance may adjust post-mainnet.
 - Faster retrieval yields disproportionately higher rewards: the incentive design explicitly favors nodes that invest in good hardware, network peering, and low-latency infrastructure.
 - Metrics are aggregated from: self-reported node telemetry (subject to challenge), verifier-observed measurements, and client-reported retrieval outcomes.
 
@@ -57,8 +57,8 @@ At epoch seal (after the finality window closes):
 ### Emission Schedule
 
 - The total token emission per epoch follows a pre-defined, on-chain emission curve. The curve is set at genesis and is not changeable without a governance vote.
-- Emission decreases over time (deflationary pressure) on a schedule defined in the Tokenomics specification.
-- A portion of each epoch's emission is allocated to the **ecosystem reserve** (for grants, development, and bootstrap incentives) rather than node rewards. The split ratio is a governance parameter.
+- Emission decreases over time on the schedule in [Tokenomics MVP](../Blockchain/tokenomics-mvp.md) (Network Rewards bucket only).
+- Ecosystem grants are a **separate genesis allocation**, not a per-epoch haircut of runner rewards. Of each epoch’s Network Rewards emission: **92% capacity nodes**, **8% verifiers**, **0% Email IP**.
 
 ## Penalties and Slashing
 

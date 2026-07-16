@@ -2,6 +2,8 @@
 
 This document tracks known gaps, pending specs, and items to be fleshed out across all requirement areas.
 
+**MVP cut line:** [Requirements/MVP.md](./MVP.md) — what ships first vs post-MVP trains.
+
 ---
 
 ## Infrastructure Gaps (identified 2026-06-21)
@@ -14,7 +16,9 @@ These gaps were identified after the initial 37-document requirement reorganizat
 | **Messaging** | Queue / Pub-Sub service for event-driven workloads | **Done** | Requirements/Platform/queue-and-pubsub.md — NATS with JetStream |
 | **Platform** | Event integrity and Merkle commitments | **Done** | Requirements/Platform/event-integrity.md — blob + hourly on-chain hash commitments |
 | **Platform** | CDN / Edge delivery layer | Not started | Needed for landing pages, email images, ad creative |
-| **Platform** | Serverless functions / edge compute | Not started | Lambda-like layer for webhooks, transforms, automation triggers |
+| **Platform** | Serverless functions / edge compute | **Partial** | Node type + mining params in node-types-and-rewards.md + tokenomics-mvp.md; **product surface** (deploy API, runtimes, limits, billing UX) still not fully specced |
+| **Platform** | Extensible node types + app platform model | **Done** (spec) | [extensible-node-types-and-app-platform.md](./Platform/extensible-node-types-and-app-platform.md) — apps vs miners; how new types join emission pools |
+| **Platform** | AppBuilder / vendor incentives (no second protocol token) | **Done** (spec) | [appbuilder-incentives.md](./Platform/appbuilder-incentives.md) — grants, usage match, optional fee kickback from Ecosystem |
 | **Platform** | API rate limiting and throttling | Not started | Not in any current document; needed for event ingestion at scale |
 | **Platform** | Real-time streaming / WebSockets | Not started | Live dashboards, real-time personalization |
 | **Platform** | Workflow orchestration (Journeys) | **Done** | Requirements/Journeys/journeys.md — linear + branching, all trigger types, re-entry policy, cart abandon pattern |
@@ -25,8 +29,8 @@ These gaps were identified after the initial 37-document requirement reorganizat
 | **Database** | Compute overage handling | Open question | What happens mid-epoch if tenant exhausts compute credits? |
 | **Database** | Compute operator compensation split | Open question | Proposed 70/30 operator/platform; needs governance proposal |
 | **Blockchain** | Node types, resource requirements, dynamic reward system | **Done** | Requirements/Platform/node-types-and-rewards.md — 4 node types (OLTP, Storage, Analytics, Consensus); dynamic reward multipliers; reliability scoring; 4 open questions (epoch length, token mechanics, staking, cross-type isolation) |
-| **Blockchain** | Compute node staking minimums | Not started | Specific stake amounts — see open question #3 in node-types-and-rewards.md |
-| **Blockchain** | Token emission schedule / tokenomics | Not started | Dynamic vs. fixed emission; intersects with reward system — see open question #2 in node-types-and-rewards.md |
+| **Blockchain** | Compute node staking minimums | **Done** (spec) | [tokenomics-mvp.md](./Blockchain/tokenomics-mvp.md) §9 |
+| **Blockchain** | Token emission schedule / tokenomics | **Done** (spec) | [tokenomics-mvp.md](./Blockchain/tokenomics-mvp.md) — MVP genesis parameters; implement contracts next |
 
 ---
 
@@ -42,14 +46,22 @@ These items were identified 2026-06-30 when the martech focus of the platform wa
 | CAN-SPAM / CASL / GDPR email compliance | **Done** | Requirements/Messaging/email-compliance.md |
 | Bounce, complaint, and feedback loop handling | **Done** | (in outbound-email-delivery.md) |
 | DKIM/SPF/DMARC for outbound marketing mail | **Done** | (in outbound-email-delivery.md) |
+| **Campaigns** (Broadcast + Triggered, priority tiers, A/B, STO, Journey wrap) | **Done** | Requirements/Messaging/campaigns.md |
+| **Email IP Address nodes** (marketer-provided IP relay; multi-node; no token rewards) | **Done** | Requirements/Messaging/outbound-email-delivery.md § Email IP Address Nodes; Requirements/Platform/node-types-and-rewards.md § Email IP Address Node |
+| **Sender profiles** (multi-sender; share domains/IPs) | **Done** | Requirements/Messaging/outbound-email-delivery.md § Sender Profiles |
+| Malicious / abusive sender detection and enforcement | **Done** (MVP min) | [abuse-and-sender-reputation.md](./Messaging/abuse-and-sender-reputation.md) — trust tiers, auto-pause, shared pool; full ML post-MVP |
+| SMS / push / webhook as Campaign channels | Placeholder | campaigns.md § Future Channels — email only in v1 |
 
 ### Marketing Data
 | Item | Status | File |
 |---|---|---|
-| Contact / audience database model | **In Progress** | Requirements/MarketingData/contact-database.md |
-| Segmentation engine | **In Progress** | Requirements/MarketingData/segmentation-engine.md |
-| Contact import / export (CSV, API) | Not started | |
-| List management (suppression, seed lists) | Not started | |
+| Contact / audience database model | **Done** | Requirements/MarketingData/contact-database.md |
+| Marketing automation use cases (8 first-class use cases) | **Partial** | **Done:** [cart-abandon](./UseCases/cart-abandon.md), [browse-abandon](./UseCases/browse-abandon.md), [welcome-series](./UseCases/welcome-series.md), [double-opt-in](./UseCases/double-opt-in.md). Still stubbed: BIS, price drop, brand/category affinity |
+| Journey leftovers (analytics split, template library, history branching) | **Done** | Requirements/Journeys/journeys.md — operational vs analytics split; platform template library; full activity events on contact for history branches |
+| Platform Campaign/Journey starter template library | **Done** (spec) | journeys.md § Platform Template Library — implement as product surface |
+| Segmentation engine | **Done** | Requirements/MarketingData/segmentation-engine.md |
+| Contact import / export (CSV, API) | **Done** | [contact-import-and-lists.md](./MarketingData/contact-import-and-lists.md) |
+| List management (suppression, seed lists) | **Done** | [contact-import-and-lists.md](./MarketingData/contact-import-and-lists.md) — standard / suppression / seed |
 
 ### User Identity & Data Sovereignty
 | Item | Status | File |
@@ -72,13 +84,13 @@ These items were identified 2026-06-30 when the martech focus of the platform wa
 | CDP (Segment, mParticle) | Not started | — |
 | Webhooks (generic outbound) | Not started | — |
 | Conversion API integrations (Meta CAPI, Google Enhanced Conversions) | Not started | Distinct from audience sync — server-side event signals |
-| Platform-level identifier index (enable O(1) marketer discovery at claim time) | Not started | Spec'd in user-profile-visibility.md; needs DB schema in contact-database.md |
+| Platform-level identifier index (enable O(1) marketer discovery at claim time) | **Done** | Requirements/MarketingData/contact-database.md#platform-identifier-index |
 
 ### Data Ownership & Stakeholders
 | Item | Status | File |
 |---|---|---|
 | Stakeholder definitions (Individual, Marketer, AppBuilder, Symposia) | **Done** | Requirements/Platform/stakeholders-and-personas.md |
-| Identity-layer vs. created/derived-layer ownership model | **In Progress** | Requirements/MarketingData/contact-database.md, Requirements/Identity/user-data-ownership.md |
+| Identity-layer vs. created/derived-layer ownership model | **Done** | Requirements/MarketingData/contact-database.md, Requirements/Identity/user-data-ownership.md, Requirements/DataCloud/symposia-data-cloud.md |
 | **Research jurisdictional privacy law on anonymization/pseudonymization** | **Not started** | See note below — needed to validate the erasure mechanism in contact-database.md |
 
 > **Research item**: The erasure model (see [Erasure and the Created-Data Layer](MarketingData/contact-database.md#erasure-and-the-created-data-layer)) assumes that anonymizing or pseudonymizing created/derived data satisfies a "right to delete" request, rather than requiring hard deletion. This needs to be validated jurisdiction by jurisdiction — different privacy regimes define and accept these mechanisms differently:
@@ -90,10 +102,23 @@ These items were identified 2026-06-30 when the martech focus of the platform wa
 >
 > Outcome needed: a jurisdiction-aware policy matrix for when pseudonymization is sufficient vs. when full anonymization (or hard deletion) is legally required, to drive the policy-decision logic referenced in contact-database.md.
 
+### Product & Commerce
+| Item | Status | File |
+|---|---|---|
+| Product & category catalog — schema, change detection, event emission, 7 ingestion methods | **Done** | Requirements/MarketingData/product-catalog.md |
+| E-commerce platform (hosted storefront, cart, checkout, order management) | **Stub — Phase 2** | Requirements/Ecommerce/ecommerce-platform.md |
+| Website scraper — crawl marketer site to auto-build product catalog from schema.org/Product | **Stub** | Requirements/MarketingData/product-catalog.md#6-website-scraper |
+
+### ETL & Data Loading
+| Item | Status | File |
+|---|---|---|
+| ETL / gap data loader — pipeline for loading data into Symposia from external sources (Shopify, WooCommerce, BigCommerce, Snowflake, BigQuery, Salesforce, external Postgres). Airbyte-compatible connector model. Referenced as ingestion method 4 in product-catalog.md. | Not started | Requirements/MarketingData/product-catalog.md#4-etl-service |
+
 ### Tracking & Analytics Collection
 | Item | Status | File |
 |---|---|---|
 | Cookie-based tracking system (JS + pixel) | **Done** | Requirements/Tracking/tracking-architecture.md |
+| Session model (tenant + site TTL, session_expired for abandon) | **Done** (spec) | Requirements/Tracking/session-model.md — marketer-configured tenant defaults + site overrides |
 | First-party (brand) + Symposia network cookie model | **Done** | Requirements/Tracking/tracking-architecture.md |
 | Consent banner model (marketer-primary, Symposia fallback, 4 consent events) | **Done** | Requirements/Tracking/tracking-architecture.md — TODO: legal copy for fallback banner |
 | Standard event schema (pageview, scroll, focus, redirect) | **Done** | Requirements/Tracking/event-schema.md |

@@ -74,8 +74,8 @@ The platform collects data about individuals at multiple points:
 | `sms_marketing` | Send marketing SMS | Explicit opt-in required everywhere |
 | `web_tracking_brand` | Track individual's behavior on marketer's own domain via first-party cookie | Disclosed in cookie consent banner |
 | `web_tracking_network` | Contribute data to Symposia's cross-brand identity graph | Requires explicit Symposia consent, separate from brand cookie consent |
-| `data_read` | Read individual's Symposia-level profile attributes | Requires individual to grant this permission explicitly to this marketer |
-| `data_enrichment` | Add data to individual's Symposia-level profile | Requires explicit grant; most restrictive |
+| `data_read` | Query the individual's Symposia Data Cloud attributes (demographics, brand affinities, propensity scores). Requires individual's explicit grant AND a paid Data Cloud licensing tier — neither alone is sufficient. See [Symposia Data Cloud](../DataCloud/symposia-data-cloud.md#data-cloud-access-for-marketers). | Explicit grant by individual + Data Cloud tier |
+| `data_enrichment` | Create derived attributes about the individual (brand affinity, propensity scores, buyer behavioral profiles, marketing buckets, custom ML scores) stored in the marketer's own Postgres and optionally surfaced to the individual via the profile portal. Does not grant access to Symposia's own derived attributes — that requires `data_read`. See [Symposia Data Cloud — Marketer Enrichment Data](../DataCloud/symposia-data-cloud.md#marketer-enrichment-data). | Explicit grant by individual |
 
 ### Permission Grants
 
@@ -96,6 +96,65 @@ An individual's permission to a marketer is stored in a permission grant record 
 ```
 
 Revoking a permission removes the marketer's ability to use that channel. Revocation does not automatically delete the contact record from the marketer's database — that requires a separate deletion request. However, sending to a revoked contact is a violation that the platform enforces technically.
+
+---
+
+## Rectification Propagation
+
+When an individual updates an **identity-layer attribute** in their Symposia profile (name, email address, phone number, postal address), that correction must propagate to every marketer contact record linked to their `symposia_identity_id`. This is the individual's right to rectification under **GDPR Article 16**, which requires controllers to correct inaccurate personal data "without undue delay." GDPR Article 12(3) sets the outer time bound at **one month** from receipt of the request (extendable to three months for demonstrably complex cases, with written notice to the individual within the first month).
+
+### Propagation Flow
+
+1. Individual updates an identity-layer attribute via the Symposia profile portal.
+2. Symposia records the update immediately and publishes a `identity.profile_updated` event to NATS JetStream.
+3. The platform dispatcher looks up all affected tenants via the [Platform Identifier Index](../MarketingData/contact-database.md#platform-identifier-index) and publishes a scoped event to each:
+   ```
+   Subject: sym.{tenant_id}.identity.profile_updated
+   ```
+4. Each marketer's contact database consumer receives the event and updates the identity-layer fields on the matching contact record (matched by `symposia_identity_id`).
+5. The update is a **hard overwrite** of the identity-layer fields — the individual's right to rectification under GDPR Article 16 does not permit a marketer to refuse a correction on the grounds that they believe their stored value is accurate. If a marketer has a legitimate dispute, that is handled via [Dispute Resolution](../Legal/dispute-resolution.md); the rectification event must still be applied.
+
+### Event Payload
+
+```json
+{
+  "event_id": "uuid-v7",
+  "event_type": "identity.profile_updated",
+  "identity_id": "uuid",
+  "requested_at": "2026-07-01T10:00:00Z",
+  "rectification_deadline": "2026-07-31T10:00:00Z",
+  "changed_fields": [
+    { "field": "first_name", "new_value": "Jamal" },
+    { "field": "email",      "new_value": "jamal.new@example.com" }
+  ]
+}
+```
+
+`rectification_deadline` is always `requested_at + 30 days`, representing the outer GDPR Article 12(3) bound. The platform uses this field to track compliance.
+
+### Scope: Identity-Layer Fields Only
+
+Only identity-layer fields propagate. Created/derived fields (custom properties, enrichment attributes, event history) are the marketer's own data and are not overwritten by a rectification event. The propagated fields are:
+
+```
+first_name   last_name   display_name
+email        phone
+country      region      city      postal_code   timezone
+```
+
+### Compliance Tracking
+
+The platform tracks the delivery and acknowledgement of every `identity.profile_updated` event:
+
+- **Delivered**: NATS JetStream confirms the event was enqueued for the tenant's consumer.
+- **Acknowledged**: The tenant's consumer has processed the event and updated the contact record.
+- **Deadline breach**: If a tenant has not acknowledged within 30 days of `rectification_deadline`, the platform flags this as a compliance incident, logs it to the audit trail, and notifies the individual that rectification at that marketer is pending or overdue.
+
+NATS JetStream's at-least-once delivery guarantee ensures the event is not silently dropped. Consumer implementations must be idempotent on `event_id`.
+
+### Why Async / Eventual Consistency
+
+The propagation is asynchronous by design. Requiring synchronous cross-tenant writes would introduce coupling, latency, and failure cascades across the platform. GDPR Article 16's "without undue delay" standard does not require instantaneous propagation — it requires that the controller act promptly and complete the rectification within the one-month outer bound. The async model satisfies the legal standard while preserving the platform's distributed, decoupled architecture.
 
 ---
 

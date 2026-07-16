@@ -103,6 +103,73 @@ Primary blockchain guarantees: **Uptime**, **Compute time/performance**.
 
 ---
 
+### Serverless Function Node
+
+**Purpose:** Run short-lived, event-driven compute for the platform — webhooks, Journey action side-effects, data transforms, automation hooks, light API glue. This is the “Lambda-like” tier: **invoke → run → scale to zero**, not long-running Postgres or analytics processes.
+
+| Resource | Requirement | Rationale |
+|---|---|---|
+| RAM | Moderate–high per worker (e.g. 1–8 GB per concurrent slot) | Isolate function memory; cold starts |
+| IOPS | Low–moderate | Ephemeral scratch; optional cache |
+| CPU | **Burst-capable**, multi-core preferred | Short CPU-heavy handlers |
+| Storage | Minimal local (ephemeral) | Code packages in blob; no tenant durable store on the node |
+| Network | High egress to tenant webhooks / APIs | Outbound HTTP is the common path |
+| Uptime | Moderate–high (≥99%) for the **control plane** accepting invokes | Individual workers may churn |
+
+**Workload model:**
+
+- Platform (or tenant-triggered Journey/webhook) schedules an **invocation**.  
+- Node pulls function artifact (from blob), runs in a **sandboxed** runtime (time limit, memory limit, no raw host access).  
+- Result/logs returned; billable unit is **GB-second** (and/or invoke count) — exact metering in a future Serverless product spec; economics treat committed **concurrent slots** + delivered invoke time as demand signals.
+
+**Not the same as:**
+
+| Type | Difference |
+|---|---|
+| OLTP | Long-lived Postgres; not request-scoped sandboxes |
+| Analytics | Heavy scans; minutes-long queries, not 100ms–60s functions |
+| Email IP | SMTP relay only; no general compute; **no mining** |
+
+Primary blockchain guarantees: **Compute time/performance**, **Uptime** (accept path).
+
+---
+
+### Email IP Address Node
+
+**Operator:** Marketer / tenant (or their infrastructure provider), **not** a general mining node runner.
+
+**Purpose:** Supply the marketer’s public email IP address(es) to the network and act as the **inbound and outbound SMTP proxy** for all mail for domains bound to that node. Full product requirements: [Outbound Email Delivery — Email IP Address Nodes](../Messaging/outbound-email-delivery.md#email-ip-address-nodes).
+
+| Resource | Requirement | Rationale |
+|---|---|---|
+| RAM | Low (1–4 GB) | Relay only; no mailbox store |
+| IOPS | Low | Queue spill to disk optional |
+| CPU | Low–moderate | TLS, connection concurrency |
+| Storage | Minimal | Spool for deferred outbound/inbound only |
+| Network | **Public IP required**; stable egress; port 25 capability | ISP-facing SMTP |
+| Uptime | High for production sending | Outages block or delay that tenant’s mail |
+
+**Multiplicity:** A marketer may run **multiple** mail endpoints (multiple public IPs / domains / failover) and may **cluster** multiple agents/workers behind a single public mail IP for capacity and buffering. See [Outbound Email — Clustering](../Messaging/outbound-email-delivery.md#clustering-behind-a-mail-ip).
+
+**Clustering:** Allowed. The address registered to the network must remain a **sendable and receivable** mail IP (SNAT/VIP egress and MX ingress agree with SPF/rDNS). Workers behind the VIP do not each need a distinct public IP. Reputation and warm-up attach to the **registered mail IP**, not to individual workers. Large tenants use cluster-local spool to buffer outbound blasts and inbound bounce/FBL load.
+
+**Inbound vs outbound roles:** Logical capabilities on the same Email IP edge (`outbound`, `inbound`, or `combined`). Default is combined on one agent/server. Large tenants may split fleets (and optionally IPs) for scale and isolation without inventing a separate mining node type. See [Inbound vs outbound roles](../Messaging/outbound-email-delivery.md#inbound-vs-outbound-roles-logical-split-flexible-deployment).
+
+#### Rewards: none
+
+| Rule | Detail |
+|---|---|
+| **No mining rewards** | Email IP Address nodes **do not earn** epoch token emission, dynamic reward multipliers, or reliability bonuses. Clusters and extra workers also earn nothing. |
+| **Not in reward supply math** | Network composition metrics for OLTP/Storage/Analytics/Consensus **exclude** Email IP Address nodes when computing demand/supply multipliers. |
+| **Function only** | The **only** function is outbound + inbound message relay (and edge buffering) for the owning tenant’s bound domains. |
+| **No cross-tenant work** | Node must not accept or send mail for other tenants; not an open relay. |
+
+Uptime and health are still monitored for **routing and deliverability** (alerts, failover, send suspension). Failure degrades that marketer’s email path only; it does not slash mining stake (there is no mining stake for this node type). Optional abuse-related holds are account/compliance actions, not protocol slashing.
+
+Primary blockchain guarantees: **none for rewards**. Optional on-chain registration of node public key + tenant binding for auditability of which IP path a domain used.
+
+---
+
 ## Dynamic Reward System
 
 ### Principle
@@ -176,7 +243,7 @@ Operators with a sustained reliability score above a threshold (e.g., ≥0.98 ov
 
 ## Future Node Types
 
-As the platform adds capabilities, new node types will be introduced. Candidates:
+As the platform adds capabilities, additional node types may be introduced. Candidates:
 
 | Future Node Type | Primary Workload | Resource Profile |
 |---|---|---|
@@ -184,16 +251,18 @@ As the platform adds capabilities, new node types will be introduced. Candidates
 | **ML / Inference** | AI scoring, purchase propensity, send-time optimization | High GPU or high CPU, moderate RAM |
 | **Messaging Relay** | NATS JetStream hosting, pub/sub routing | High network throughput, moderate CPU/RAM |
 
-Each new node type goes through a governance process before launch: resource requirements are published, reward parameters are set, and a bootstrapping bonus period is announced to seed initial supply.
+**Serverless Function** is **not** future — it is a first-class rewarded type above. Product surface (deploy API, runtimes, limits) may ship in phases; the node type and mining parameters are defined for MVP economics.
+
+Each new node type goes through a governance process before launch: resource requirements are published, reward parameters are set, and a bootstrapping bonus period is announced to seed initial supply. **Full extensibility model** (apps vs node types, weight renormalization, vendor path): [Extensible Node Types & Application Platform](./extensible-node-types-and-app-platform.md).
 
 ---
 
 ## Open Questions
 
-1. **Epoch length**: What is the reward calculation interval — hourly, daily, or per-block? Shorter epochs respond faster to network changes but add overhead to reward calculation and distribution.
+1. ~~**Epoch length**~~ **Resolved:** **24 hours** UTC. See [Tokenomics MVP](../Blockchain/tokenomics-mvp.md#4-epochs).
 
-2. **Reward token mechanics**: Are rewards paid in the platform's native token? Is there a fixed token emission schedule, or is emission dynamic (tied to platform revenue / usage fees)? This intersects with the broader tokenomics design, which is out of scope here but needs to be specified before the blockchain layer is implemented.
+2. ~~**Reward token mechanics**~~ **Resolved:** Paid in native token (**SYM** provisional). **Fixed declining emission** from Network Rewards bucket over ~8 years; after cap, **fee-funded floor** (no uncapped mint). Dynamic **type multipliers** rebalance mix; emission total is not “print to match revenue.” See [Tokenomics MVP](../Blockchain/tokenomics-mvp.md).
 
-3. **Minimum stake per node type**: Node operators may be required to stake tokens to participate, with higher stakes required for higher-SLA node types (e.g., consensus nodes). Stake is slashed for reliability failures. Specific stake amounts are not yet defined.
+3. ~~**Minimum stake per node type**~~ **Resolved:** See [Tokenomics MVP §9](../Blockchain/tokenomics-mvp.md#9-staking-minimums-mvp) (Storage / OLTP / Analytics / Consensus / Verifier tables).
 
-4. **Cross-node-type operators**: An operator running OLTP and Analytics containers on the same machine faces real resource contention. Should the platform enforce isolation requirements (e.g., analytics containers must be on dedicated hardware if above a certain capacity commitment)? Or is this the operator's problem to manage within their resource guarantees?
+4. ~~**Cross-node-type operators**~~ **Resolved:** Co-location **allowed**; protocol enforces **per-container resource guarantees** via reliability scoring, not mandatory dedicated hardware. Isolation recommended for heavy OLTP+Analytics. See [Tokenomics MVP §9.3](../Blockchain/tokenomics-mvp.md#93-cross-type-co-location-isolation).

@@ -171,6 +171,6 @@ Basic database connection usage has no per-connection fee. However, to prevent a
 ## Open Questions (First Pass — To Iterate)
 
 - **Read replica billing**: If a tenant runs read replicas, they are separate compute instances and billed separately. But do they share the same page storage bucket, or have their own? Shared bucket makes sense (they serve the same data), but read egress from the bucket to the replica is a storage egress charge. Need to clarify whether intra-service page fetch is billed as egress or internal.
-- **Compute operator compensation**: How much of the compute billing revenue goes to the compute node operator vs. the platform? This is a governance parameter, but an initial starting point (e.g., 70% to operator, 30% platform) should be proposed.
+- ~~**Compute operator compensation**~~ **Resolved (MVP):** protocol fee split sends **70% to operators / 25% platform / 5% fee treasury**; compute fees attributable to OLTP flow to OLTP operators within the operator share. See [Tokenomics MVP §7](../Blockchain/tokenomics-mvp.md#7-protocol-fees--operators--floor).
 - **Overage handling**: What happens if a tenant's database uses more compute than their credit balance covers mid-epoch? Suspend the database immediately? Allow a grace period? For HIPAA-designated databases, suspending mid-session could have compliance implications.
 - **Minimum database size**: Is there a minimum storage commitment for a database, similar to a minimum blob size? Postgres system catalogs alone consume ~8 MB. This is negligible but should be documented.

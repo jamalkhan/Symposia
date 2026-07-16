@@ -39,6 +39,8 @@ Examples:
 - An appbuilder **owns** the derived data/models they create, in the same sense a marketer owns their own derived data — see [General Ownership Rule](#general-ownership-rule) below.
 - An appbuilder is bound by the same anonymization/pseudonymization obligation as a marketer when an individual exercises their deletion rights (see [Right to Delete](../Identity/right-to-delete.md)).
 - Symposia itself, when it builds platform-level features that derive data about individuals (e.g., a network-wide fraud score), acts as an appbuilder under this model — the platform operator does not get a privileged ownership exemption.
+- **Extending the platform:** AppBuilders normally ship **apps** on existing node types (Serverless, OLTP, Storage, Analytics). They do **not** automatically become miners. A **new node type** is only proposed when the network needs an open operator market for specialized capacity — see [Extensible Node Types & Application Platform](./extensible-node-types-and-app-platform.md).
+- **Incentives:** Vendors earn primarily from **customers**; the protocol bootstraps them with **SYM from Ecosystem grants / usage match** (not a separate builder mining token). See [AppBuilder / Vendor Incentives](./appbuilder-incentives.md).
 
 ## 4. Symposia (the Platform / Foundation)
 

@@ -252,15 +252,22 @@ GET /analytics/contacts/growth
 
 ### 6. Journey Performance
 
+**Ownership:** This endpoint is the **canonical** place for historical Journey funnels, step drop-off, per-step email performance, and journey-attributed revenue. The Journey product API exposes only lightweight [operational stats](../Journeys/journeys.md#operational-stats-get-marketingjourneysidstats) for the builder UI (live active counts), not date-range analytics.
+
+Data sources: `journey_enrolled` / `journey_step_*` / `journey_exited` contact events + email engagement events + optional purchase events (see [Journeys — Activity Events](../Journeys/journeys.md#activity-events-and-history-branching)). Summary tables `daily_journey_stats` are rebuilt from these events.
+
 ```
 GET /analytics/journeys/{journey_id}/performance
     ?start_date=2026-06-01&end_date=2026-06-30
+    &journey_version=3          // optional; omit = all versions rolled up
+    &campaign_id=uuid           // optional; when journey is Campaign-wrapped
 ```
 
 ```json
 {
   "journey_id": "uuid",
   "journey_name": "Welcome Series",
+  "campaign_id": "uuid",
   "date_range": { "start": "2026-06-01", "end": "2026-06-30" },
   "summary": {
     "total_enrollments": 4200,

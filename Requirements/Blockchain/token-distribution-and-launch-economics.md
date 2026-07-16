@@ -4,7 +4,7 @@
 
 The native token is the economic backbone of the network. Its initial distribution determines who has a stake in the network's success, how decentralized governance is from day one, and whether the token can function as a practical payment and staking mechanism. Poor initial distribution — too concentrated, too opaque, or with badly designed vesting — can permanently damage a network's credibility and decentralization.
 
-This document defines the framework and principles for token distribution. Exact quantities, emission curves, and pricing are to be finalized in a separate Tokenomics specification developed with input from economic advisors and the community.
+This document defines the framework and principles for token distribution. **MVP genesis quantities, emission schedule, staking minimums, and related parameters are locked in [Tokenomics — MVP Genesis Parameters](./tokenomics-mvp.md).** Economic advisors and governance may revise post-mainnet via the governance process; until then, `tokenomics-mvp.md` is authoritative for implementation.
 
 ---
 
@@ -12,7 +12,7 @@ This document defines the framework and principles for token distribution. Exact
 
 - The total token supply is fixed at genesis. No additional tokens can be minted beyond the defined emission schedule.
 - The supply cap and emission schedule are encoded in the genesis block and are not changeable without a governance vote with a supermajority threshold.
-- The supply must be large enough that individual token amounts remain human-readable at realistic per-unit prices, and small enough to avoid psychological perception of worthlessness. The exact figure is a Tokenomics spec decision.
+- The supply must be large enough that individual token amounts remain human-readable at realistic per-unit prices, and small enough to avoid psychological perception of worthlessness. **MVP total supply: 10,000,000,000 tokens — see [tokenomics-mvp.md](./tokenomics-mvp.md).**
 
 ---
 
@@ -20,7 +20,7 @@ This document defines the framework and principles for token distribution. Exact
 
 The total supply is divided across the following categories. Percentages are illustrative and subject to the Tokenomics specification.
 
-| Category | Illustrative % | Purpose |
+| Category | MVP % (locked) | Purpose |
 |---|---|---|
 | **Network Rewards (Emission)** | 40% | Released over time via the epoch reward mechanism to node runners. Never pre-distributed; earned by contributing to the network. |
 | **Ecosystem and Grants** | 15% | Developer grants, integration partnerships, hackathons, open-source contributions. Managed by a foundation or DAO. |
@@ -28,6 +28,8 @@ The total supply is divided across the following categories. Percentages are ill
 | **Early Contributors and Team** | 15% | Compensation for the team that built the network. Long vesting; see below. |
 | **Investors** | 10% | Seed and early-stage investors. Vesting; see below. |
 | **Public Launch / Community** | 10% | Distributed at launch via public sale, airdrop, or testnet participant rewards. Provides immediate liquidity and broad initial distribution. |
+
+Exact SYM amounts and emission yearly tables: [tokenomics-mvp.md](./tokenomics-mvp.md).
 
 ### Key Principle
 
@@ -85,7 +87,7 @@ Node runners must stake tokens to participate. For staking to be practical at la
 
 The network rewards allocation is released via the epoch reward mechanism over a multi-year emission schedule. The schedule is:
 
-- **Declining emission**: Rewards per epoch decrease over time, creating scarcity and incentivizing early participation. The exact decay function (linear, halving, exponential) is a Tokenomics specification decision.
+- **Declining emission**: Rewards per epoch decrease over time, creating scarcity and incentivizing early participation. **MVP: 8-year yearly step-down of the Network Rewards bucket — see [tokenomics-mvp.md §5](./tokenomics-mvp.md#5-network-rewards-emission).**
 - **Minimum floor**: A non-zero minimum emission rate is maintained indefinitely to ensure node runners always have an incentive to participate, even when all tokens are "circulating." This floor is funded by network transaction fees (storage payments and egress fees flowing through the network) once the primary emission is exhausted.
 - **Epoch emission is public**: The amount of tokens that will be emitted in any future epoch is deterministic and computable by anyone from the genesis configuration. There are no surprise increases in emission.
 

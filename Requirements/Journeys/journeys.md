@@ -124,13 +124,14 @@ A Branch step evaluates a condition and routes the enrollment down one of two or
 
 | Branch Type | Example |
 |---|---|
-| **Event-based** | "Did the contact open the previous email?" (checks event history) |
+| **Event-based** | "Did the contact open the previous email?" (checks `marketing.contact_events`) |
 | **Property-based** | "Is `contact.properties.loyalty_tier` equal to 'Gold'?" |
 | **Score-based** | "Is `properties.purchase_propensity` > 0.7?" |
+| **Automation history** | "Did this contact complete step X of Journey Y?" / "Receive Campaign C email?" — see [Activity Events and History Branching](#activity-events-and-history-branching) |
 | **Random split (A/B)** | "50% → Path A, 50% → Path B" (for testing Journey variants) |
 | **Percentage split** | "30% → Path A, 50% → Path B, 20% → Path C" |
 
-Branch conditions use the same filter-tree model as the [Segmentation Engine](../MarketingData/segmentation-engine.md) — the same syntax, the same operators, evaluated against the same contact record. This is intentional: if you can build a segment for it, you can branch on it in a Journey.
+Branch conditions use the same filter-tree model as the [Segmentation Engine](../MarketingData/segmentation-engine.md) — the same syntax, the same operators, evaluated against the same contact record **and** that contact’s event history. This is intentional: if you can build a segment for it, you can branch on it in a Journey.
 
 ### Step: Exit
 
@@ -197,6 +198,20 @@ LIMIT 1;
 
 ---
 
+## Journey Versioning
+
+**Resolved (drain model):** editing and publishing an active Journey never mutates the graph under in-flight enrollments.
+
+1. Each **publish** creates an immutable `journey_versions` row (version number + full step graph snapshot). Draft edits are not live until publish.
+2. The journey’s `current_published_version` advances to `N+1`. Prior version `N` is `draining`: **no new enrollments**.
+3. New enrollments always attach to `current_published_version`.
+4. Existing enrollments keep `journey_version = N` and run that graph until complete, exit, or cancel.
+5. When no active/waiting enrollments remain on version `N`, status becomes `retired`.
+
+Campaign-wrapped Journeys use the same rules; whole-path A/B variants are separate published versions under the parent Campaign. See [Campaigns — Journey versioning](../Messaging/campaigns.md#journey-versioning-drain-model).
+
+---
+
 ## Data Model
 
 ```sql
@@ -207,17 +222,31 @@ CREATE TABLE journeys (
   name             TEXT NOT NULL,
   description      TEXT,
   status           TEXT NOT NULL DEFAULT 'draft',  -- draft | active | paused | archived
+  current_published_version INT,                   -- null until first publish
   re_entry_policy  TEXT NOT NULL DEFAULT 'no_re_entry',
   re_entry_cooldown_days INT,                      -- set when policy = 're_entry_cooldown'
   global_exit_conditions JSONB,                    -- e.g., exit if unsubscribed
+  parent_campaign_id UUID,                         -- set when owned by a Campaign shell
   created_at       TIMESTAMPTZ DEFAULT now(),
   updated_at       TIMESTAMPTZ DEFAULT now()
 );
 
--- Steps within a Journey (the tree nodes)
+-- Immutable published graph (drain model)
+CREATE TABLE journey_versions (
+  journey_id       UUID NOT NULL REFERENCES journeys(journey_id),
+  version          INT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'published',  -- published | draining | retired
+  graph_snapshot   JSONB NOT NULL,   -- full steps + edges at publish time
+  published_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_by     UUID,
+  PRIMARY KEY (journey_id, version)
+);
+
+-- Steps within a Journey (the tree nodes) — draft working set and/or denormalized from snapshot
 CREATE TABLE journey_steps (
   step_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   journey_id       UUID NOT NULL REFERENCES journeys(journey_id),
+  journey_version  INT,              -- null = draft working copy; set when belonging to a published version
   step_type        TEXT NOT NULL,    -- trigger | action | wait | branch | exit
   config           JSONB NOT NULL,   -- type-specific config (action type, wait duration, branch conditions, etc.)
   next_steps       JSONB,            -- [{ "step_id": "uuid", "condition": null }] for actions/waits
@@ -229,12 +258,14 @@ CREATE TABLE journey_steps (
 CREATE TABLE journey_enrollments (
   enrollment_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   journey_id       UUID NOT NULL REFERENCES journeys(journey_id),
+  journey_version  INT NOT NULL,   -- frozen at enroll; drain model — never rewritten mid-flight
   contact_id       UUID NOT NULL REFERENCES marketing.contacts(contact_id),
   tenant_id        UUID NOT NULL,
   status           TEXT NOT NULL DEFAULT 'active',
     -- active | waiting_time | waiting_condition | completed | exited | cancelled
   current_step_id  UUID REFERENCES journey_steps(step_id),
   context          JSONB,           -- trigger event data, carried through all steps
+  experiment_variant TEXT,          -- when parent Campaign runs whole-path A/B
   enrolled_at      TIMESTAMPTZ DEFAULT now(),
   last_step_at     TIMESTAMPTZ,
   resume_at        TIMESTAMPTZ,     -- set when status = waiting_time; indexed for scheduler polling
@@ -364,7 +395,8 @@ Trigger: add_to_cart event
 GET    /marketing/journeys                         List journeys
 POST   /marketing/journeys                         Create journey
 GET    /marketing/journeys/{id}                    Get journey definition
-PUT    /marketing/journeys/{id}                    Update journey (only drafts; active journeys require a new version)
+PUT    /marketing/journeys/{id}                    Update draft working copy; publish creates version N+1 (drain model)
+POST   /marketing/journeys/{id}/publish            Publish draft → new immutable version; in-flight stay on old version
 POST   /marketing/journeys/{id}/activate           Set status = active; begin trigger evaluation
 POST   /marketing/journeys/{id}/pause              Pause trigger evaluation; active enrollments continue
 POST   /marketing/journeys/{id}/archive            Deactivate and hide
@@ -384,33 +416,190 @@ POST   /marketing/journeys/{id}/enroll
 # Contact-level view
 GET    /marketing/contacts/{id}/journeys           All active and historical enrollments for a contact
 
-# Analytics (stub — full journey analytics spec TBD)
-GET    /marketing/journeys/{id}/stats              Enrollment counts, step completion rates, exit reasons
+# Operational stats only (not funnels / revenue — see Analytics)
+GET    /marketing/journeys/{id}/stats              Live operational snapshot
 ```
+
+### Operational stats (`GET /marketing/journeys/{id}/stats`)
+
+Lightweight, near-real-time counts for the Journey builder UI — **not** historical funnels or revenue:
+
+```json
+{
+  "journey_id": "uuid",
+  "journey_version": 3,
+  "as_of": "2026-07-15T12:00:00Z",
+  "enrollments": {
+    "active": 1800,
+    "waiting_time": 900,
+    "waiting_condition": 400,
+    "completed_24h": 120,
+    "exited_24h": 45
+  },
+  "by_current_step": [
+    { "step_id": "uuid", "step_name": "Wait 1h", "count": 600 }
+  ],
+  "exit_reasons_24h": { "unsubscribed": 20, "completed": 120, "deleted": 2 }
+}
+```
+
+Full funnel visualization, step drop-off over a date range, email performance per step, and revenue attribution are owned by the [Analytics Layer](../Analytics/analytics-layer.md#6-journey-performance) (`GET /analytics/journeys/{id}/performance`).
+
+---
+
+## Activity Events and History Branching
+
+**Resolved:** every automation touchpoint writes an event onto the **contact’s activity history** (`marketing.contact_events` + NATS). Branches and segments can filter on full step history, campaign sends, and triggers — not only ad-hoc contact properties.
+
+### Principle
+
+If it happened to a contact on Symposia marketing automation, it is an event on that contact. Properties remain useful for denormalized flags; they are **not** required to reconstruct history.
+
+### Events written (per contact)
+
+All of the following are dual-written: **NATS** (for real-time consumers) and **`marketing.contact_events`** (for history, branching, segmentation, analytics).
+
+| Event type | When | Key `properties` |
+|---|---|---|
+| `journey_enrolled` | Enrollment created | `journey_id`, `journey_version`, `campaign_id`, `enrollment_id`, `trigger_type`, `experiment_variant` |
+| `journey_step_entered` | Enrollment advances to a step | `journey_id`, `journey_version`, `step_id`, `step_name`, `step_type`, `enrollment_id` |
+| `journey_step_completed` | Step finishes successfully | `journey_id`, `step_id`, `outcome`, `enrollment_id` |
+| `journey_step_failed` | Step fails (e.g. email render error) | `journey_id`, `step_id`, `error_code`, `enrollment_id` |
+| `journey_exited` | Enrollment ends | `journey_id`, `exit_reason`, `enrollment_id`, `final_step_id` |
+| `journey_reentry_blocked` | Trigger matched but re-entry policy blocked | `journey_id`, `policy`, `campaign_id` |
+| `campaign_enrolled` | Triggered Campaign enrollment (simple or journey-backed) | `campaign_id`, `enrollment_id`, `trigger_type` |
+| `campaign_send_queued` | Message queued for this contact (Broadcast or Triggered) | `campaign_id`, `job_id` or `enrollment_id`, `variant` |
+| `campaign_send_skipped` | Skipped (frequency cap, compliance, etc.) | `campaign_id`, `skip_reason` |
+| `campaign_job_included` | Contact frozen into a Broadcast audience snapshot | `campaign_id`, `job_id` |
+| `trigger_matched` | Trigger evaluator matched contact (before re-entry check) | `campaign_id` / `journey_id`, `trigger_family`, `trigger_event_id` |
+
+Email lifecycle events (`email_sent`, `email_opened`, …) already include `campaign_id` / journey context from the delivery pipeline — they remain the source of truth for engagement. Automation events above are the source of truth for **program structure** (which step, which enrollment).
+
+### Branch / segment operators on history
+
+Filter-tree additions (Journey Branch + Segmentation):
+
+| Operator | Meaning |
+|---|---|
+| `has_event` | Contact has ≥1 `contact_events` row matching `event_type` + optional property filters + lookback |
+| `has_not_event` | Inverse |
+| `has_completed_journey_step` | Shorthand: `journey_step_completed` where `journey_id` + `step_id` (optional `journey_version`) |
+| `has_exited_journey` | `journey_exited` with optional `exit_reason` |
+| `has_received_campaign` | `email_sent` or `campaign_send_queued` with `campaign_id` |
+| `has_completed_campaign_path` | Journey-backed: `journey_exited` with `exit_reason=completed` and `campaign_id` |
+
+Example branch condition (JSON filter tree):
+
+```json
+{
+  "operator": "AND",
+  "conditions": [
+    {
+      "field": "activity.journey_step_completed",
+      "operator": "has_event",
+      "value": {
+        "journey_id": "uuid-welcome",
+        "step_id": "uuid-email-1",
+        "within_days": 365
+      }
+    },
+    {
+      "field": "activity.email_clicked",
+      "operator": "has_not_event",
+      "value": { "campaign_id": "uuid-welcome", "within_days": 30 }
+    }
+  ]
+}
+```
+
+### Query and performance requirements
+
+- Evaluation uses indexed lookups on `marketing.contact_events (tenant_id, contact_id, event_type, occurred_at DESC)` — already required by the contact DB.
+- Property filters on `journey_id`, `step_id`, `campaign_id` should be supported via GIN on `properties` or generated columns / expression indexes for hot keys: `(tenant_id, contact_id, (properties->>'journey_id'), occurred_at)`.
+- Lookback window is **required** on history operators (default 365 days, max 7 years / retention). Unbounded “ever” is allowed only with explicit `within_days: null` and may force async evaluation for large branches (same async rules as web-activity segment filters).
+- Branch evaluation is per-enrollment, single contact — cost is O(events for that contact in window), not O(tenant).
+
+### Dual write reliability
+
+Automation event writes are **inline with the state transition** (same as email delivery events): enrollment is not committed without a durable `journey_enrolled` intent. Prefer: write enrollment row + emit event in one transaction or outbox pattern so history never diverges from `journey_enrollments` / `journey_step_executions`.
+
+---
+
+## Platform Template Library
+
+**Resolved: ship a starter library in v1.**
+
+Platform-provided Campaign + Journey (or Broadcast) templates marketers can **clone** into their tenant as drafts. Cloning copies the graph/content into tenant-owned objects; later platform template updates do not mutate tenant clones.
+
+### Starter set (v1)
+
+| Template key | Type | Maps to use case |
+|---|---|---|
+| `cart_abandon` | Triggered + Journey-backed Campaign | [Cart Abandon E2E](../UseCases/cart-abandon.md) |
+| `browse_abandon` | Triggered + Journey-backed | [Browse Abandon E2E](../UseCases/browse-abandon.md) |
+| `welcome_series` | Triggered + Journey-backed | [Welcome Series E2E](../UseCases/welcome-series.md) |
+| `double_opt_in` | Triggered + Journey-backed | [Double Opt-In E2E](../UseCases/double-opt-in.md) |
+| `post_purchase` | Triggered + Journey-backed | Post-purchase thank-you + cross-sell (linear) |
+| `win_back` | Triggered (segment entry) + Journey | Lapsed engagement segment → re-engagement sequence |
+| `birthday` | Triggered (attribute/date) simple or short Journey | Birthday / anniversary |
+| `back_in_stock` | Triggered + Journey-backed | [Back in Stock](../UseCases/marketing-automation-use-cases.md#3-back-in-stock) |
+| `price_drop` | Triggered + Journey-backed | [Price Drop](../UseCases/marketing-automation-use-cases.md#4-price-drop) |
+| `newsletter_weekly` | Broadcast recurring | Weekly newsletter shell (content placeholder) |
+
+### Template API
+
+```
+GET  /marketing/templates/library                 List platform templates (filter by category)
+GET  /marketing/templates/library/{key}           Get template definition (graph + sample content)
+POST /marketing/templates/library/{key}/clone     Clone into tenant → draft Campaign (+ Journey if needed)
+{
+  "name": "My Cart Abandon",
+  "customize": { "brand_name": "Malamute" }
+}
+```
+
+Clone result: new `campaign_id` (and `journey_id` if applicable) in `draft` status; marketer must bind lists/segments, sending domain, and final copy before activate.
+
+Not a marketplace in v1 — platform-authored templates only. Appbuilder-shared templates are a later phase.
 
 ---
 
 ## Integration with Event Integrity
 
-Journey enrollment events and step completions are compliance-adjacent operations — particularly exits triggered by unsubscribe or deletion requests. These are emitted to the NATS compliance stream and included in the [Merkle commitment pipeline](../Platform/event-integrity.md):
+Journey enrollment events and step completions are compliance-adjacent operations — particularly exits triggered by unsubscribe or deletion requests. Operational automation events are **not** Merkle-committed by default; compliance streams remain the committed set. See [Event Integrity](../Platform/event-integrity.md).
 
-| Event | NATS Subject | Committed |
+| Event | NATS Subject | Contact events | Committed |
+|---|---|---|---|
+| Contact enrolled in Journey | `sym.{tenant}.journey.enrolled` | `journey_enrolled` | No (operational) |
+| Journey step executed | `sym.{tenant}.journey.step_executed` | `journey_step_*` | No (operational) |
+| Enrollment exited due to unsubscribe | `sym.{tenant}.compliance.unsubscribe_requested` | (compliance + journey_exited) | **Yes** |
+| Enrollment cancelled due to deletion request | `sym.{tenant}.compliance.deletion_requested` | (compliance + journey_exited) | **Yes** |
+
+---
+
+## First-Class Use Cases
+
+The following marketing automation use cases are explicitly supported by the Journey engine as first-class platform capabilities. Each is defined in the [Marketing Automation Use Cases](../UseCases/marketing-automation-use-cases.md) document.
+
+| Use Case | Trigger Pattern | Journey Pattern |
 |---|---|---|
-| Contact enrolled in Journey | `sym.{tenant}.journey.enrolled` | No (operational) |
-| Journey step executed | `sym.{tenant}.journey.step_executed` | No (operational) |
-| Enrollment exited due to unsubscribe | `sym.{tenant}.compliance.unsubscribe_requested` | **Yes** |
-| Enrollment cancelled due to deletion request | `sym.{tenant}.compliance.deletion_requested` | **Yes** |
+| [Cart Abandon](../UseCases/marketing-automation-use-cases.md#1-cart-abandon) | `web.add_to_cart` → no purchase | Absence/timeout (fully specced above) |
+| [Browse Abandon](../UseCases/marketing-automation-use-cases.md#2-browse-abandon) | `web.pageview` → no cart/purchase | Absence/timeout |
+| [Back in Stock](../UseCases/marketing-automation-use-cases.md#3-back-in-stock) | Marketer API push (`product_back_in_stock`) | Immediate notify → wait → branch |
+| [Price Drop](../UseCases/marketing-automation-use-cases.md#4-price-drop) | Marketer API push (`product_price_drop`) | Immediate notify → wait → branch |
+| [List Signup / Welcome Series](../UseCases/marketing-automation-use-cases.md#5-list-signup-welcome-series) | `contact.created` or `form_submit` | Linear series |
+| [Double Opt-In](../UseCases/marketing-automation-use-cases.md#6-double-opt-in) | `contact.created` (pending status) | Wait + condition (confirm click) |
+| [Brand Affinity New Release](../UseCases/marketing-automation-use-cases.md#7-brand-affinity--new-release) | Marketer API push (`new_product_release`) | Immediate notify → enrichment-filtered audience |
+| [Category Affinity New Release](../UseCases/marketing-automation-use-cases.md#8-category-affinity--new-release) | Marketer API push (`new_product_release`) | Immediate notify → enrichment-filtered audience |
 
 ---
 
 ## Open Questions
 
-1. **Journey versioning**: when a marketer edits an active Journey, what happens to contacts currently mid-enrollment? Options: (a) they complete on the old version, (b) they are migrated to the new version at their current step, (c) the journey is versioned and both run simultaneously until old-version enrollments drain. This affects both UX and the data model (`journey_enrollments` needs a `journey_version` reference).
+None remaining. Prior resolutions:
 
-2. **Journey analytics depth**: the `/stats` endpoint is stubbed. Full Journey analytics (funnel visualization, step drop-off rates, revenue attribution per Journey) is a significant feature. Should this be part of the Journey spec or part of the Analytics layer spec?
-
-3. **Frequency capping across Journeys**: a contact could theoretically be in 10 active Journeys simultaneously and receive 10 emails in one day. Should the platform enforce a cross-Journey frequency cap (e.g., max 2 marketing emails per contact per day), and if so, how does that interact with Journey scheduling (does the email get dropped or delayed)?
-
-4. **Journey templates / library**: should the platform ship a library of pre-built Journey templates (welcome series, cart abandon, win-back, post-purchase, birthday)? UX feature, but worth noting as a product decision.
-
-5. **Branching on Journey history**: "did this contact receive email X in a previous Journey enrollment?" requires querying `journey_step_executions` across enrollments. This is possible but query-heavy at scale. Should Journey history be a supported branch condition type, or should marketers use contact properties as a proxy (e.g., update a property when a specific Journey completes)?
+1. ~~**Journey versioning**~~ **Drain model** — see [Journey Versioning](#journey-versioning).
+2. ~~**Journey analytics depth**~~ **Split ownership** — Journey API = operational stats; Analytics layer = funnels, drop-off, revenue (`/analytics/journeys/{id}/performance`).
+3. ~~**Frequency capping**~~ **Cross-Campaign caps** — see [Campaigns](../Messaging/campaigns.md#frequency-capping-and-quiet-hours).
+4. ~~**Template library**~~ **Ship starter library in v1** — see [Platform Template Library](#platform-template-library).
+5. ~~**History branching**~~ **Full step/campaign/trigger history via contact events** — see [Activity Events and History Branching](#activity-events-and-history-branching).

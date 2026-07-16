@@ -182,7 +182,7 @@ WHERE tenant_id = $1
 
 ### Lists and List Membership
 
-Contacts belong to one or more **lists** (also called audiences). A list is a static collection of contacts — a snapshot. Segments (dynamic filters) are different from lists (see [Segmentation Engine](./segmentation-engine.md)).
+Contacts belong to one or more **lists** (also called audiences). A list is a static collection of contacts — a snapshot. Segments (dynamic filters) are different from lists (see [Segmentation Engine](./segmentation-engine.md)). Full list-type rules, APIs, and suppression/seed behavior: [Contact Import & Lists](./contact-import-and-lists.md).
 
 ```sql
 CREATE TABLE marketing.lists (
@@ -238,6 +238,37 @@ The choice between pseudonymization and anonymization for a given deletion reque
 
 This is also why `marketing.erasure_hashes` exists as a separate table from the contact row itself: the hash is what blocks re-identification via re-import, while the (now-anonymized) original `contact_id` and its created-data history can continue to exist, decoupled from any identifying value, for the owner's continued legitimate use.
 
+### Contact Enrichment
+
+Marketers and appbuilders granted the `data_enrichment` permission (see [User Data Ownership](../Identity/user-data-ownership.md#permission-model)) may create derived attributes about an individual — brand affinity scores, propensity models, buyer behavioral profiles, marketing list membership, custom ML scores, and more. These enrichment attributes are stored in the marketer's own Postgres, not in Symposia's central data store.
+
+The `symposia_visible` flag controls whether an attribute is surfaced to the individual through the Symposia profile portal. The platform calls each linked tenant's enrichment API to aggregate visible attributes when the individual views their profile.
+
+**Namespace separation**: If a marketer and Symposia both compute an attribute with the same name (e.g., `brand_affinity`), they are stored and displayed under separate namespaces (`{tenant_id}.brand_affinity` vs. `symposia.brand_affinity`). A marketer's enrichment data never overwrites Symposia's derived attributes. See [Symposia Data Cloud — Namespace Separation](../DataCloud/symposia-data-cloud.md#namespace-separation).
+
+```sql
+CREATE TABLE marketing.contact_enrichment (
+  enrichment_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id         UUID NOT NULL,
+  contact_id        UUID NOT NULL REFERENCES marketing.contacts(contact_id),
+  attribute_key     TEXT NOT NULL,                         -- e.g. 'brand_affinity', 'churn_propensity'
+  attribute_value   JSONB NOT NULL,                        -- flexible: scalar, array, or object
+  owner_type        TEXT NOT NULL DEFAULT 'marketer',      -- 'marketer' | 'appbuilder'
+  owner_id          UUID NOT NULL,                         -- tenant_id or appbuilder_id
+  symposia_visible  BOOLEAN NOT NULL DEFAULT FALSE,        -- whether individual sees this in profile portal
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE (tenant_id, contact_id, attribute_key, owner_id)
+);
+
+CREATE INDEX ON marketing.contact_enrichment (tenant_id, contact_id);
+CREATE INDEX ON marketing.contact_enrichment (tenant_id, attribute_key);
+CREATE INDEX ON marketing.contact_enrichment (contact_id) WHERE symposia_visible = TRUE;
+```
+
+On a right-to-delete request, enrichment attributes are **anonymized**, not deleted, per the [Erasure and the Created-Data Layer](#erasure-and-the-created-data-layer) rules — they are created/derived-layer data owned by the marketer or appbuilder (`owner_id`). The platform routes the anonymization obligation to the correct `owner_id` based on `owner_type`.
+
 ### Events / Activity History
 
 Contact activity (email sent, opened, clicked, unsubscribed, purchased) is written to an events table. This table is write-heavy and append-only — it will grow large for active tenants.
@@ -268,72 +299,36 @@ The events table should be partitioned by `occurred_at` (monthly partitions) for
 
 ---
 
-## Contact Import
+## Contact Import & Lists (full spec)
 
-Marketers frequently import contacts in bulk from CSV files or external systems.
+**Authoritative detail** for bulk import jobs, list types (standard / suppression / seed), membership APIs, export, compliance attestation, and erasure-hash behavior at import:
 
-### CSV Import Flow
+→ **[Contact Import & Lists](./contact-import-and-lists.md)**
 
-1. Marketer uploads a CSV file via the API or UI to a blob storage staging bucket.
-2. The import processor validates the file (encoding, column headers, required fields).
-3. The processor runs compliance pre-checks:
-   - Are consent fields present for EU contacts?
-   - Are there email addresses that match the tenant's erasure hash list?
-4. The marketer maps CSV columns to contact fields (or uses a saved field map).
-5. The marketer acknowledges a compliance attestation if consent records are missing for any contacts.
-6. The import runs in the background. Large imports (>100K rows) may take several minutes.
-7. Import summary: rows processed, created, updated, skipped (suppressed, erased, invalid email).
+The sections below remain a short overview; if they conflict with that document, **contact-import-and-lists.md wins**.
 
-### Duplicate Handling
+### Import (summary)
 
-The unique key is `(tenant_id, email)`. On import:
-- If the email already exists: **upsert** — update fields that are present in the import file; do not overwrite fields that are blank in the import.
-- The compliance fields are never overwritten by import unless the import explicitly includes them. Existing consent records are preserved.
+1. Upload CSV/JSONL to blob or multipart API → import job.  
+2. Validate → field map → compliance attestation if needed → process rows.  
+3. Skip erased emails; upsert by `(tenant_id, email)`; optional add to lists.  
+4. Summary: created / updated / skipped + error report.
 
-### API Import (single contact)
+### Single contact API (summary)
 
 ```
 POST /marketing/contacts
-
 {
   "email": "user@example.com",
   "first_name": "Jamal",
-  "last_name": "Khan",
-  "country": "US",
-  "properties": {
-    "plan_tier": "Pro",
-    "ltv": 480
-  },
-  "compliance": {
-    "email_consent_basis": "express",
-    "email_consent_recorded_at": "2026-06-01T12:00:00Z",
-    "email_consent_source": "checkout_form",
-    "email_consent_wording": "Sign me up for email updates."
-  },
-  "lists": ["list_id_1", "list_id_2"]
+  "compliance": { "email_consent_basis": "express", ... },
+  "lists": ["list_id_1"]
 }
 ```
 
----
+### Export (summary)
 
-## Contact Export
-
-Contacts can be exported to CSV or JSON via the API, subject to GDPR's data portability requirement. Exports include all fields the tenant has stored, including custom properties and compliance records.
-
-```
-POST /marketing/contacts/export
-
-{
-  "format": "csv",
-  "filter": {
-    "list_id": "list_id_1",
-    "email_status": "subscribed"
-  },
-  "fields": ["email", "first_name", "last_name", "properties.plan_tier"]
-}
-```
-
-The export is a background job that produces a blob in the tenant's storage, downloadable via a presigned URL.
+Async job → CSV/JSON in tenant blob → presigned download URL; audit logged.
 
 ---
 
@@ -369,3 +364,63 @@ The link is established when:
 - The individual explicitly claims this contact record through the Symposia profile portal.
 
 The link cannot be established by the marketer — it must be confirmed from the individual's side, or through the trusted tracking system. The marketer cannot inject a fake `symposia_identity_id`.
+
+---
+
+## Platform Identifier Index
+
+The platform identifier index is a **Symposia-managed, cross-tenant lookup table** that answers "which marketers hold a contact record for this individual" in O(1) time. It is not stored in any marketer's tenant Postgres — it lives in Symposia's internal platform database.
+
+This index powers:
+- The individual's profile portal ("brands who have data on me")
+- Cross-marketer deletion propagation (right-to-delete dispatched to all affected tenants simultaneously)
+- Cross-marketer rectification propagation (identity update events routed to all affected tenants)
+- The "claim my records" flow (individual links their Symposia identity to existing marketer contact records)
+
+### Schema
+
+```sql
+-- Symposia platform database (NOT tenant Postgres)
+CREATE TABLE platform.identity_index (
+  index_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  symposia_identity_id  UUID,                    -- null until the individual claims this record
+  identifier_type       TEXT NOT NULL,           -- 'email' | 'phone' | 'cookie_id'
+  identifier_hash       TEXT NOT NULL,           -- SHA-256(normalize(identifier)); never plaintext
+  tenant_id             UUID NOT NULL,           -- which marketer holds this identifier
+  contact_id            UUID NOT NULL,           -- the marketer's contact_id (foreign reference, not FK)
+  linked_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  claimed_at            TIMESTAMPTZ,             -- when the individual confirmed this link
+
+  UNIQUE (identifier_hash, tenant_id)
+);
+
+-- Primary lookup: "which tenants hold this identifier?"
+CREATE INDEX ON platform.identity_index (identifier_hash);
+
+-- Cross-deletion/rectification dispatch: "which index entries link to this Symposia identity?"
+CREATE INDEX ON platform.identity_index (symposia_identity_id)
+  WHERE symposia_identity_id IS NOT NULL;
+
+-- Tenant-scoped lookup: "which of this tenant's contacts are linked to a Symposia identity?"
+CREATE INDEX ON platform.identity_index (tenant_id, symposia_identity_id)
+  WHERE symposia_identity_id IS NOT NULL;
+```
+
+### How It Is Maintained
+
+| Event | Index Action |
+|---|---|
+| Contact created via Contact API | Platform writes an entry per identifier (`email`, `phone` if present) |
+| Contact email or phone updated | Platform updates the corresponding `identifier_hash` |
+| Contact erased (right to delete) | Platform removes the index entry; also removes `symposia_identity_id` link |
+| Individual claims a contact record | Platform sets `symposia_identity_id` and `claimed_at` on the matching entry |
+| Individual revokes a marketer's access | `symposia_identity_id` is nulled; the marketer's contact record still exists but is no longer linked |
+
+Maintenance is event-driven: the Contact API publishes internal platform events on create/update/delete, and the index is updated synchronously before the API response returns. Index writes are not async — a contact that exists must immediately appear in the index.
+
+### Privacy Design
+
+- **Hashed identifiers only**: the index stores `SHA-256(normalize(email))` — not the email address itself. A lookup requires knowing (or guessing) the plaintext value; the index cannot be scanned to enumerate individuals.
+- **No cross-tenant data exposure**: the index records `tenant_id` and `contact_id` only — it does not store what data the marketer holds. One marketer cannot discover another marketer's index entries.
+- **Platform-internal only**: the index is not queryable via any marketer-facing API. Marketers cannot enumerate other tenants that hold a record for a given email. Only Symposia's platform services (profile portal, deletion processor, rectification dispatcher) have access.
+- **Normalization before hashing**: emails are lowercased and trimmed; phone numbers are normalized to E.164 before hashing, so `Jamal@Gmail.com` and `jamal@gmail.com` hash to the same value.

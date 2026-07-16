@@ -30,6 +30,7 @@ NATS JetStream subjects follow the pattern `sym.{tenant_id}.events.*` for tenant
 | `web.pageview` | JS tracker / tracking pixel | Contact event writer, segmentation engine, analytics | Page view tracked on marketer website |
 | `web.purchase` | JS tracker / tracking pixel | Contact event writer, segmentation engine, analytics | Purchase event tracked on marketer website |
 | `web.custom` | JS tracker / tracking pixel | Contact event writer, segmentation engine, analytics | Marketer-defined custom event tracked on website |
+| `web.session_expired` | Session service (TTL sweeper) | Contact event writer, abandon Campaigns/Journeys, analytics | Session inactivity TTL elapsed; TTL configured by marketer at tenant and/or site — see [Session Model](../Tracking/session-model.md) |
 
 ### Contact Lifecycle
 
@@ -38,6 +39,26 @@ NATS JetStream subjects follow the pattern `sym.{tenant_id}.events.*` for tenant
 | `contact.created` | Contact API | Contact event writer, segmentation engine, automation | Contact record created |
 | `contact.updated` | Contact API | Contact event writer, segmentation engine, automation | Contact record updated |
 | `contact.deleted` | Contact API | Contact event writer, segmentation engine, automation | Contact record deleted |
+
+### Campaign & Journey Automation
+
+Source: [journeys.md — Activity Events](../Journeys/journeys.md#activity-events-and-history-branching), [campaigns.md](../Messaging/campaigns.md)
+
+Dual-written to NATS and `marketing.contact_events` for history branching, segmentation, and analytics.
+
+| Event | Producer | Consumer(s) | Description |
+|---|---|---|---|
+| `journey.enrolled` | Journey executor | Contact event writer, analytics, automation | Contact enrolled in a Journey version |
+| `journey.step_entered` | Journey executor | Contact event writer, analytics | Enrollment advanced to a step |
+| `journey.step_completed` | Journey executor | Contact event writer, analytics, branch evaluation | Step finished successfully |
+| `journey.step_failed` | Journey executor | Contact event writer, analytics | Step failed (e.g. render error) |
+| `journey.exited` | Journey executor | Contact event writer, analytics, segmentation | Enrollment completed or exited early |
+| `journey.reentry_blocked` | Journey executor | Contact event writer, analytics | Trigger matched but re-entry policy blocked |
+| `campaign.enrolled` | Campaign executor | Contact event writer, analytics | Triggered Campaign enrollment created |
+| `campaign.send_queued` | Campaign / delivery pipeline | Contact event writer, analytics | Message queued for this contact |
+| `campaign.send_skipped` | Campaign / pre-send | Contact event writer, analytics | Skipped (cap, compliance, etc.) |
+| `campaign.job_included` | Broadcast freeze | Contact event writer, analytics | Contact included in Broadcast audience snapshot |
+| `trigger.matched` | Trigger evaluator | Contact event writer, analytics | Trigger matched before re-entry check |
 
 ### Compliance
 
@@ -225,6 +246,7 @@ Compliance events (`compliance.*`) are retained for 90 days in a dedicated NATS 
 | Domain | Count |
 |---|---|
 | Platform pub/sub (email, web, contact, compliance, integrity) | 17 |
+| Campaign & Journey automation | 11 |
 | Blob storage (lifecycle + replication) | 13 |
 | Billing & account | 4 |
 | Contact database | 1 |
@@ -232,4 +254,4 @@ Compliance events (`compliance.*`) are retained for 90 days in a dedicated NATS 
 | Network node | 4 |
 | Verifier node | 3 |
 | Region | 3 |
-| **Total** | **69** |
+| **Total** | **80** |

@@ -9,6 +9,8 @@ The Symposia tracking system collects behavioral data about individuals as they 
 
 The tracking system is the data collection side of the platform. It feeds the contact database, the segmentation engine, and the analytics layer.
 
+**Sessions:** Visitors are sessionized per **site** (tracked property) under a tenant. Inactivity timeout and `session_expired` emission are **configured by the marketer** at **tenant default** and optional **per-site override** — not a fixed platform-global TTL. See [Session Model](./session-model.md).
+
 **The data sovereignty principle applies here too**: the network-level cookie is opt-in, not opt-out. Individuals must affirmatively consent to cross-brand tracking. Brand-level tracking follows the marketer's own cookie consent policies (typically a cookie banner on their site), but the Symposia tracker respects whatever consent the marketer's consent management platform (CMP) records.
 
 ---
