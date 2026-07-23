@@ -138,6 +138,24 @@ Data Cloud product, full integrations matrix, hosted commerce, SMS/push, multi-t
 
 ---
 
+## Pre-MVP infrastructure build order
+
+Before martech application development begins, the following core infrastructure layers must be stood up **in this order**:
+
+**Resequenced per #108** (2026-07-22): Blob Storage's own cold-start procedure (`Requirements/BlobStorage/metadata-architecture.md`) requires a node to generate a keypair and register on-chain, and every epoch to submit a signed Merkle root on-chain — so a minimal bootstrap chain and the wallet-keypair identity primitive must exist no later than concurrent with the first Blob Storage node, not after it. See issue #108 for the full dependency analysis.
+
+| Order | Layer | Notes |
+|---|---|---|
+| 1 | **Minimal Bootstrap Chain + Wallet-Keypair Identity Primitive + Blob Storage** *(concurrent)* | Blob Storage node cold start requires generating a keypair and registering on-chain, then submitting a signed Merkle root every epoch (issue #12) — so a **minimal** chain (foundation-operated, pre-staked, small trusted verifier set; subset of issue #57 Phase 0) and the **core keypair-generation/registration** primitive (subset of issue #21) must exist alongside the first storage node, not after it. This is a narrow slice, not the full Chain/Tokenomics or full Identity Baseline buildout below |
+| 2 | **Identity Baseline (full)** | Consent grants, permission records, and capability tokens tied to the wallet address (full scope of issue #21) plus the embedded custodial/self-custody wallet UX (issue #22) for human onboarding — builds on the keypair primitive already established in step 1; threads consent/individual-rights through tracking, contacts, and compliance gates before martech application development begins |
+| 3 | **Queue / Pub-Sub** (NATS JetStream) | Event-integrity pipeline needs this to batch events before hourly Merkle commitment to chain |
+| 4 | **Bootstrap / Cold Start (full)** *(concurrent with 5)* | Full phased rollout (private testnet → public testnet → mainnet launch, issue #57 Phases 1–3) beyond the minimal Phase 0 slice already delivered in step 1 |
+| 5 | **Chain (full)** *(concurrent with 4)* | Staking contracts, full decentralized verifier-quorum growth, governance bootstrap — beyond the minimal chain already delivered in step 1. Bootstrap and Chain remain two faces of the same launch effort for their full buildout, not sequential |
+| 6 | **Full Mining Tokenomics** | Emission, epoch scoring, staking/slashing, dynamic reward multipliers — live economic layer for rewarded node types |
+| 7 | **OLTP** | Capstone, not a peer to Storage — consumes Blob (WAL/data files locally, bulk archival to blob) and joins the same rewarded-node economy as everything below it; the app's actual data-writing capability comes online last |
+
+---
+
 ## Technical baseline for MVP deploy
 
 | Layer | MVP approach |
