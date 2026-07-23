@@ -61,6 +61,7 @@ Not every event requires a Merkle commitment. The commitment pipeline covers eve
 | `compliance.deletion_requested` | **Required** | Individual's right to erasure; must be provable |
 | `compliance.consent_granted` | **Required** | Legal basis for all downstream marketing |
 | `compliance.consent_revoked` | **Required** | Withdrawal of consent; must be provable |
+| `compliance.identity_verification_lapsed` | **Required** | Evidence a T1/T2 claim reverted to unclaimed on schedule (13-month re-verification, [#27](https://github.com/jamalkhan/Symposia/issues/27)); underwrites the platform's liability protection for stale/hijacked claims — see [Identity Proof and Claim — Resolved Open Question #7](../Identity/identity-proof-and-claim.md#open-questions) |
 | `email.unsubscribed` | **Required** | One-click unsubscribe; ISP and legal audit trail |
 | `email.sent` | Recommended | Proof of what was sent and when; FTC/CAN-SPAM |
 | `email.bounced` | Recommended | Proof suppression was added when required |
@@ -170,6 +171,7 @@ The following event types are surfaced in the individual's verification interfac
 | "I revoked consent from this marketer" | `compliance.consent_revoked` |
 | "This marketer sent me an email on this date" | `email.sent` |
 | "This marketer received a complaint about an email they sent me" | `email.complained` |
+| "My identity claim for this address lapsed and reverted to unclaimed" | `compliance.identity_verification_lapsed` |
 
 Individuals cannot run proofs on other individuals' events. The API returns only events where `symposia_identity_id` matches the authenticated caller's identity.
 
