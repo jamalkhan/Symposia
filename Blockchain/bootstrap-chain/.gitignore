@@ -1,0 +1,5 @@
+# Foundry
+lib/
+out/
+cache/
+broadcast/*/31337/
