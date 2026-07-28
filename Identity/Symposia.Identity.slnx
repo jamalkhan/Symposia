@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Symposia.Identity.Domain/Symposia.Identity.Domain.csproj" />
+  <Project Path="Symposia.Identity.Gateway/Symposia.Identity.Gateway.csproj" />
+  <Project Path="Symposia.Identity.Gateway.Tests/Symposia.Identity.Gateway.Tests.csproj" />
+</Solution>
