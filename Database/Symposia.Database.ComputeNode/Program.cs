@@ -3,6 +3,7 @@ using Symposia.Database.ComputeNode.Archival;
 using Symposia.Database.ComputeNode.Benchmark;
 using Symposia.Database.ComputeNode.Databases;
 using Symposia.Database.ComputeNode.Identity;
+using Symposia.Database.ComputeNode.Lifecycle;
 using Symposia.Database.ComputeNode.Proxy;
 using Symposia.Database.ComputeNode.Safekeeping;
 using Symposia.Database.ComputeNode.Supervision;
@@ -43,6 +44,15 @@ builder.Services.AddSingleton<ConnectionAdmissionService>();
 builder.Services.AddHttpClient<ILifecycleClient, HttpLifecycleClient>();
 builder.Services.AddSingleton<WakeOnConnectCoordinator>();
 builder.Services.AddSingleton<ConnectionRouter>();
+
+// Database provisioning/scaling/suspend-resume/deletion lifecycle orchestrator (issue #95).
+// Single writer of lifecycle state per db_id; consumes #90-style capacity data via
+// IComputeNodePlacementService, #94's safekeeper coordination, and #93's routing table.
+builder.Services.AddSingleton<IComputeNodePlacementService, InMemoryComputeNodePlacementService>();
+builder.Services.AddSingleton<ISafekeeperAssignmentClient, SafekeeperAssignmentClient>();
+builder.Services.AddSingleton<IProxyRoutingClient, ProxyRoutingClient>();
+builder.Services.AddHttpClient<IBlobBucketProvisioner, HttpBlobBucketProvisioner>();
+builder.Services.AddSingleton<DatabaseLifecycleOrchestrator>();
 
 var app = builder.Build();
 
@@ -163,12 +173,66 @@ app.MapPost("/internal/proxy/databases/{dbId}/connect", async (string dbId, Conn
     };
 });
 
+// Database lifecycle API (issue #95): tenant-facing provisioning/resize/suspend-resume/deletion.
+app.MapPost("/databases/lifecycle", async (ProvisionDatabaseRequest request, DatabaseLifecycleOrchestrator orchestrator, CancellationToken cancellationToken) =>
+{
+    var result = await orchestrator.ProvisionAsync(request, cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Created($"/databases/lifecycle/{request.DatabaseId}", result.Record),
+        LifecycleOperationOutcome.NoQualifyingNode => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Conflict(new { error = result.Reason }),
+    };
+});
+
+app.MapGet("/databases/lifecycle/{dbId}", (string dbId, DatabaseLifecycleOrchestrator orchestrator) =>
+{
+    var record = orchestrator.GetState(dbId);
+    return record is not null ? Results.Ok(record) : Results.NotFound();
+});
+
+app.MapPatch("/databases/lifecycle/{dbId}/resize", async (string dbId, ResizeRequest request, DatabaseLifecycleOrchestrator orchestrator, CancellationToken cancellationToken) =>
+{
+    var result = await orchestrator.ResizeAsync(dbId, request.ComputeSize, cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Ok(result.Record),
+        LifecycleOperationOutcome.NotFound => Results.NotFound(),
+        LifecycleOperationOutcome.NoQualifyingNode => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapPost("/internal/databases/lifecycle/{dbId}/resume", async (string dbId, DatabaseLifecycleOrchestrator orchestrator, CancellationToken cancellationToken) =>
+{
+    var result = await orchestrator.ResumeAsync(dbId, cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Ok(new Symposia.Database.ComputeNode.Proxy.ComputeEndpoint(result.Record!.PrimaryNodeId!, "", 5432)),
+        LifecycleOperationOutcome.NotFound => Results.NotFound(),
+        LifecycleOperationOutcome.NoQualifyingNode => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapDelete("/databases/lifecycle/{dbId}", async (string dbId, DatabaseLifecycleOrchestrator orchestrator, CancellationToken cancellationToken) =>
+{
+    var result = await orchestrator.DeleteAsync(dbId, cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Ok(result.Record),
+        LifecycleOperationOutcome.NotFound => Results.NotFound(),
+        _ => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
 app.Run();
 
 namespace Symposia.Database.ComputeNode
 {
     public sealed record UpsertRoutingRequest(Symposia.Database.ComputeNode.Proxy.ComputeEndpoint Primary, IReadOnlyList<Symposia.Database.ComputeNode.Proxy.ComputeEndpoint>? Replicas, int MaxConnections = 200);
     public sealed record ConnectRequest(string Username, string SecretHash, bool ReadOnly = false);
+    public sealed record ResizeRequest(Symposia.Database.ComputeNode.Lifecycle.DatabaseSize ComputeSize);
 }
 
 namespace Symposia.Database.ComputeNode
