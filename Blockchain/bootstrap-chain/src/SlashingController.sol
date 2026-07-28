@@ -44,10 +44,12 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
     event Slashed(address indexed node, uint256 amount, uint256 appliedBps, uint8 stage);
     event Recovered(address indexed node);
     event NonHardwareViolationSlashed(address indexed node, ViolationType violationType, uint256 amount, uint256 banExpiry);
+    event StakeCommitmentViolationSlashed(address indexed node, bytes32 reason, uint256 amount, uint256 banExpiry);
 
     error InvalidSignature();
     error NotRegistry(address caller);
     error InvalidStage(uint8 stage);
+    error NotFoundationRegistry(address caller);
 
     function _slashingStorage() private pure returns (SlashingStorage storage $) {
         bytes32 slot = SLASHING_STORAGE_LOCATION;
@@ -71,6 +73,13 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
 
     modifier onlyRegistry() {
         if (msg.sender != config().getAddress(ConfigKeys.REGISTRY_ADDRESS)) revert NotRegistry(msg.sender);
+        _;
+    }
+
+    modifier onlyFoundationRegistry() {
+        if (msg.sender != config().getAddress(ConfigKeys.FOUNDATION_REGISTRY_ADDRESS)) {
+            revert NotFoundationRegistry(msg.sender);
+        }
         _;
     }
 
@@ -197,6 +206,36 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
 
         emit StageTransition(node, previous, STAGE_4_HIGH_RATE, 3 /* EMERGENCY */ );
         emit NonHardwareViolationSlashed(node, violationType, amount, banExpiry);
+    }
+
+    // --- Stake-commitment violations (FoundationRegistry-triggered, issue #57) ---
+
+    /// @notice Early-exit-before-floor entry point, restricted to
+    /// `FoundationRegistry`. Reuses the same immediate-Stage-4/ban
+    /// machinery `reportNonHardwareViolation` uses, but as its own
+    /// violation category (`StakeCommitmentViolation`) with its own
+    /// config-supplied penalty percentage, so an early-exit penalty cannot
+    /// accidentally map onto an unrelated fault category.
+    function triggerStakeCommitmentViolation(address node, bytes32 reason)
+        external
+        onlyFoundationRegistry
+        whenNotPaused
+    {
+        NodePenaltyState storage s = _slashingStorage().states[node];
+        uint8 previous = s.stage;
+        s.stage = STAGE_4_HIGH_RATE;
+        s.consecutiveCleanEpochs = 0;
+        s.stage4Confirmed = true;
+
+        uint256 pctBps = config().getUint(ConfigKeys.slashingViolationPctBps(uint8(ViolationType.StakeCommitmentViolation)));
+        uint256 amount = _slashBps(node, pctBps);
+
+        uint256 banDuration = config().getUint(ConfigKeys.SLASHING_BAN_DURATION);
+        uint256 banExpiry = block.timestamp + banDuration;
+        _registry().banNode(node, banExpiry);
+
+        emit StageTransition(node, previous, STAGE_4_HIGH_RATE, 3 /* EMERGENCY */ );
+        emit StakeCommitmentViolationSlashed(node, reason, amount, banExpiry);
     }
 
     // --- Token disposition ---

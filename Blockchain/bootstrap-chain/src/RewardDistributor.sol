@@ -9,6 +9,7 @@ import {GovernedUpgradeable} from "./governance/GovernedUpgradeable.sol";
 import {IProtocolConfig} from "./config/IProtocolConfig.sol";
 import {ConfigKeys} from "./config/ConfigKeys.sol";
 import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
+import {IFoundationRewardHook} from "./interfaces/IFoundationRewardHook.sol";
 
 /// @title RewardDistributor
 /// @notice Implements FR-4 of issue #52 and reconciles/completes it against
@@ -147,6 +148,11 @@ contract RewardDistributor is GovernedUpgradeable {
     event Payout(address indexed node, uint256 indexed epoch, uint256 amount);
     event ReserveCredit(address indexed node, uint256 indexed epoch, uint256 amount);
     event ReserveSwept(address indexed node, uint256 amount);
+    /// @notice Issue #57 §6.4: emitted whenever the (optional)
+    /// `FOUNDATION_REWARD_HOOK` routes a foundation node's epoch surplus to
+    /// the ecosystem reserve, so the transfer is independently auditable
+    /// on-chain rather than only claimed in documentation.
+    event FoundationSurplusRouted(address indexed node, uint256 indexed epoch, uint256 amount, address indexed reserveRecipient);
 
     error EpochAlreadySealed(uint256 epoch);
     error FinalityWindowNotElapsed(uint256 epoch);
@@ -256,6 +262,16 @@ contract RewardDistributor is GovernedUpgradeable {
 
     function reserveBalanceOf(address node) external view returns (uint256) {
         return _rewardStorage().reserveBalance[node];
+    }
+
+    /// @notice The gross (pre-foundation-surplus-routing) epoch reward
+    /// computed by the reward engine for `node`, i.e. before any #57
+    /// operator/reserve split is applied by `_payNode`. Exposed as a public
+    /// getter so surplus routing is independently auditable against the
+    /// underlying calculation (AC6), not just against the operator-visible
+    /// transfer amount.
+    function payoutOf(uint256 epoch, address node) external view returns (uint256) {
+        return _rewardStorage().payoutOf[epoch][node];
     }
 
     // --- Eligibility ---
@@ -439,9 +455,8 @@ contract RewardDistributor is GovernedUpgradeable {
                 emit ReserveSwept(node, toPay - amount);
             }
 
-            IERC20 token = IERC20(config().getAddress(ConfigKeys.TOKEN_ADDRESS));
-            token.safeTransfer(node, toPay);
-            emit Payout(node, epoch, toPay);
+            uint256 paid = _payNode(node, epoch, toPay);
+            emit Payout(node, epoch, paid);
         } else {
             // A non-auto-pay epoch can still complete the sweep streak (per
             // FR6.1's example: epoch X's own reading pushes the streak to
@@ -451,13 +466,42 @@ contract RewardDistributor is GovernedUpgradeable {
             if ($.reserveBalance[node] > 0 && $.consecutiveCompliantEpochs[node] >= sweepEpochs) {
                 uint256 swept = $.reserveBalance[node];
                 $.reserveBalance[node] = 0;
-                IERC20 token = IERC20(config().getAddress(ConfigKeys.TOKEN_ADDRESS));
-                token.safeTransfer(node, swept);
-                emit ReserveSwept(node, swept);
+                uint256 paidSwept = _payNode(node, epoch, swept);
+                emit ReserveSwept(node, paidSwept);
             }
             $.reserveBalance[node] += amount;
             emit ReserveCredit(node, epoch, amount);
         }
+    }
+
+    /// @notice Issue #57 §6 post-calculation payout hook: wraps (does not
+    /// alter) the actual token transfer point. If `FOUNDATION_REWARD_HOOK`
+    /// is unconfigured, or the hook reports the node is not a foundation
+    /// node (or is at/below its operational cost baseline), the full
+    /// `amount` is paid to `node` exactly as before this issue — the core
+    /// reward calculation above this function is untouched either way.
+    /// Otherwise the operator-visible amount is capped at the baseline and
+    /// the surplus is routed to the ecosystem reserve address atomically,
+    /// within this same settlement call.
+    function _payNode(address node, uint256 epoch, uint256 amount) internal returns (uint256 paidToNode) {
+        IERC20 token = IERC20(config().getAddress(ConfigKeys.TOKEN_ADDRESS));
+        address hookAddr = config().getAddress(ConfigKeys.FOUNDATION_REWARD_HOOK);
+        if (hookAddr == address(0)) {
+            token.safeTransfer(node, amount);
+            return amount;
+        }
+
+        (uint256 operatorAmount, uint256 reserveAmount, address reserveRecipient) =
+            IFoundationRewardHook(hookAddr).routeFoundationPayout(node, epoch, amount);
+
+        if (operatorAmount > 0) {
+            token.safeTransfer(node, operatorAmount);
+        }
+        if (reserveAmount > 0 && reserveRecipient != address(0)) {
+            token.safeTransfer(reserveRecipient, reserveAmount);
+            emit FoundationSurplusRouted(node, epoch, reserveAmount, reserveRecipient);
+        }
+        return operatorAmount;
     }
 
     /// @notice Explicit manual claim of reserve balance ahead of the
@@ -468,6 +512,17 @@ contract RewardDistributor is GovernedUpgradeable {
     /// would already have paid it out; this is a safety-net entry point for
     /// a node that became compliant without a subsequent payout-bearing
     /// epoch being sealed for it).
+    ///
+    /// KNOWN GAP (issue #57 follow-up): this path does not route through
+    /// `_payNode`/the foundation reward hook — a foundation node could in
+    /// principle reach this safety-net path with an un-swept reserve
+    /// balance that was never surplus-checked. In practice `sealEpoch`'s
+    /// own sweep (which IS hooked, see `_settle`) fires in the same epoch
+    /// the compliance condition is met, so this is expected to be
+    /// unreachable for a foundation node in normal operation; flagged here
+    /// rather than silently left implicit, and worth closing explicitly
+    /// (either route it through `_payNode` too, or restrict this entry
+    /// point from foundation nodes) before relying on it at mainnet scale.
     function claimReserve() external whenNotPaused {
         RewardStorage storage $ = _rewardStorage();
         uint256 sweepEpochs = config().getUint(ConfigKeys.REWARD_RESERVE_SWEEP_EPOCHS);

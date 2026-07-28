@@ -12,7 +12,13 @@ interface ISlashingController {
     enum ViolationType {
         Overcommitment,
         RegionVerificationFraud,
-        RepeatedVerificationFailure
+        RepeatedVerificationFailure,
+        /// @notice Issue #57: a foundation node deregistered/powered down
+        /// before its 12-month operational floor elapsed. Its own category
+        /// (not overloaded onto the hardware-fault Stage 1-4 table or the
+        /// other non-hardware violation types above), with its own
+        /// config-supplied penalty percentage via `slashingViolationPctBps`.
+        StakeCommitmentViolation
     }
 
     function reportNonHardwareViolation(address node, ViolationType violationType) external;

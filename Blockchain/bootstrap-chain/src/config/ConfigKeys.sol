@@ -92,4 +92,21 @@ library ConfigKeys {
     function slashingViolationPctBps(uint8 violationType) internal pure returns (bytes32) {
         return keccak256(abi.encode("slashing.violationPctBps", violationType));
     }
+
+    // --- FoundationRegistry (issue #57) ---
+    bytes32 internal constant FOUNDATION_RESERVE_ADDRESS = keccak256("foundation.reserveAddress");
+    bytes32 internal constant ECOSYSTEM_RESERVE_ADDRESS = keccak256("foundation.ecosystemReserveAddress");
+    bytes32 internal constant FOUNDATION_OPS_ROLE = keccak256("foundation.opsRole");
+    bytes32 internal constant FOUNDATION_REGISTRY_ADDRESS = keccak256("foundation.registryAddress");
+    bytes32 internal constant FOUNDATION_REWARD_HOOK = keccak256("foundation.rewardHook");
+    bytes32 internal constant REGION_DISTRIBUTION_CAP_BPS = keccak256("foundation.regionDistributionCapBps");
+
+    /// @notice Per-node (or per-class, if a caller keys by a shared class
+    /// address) operational cost baseline consumed by the #57 reward-
+    /// surplus-routing hook. Owned by finance/ops; this issue only requires
+    /// the parameter exist and be read consistently — the exact
+    /// methodology is explicitly out of scope.
+    function operationalCostBaseline(address node) internal pure returns (bytes32) {
+        return keccak256(abi.encode("foundation.operationalCostBaseline", node));
+    }
 }
