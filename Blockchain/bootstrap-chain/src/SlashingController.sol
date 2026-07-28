@@ -50,6 +50,7 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
     error NotRegistry(address caller);
     error InvalidStage(uint8 stage);
     error NotFoundationRegistry(address caller);
+    error NotStoragePenaltyStateMachine(address caller);
     error NotComputePenaltyStateMachine(address caller);
 
     function _slashingStorage() private pure returns (SlashingStorage storage $) {
@@ -80,6 +81,13 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
     modifier onlyFoundationRegistry() {
         if (msg.sender != config().getAddress(ConfigKeys.FOUNDATION_REGISTRY_ADDRESS)) {
             revert NotFoundationRegistry(msg.sender);
+        }
+        _;
+    }
+
+    modifier onlyStoragePenaltyStateMachine() {
+        if (msg.sender != config().getAddress(ConfigKeys.STORAGE_PENALTY_STATE_MACHINE_ADDRESS)) {
+            revert NotStoragePenaltyStateMachine(msg.sender);
         }
         _;
     }
@@ -244,6 +252,21 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
 
         emit StageTransition(node, previous, STAGE_4_HIGH_RATE, 3 /* EMERGENCY */ );
         emit StakeCommitmentViolationSlashed(node, reason, amount, banExpiry);
+    }
+
+    // --- Storage penalty state machine hook (issue #82) ---
+
+    function applyStoragePenaltySlash(address node, uint256 amount)
+        external
+        onlyStoragePenaltyStateMachine
+        whenNotPaused
+        returns (uint256)
+    {
+        return _applySlashAmount(node, amount);
+    }
+
+    function forceDeregisterStorageNode(address node) external onlyStoragePenaltyStateMachine whenNotPaused {
+        _registry().banNode(node, block.timestamp);
     }
 
     // --- Compute penalty state machine hook (issue #91) ---

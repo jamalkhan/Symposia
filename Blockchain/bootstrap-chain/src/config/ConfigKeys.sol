@@ -93,6 +93,53 @@ library ConfigKeys {
         return keccak256(abi.encode("slashing.violationPctBps", violationType));
     }
 
+    // --- StoragePenaltyStateMachine (issue #82) ---
+    /// @notice Single allowlisted caller address authorized to invoke the
+    /// additive `applyStoragePenaltySlash` / `forceDeregisterStorageNode`
+    /// hooks on SlashingController -- mirrors the existing single-address
+    /// allowlist pattern (`REGISTRY_SLASHING_CONTROLLER`,
+    /// `FOUNDATION_REGISTRY_ADDRESS`) rather than inventing a multi-address
+    /// allowlist mechanism.
+    bytes32 internal constant STORAGE_PENALTY_STATE_MACHINE_ADDRESS = keccak256("storagePenalty.stateMachineAddress");
+    bytes32 internal constant STORAGE_PENALTY_INTEGRITY_ORACLE = keccak256("storagePenalty.integrityOracle");
+
+    /// @notice Stage 1 trigger thresholds (node-runner-incentives-and-penalties.md's
+    /// Stage 1 conditions: missed heartbeats, rising checksum error rate,
+    /// degraded I/O throughput).
+    bytes32 internal constant STORAGE_PENALTY_HEARTBEAT_MISS_THRESHOLD =
+        keccak256("storagePenalty.heartbeatMissThreshold");
+    bytes32 internal constant STORAGE_PENALTY_CHECKSUM_ERROR_RATE_BPS =
+        keccak256("storagePenalty.checksumErrorRateBps");
+    bytes32 internal constant STORAGE_PENALTY_IO_DEGRADATION_BPS = keccak256("storagePenalty.ioDegradationBps");
+
+    /// @notice Separate, higher threshold for a "significant single-epoch
+    /// spike in integrity failures" that bypasses Stage 1 and enters Stage
+    /// 2 directly, per FR-2.
+    bytes32 internal constant STORAGE_PENALTY_CHECKSUM_SPIKE_BPS = keccak256("storagePenalty.checksumSpikeBps");
+
+    /// @notice Consecutive-troubled-epoch thresholds for Stage 1/2/3 entry
+    /// via persistence, resolved by #82's own Arch pass against the source
+    /// doc's worked examples: Stage 1 on the first troubled epoch (1),
+    /// Stage 2 once Stage 1 conditions persist 2 consecutive epochs (2),
+    /// Stage 3 once Stage 2 conditions persist beyond 3 epochs, i.e. the
+    /// 4th troubled epoch (4).
+    bytes32 internal constant STORAGE_PENALTY_STAGE1_TROUBLE_EPOCHS = keccak256("storagePenalty.stage1TroubleEpochs");
+    bytes32 internal constant STORAGE_PENALTY_STAGE2_TROUBLE_EPOCHS = keccak256("storagePenalty.stage2TroubleEpochs");
+    bytes32 internal constant STORAGE_PENALTY_STAGE3_TROUBLE_EPOCHS = keccak256("storagePenalty.stage3TroubleEpochs");
+    bytes32 internal constant STORAGE_PENALTY_RECOVERY_CLEAN_EPOCHS = keccak256("storagePenalty.recoveryCleanEpochs"); // 3
+
+    bytes32 internal constant STORAGE_PENALTY_STAGE3_PCT_PER_EPOCH_BPS =
+        keccak256("storagePenalty.stage3PctPerEpochBps"); // 500 = 5%, compounding on remaining stake
+    bytes32 internal constant STORAGE_PENALTY_STAGE3_CAP_BPS = keccak256("storagePenalty.stage3CapBps"); // 2_500 = 25% of entry stake
+    bytes32 internal constant STORAGE_PENALTY_STAGE4_IMMEDIATE_BPS = keccak256("storagePenalty.stage4ImmediateBps"); // 2_000 = 20%
+    bytes32 internal constant STORAGE_PENALTY_STAGE4_ONGOING_BPS = keccak256("storagePenalty.stage4OngoingBps"); // 500 = 5%, flat on frozen post-immediate base, uncapped
+
+    /// @notice Reward multiplier (bps) applied for a node currently in
+    /// `stage` (0-4), read by `stagePenaltyMult`.
+    function storagePenaltyStageMultBps(uint8 stage) internal pure returns (bytes32) {
+        return keccak256(abi.encode("storagePenalty.stageMultBps", stage));
+    }
+
     // --- FoundationRegistry (issue #57) ---
     bytes32 internal constant FOUNDATION_RESERVE_ADDRESS = keccak256("foundation.reserveAddress");
     bytes32 internal constant ECOSYSTEM_RESERVE_ADDRESS = keccak256("foundation.ecosystemReserveAddress");
