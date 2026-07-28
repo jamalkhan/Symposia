@@ -111,6 +111,14 @@ public sealed class ComputeNodeSupervisor : IDisposable
         }
     }
 
+    public TenantDatabase? GetDatabase(string tenantDatabaseId)
+    {
+        lock (_gate)
+        {
+            return _databases.GetValueOrDefault(tenantDatabaseId);
+        }
+    }
+
     public PlaceDatabaseResult PlaceDatabase(PlaceDatabaseRequest request)
     {
         lock (_gate)
@@ -146,7 +154,9 @@ public sealed class ComputeNodeSupervisor : IDisposable
                 request.PgVersion,
                 request.Extensions,
                 request.SafekeeperPeers,
-                TenantDatabaseState.Running);
+                TenantDatabaseState.Running,
+                request.BlobBucketUrl,
+                request.BlobBucketCredential);
             _databases[request.TenantDatabaseId] = database;
 
             return PlaceDatabaseResult.Ok(database);
