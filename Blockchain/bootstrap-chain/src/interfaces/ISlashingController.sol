@@ -40,4 +40,13 @@ interface ISlashingController {
     /// reusing the in-place 3-consecutive-epoch recovery path. Restricted
     /// to the single allowlisted `storagePenalty.stateMachineAddress`.
     function forceDeregisterStorageNode(address node) external;
+
+    /// @notice Issue #91: the compute-specific `ComputePenaltyStateMachine`
+    /// runs its own telemetry-driven stage progression (distinct trigger
+    /// table from the hardware-fault Stage 1-4 model this contract owns) and
+    /// has already computed the exact `amount` to slash; this just reuses
+    /// SlashingController's existing token-disposition plumbing rather than
+    /// duplicating burn/redistribute logic in the new contract. Restricted
+    /// to the single allowlisted `computePenalty.stateMachineAddress`.
+    function applyComputePenaltySlash(address node, uint256 amount) external returns (uint256);
 }

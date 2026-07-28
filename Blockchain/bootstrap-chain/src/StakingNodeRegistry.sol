@@ -66,6 +66,7 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
     error NotVerifierRole(address caller);
     error NotSlashingController(address caller);
     error NoOvercommitment(address node);
+    error NotComputePenaltyStateMachine(address caller);
 
     function _registryStorage() private pure returns (RegistryStorage storage $) {
         bytes32 slot = REGISTRY_STORAGE_LOCATION;
@@ -92,6 +93,12 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
     modifier onlySlashingController() {
         address controller = config().getAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER);
         if (msg.sender != controller) revert NotSlashingController(msg.sender);
+        _;
+    }
+
+    modifier onlyComputePenaltyStateMachine() {
+        address allowed = config().getAddress(ConfigKeys.COMPUTE_PENALTY_STATE_MACHINE_ADDRESS);
+        if (msg.sender != allowed) revert NotComputePenaltyStateMachine(msg.sender);
         _;
     }
 
@@ -310,6 +317,23 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
         NodeStatus previous = rec.status;
         rec.status = NodeStatus.Banned;
         rec.banExpiry = banExpiry;
+        emit StatusChanged(node, previous, NodeStatus.Banned);
+    }
+
+    // --- ComputePenaltyStateMachine-only hook (issue #91) ---
+
+    /// @notice Forced removal from the active registry on Stage 4 (Data
+    /// Loss) of the compute-specific penalty state machine. Unlike
+    /// `banNode`, `banExpiry` is set to `block.timestamp` (not a forward
+    /// ban duration) -- issue #91's Stage 4 requires re-registration to
+    /// rejoin with state reset to a clean Stage 0, not a timed ban, so the
+    /// node is immediately eligible to call `register` again (which
+    /// overwrites this record with a fresh entry).
+    function forceDeregister(address node) external onlyComputePenaltyStateMachine {
+        NodeRecord storage rec = _registryStorage().records[node];
+        NodeStatus previous = rec.status;
+        rec.status = NodeStatus.Banned;
+        rec.banExpiry = block.timestamp;
         emit StatusChanged(node, previous, NodeStatus.Banned);
     }
 }
