@@ -300,6 +300,13 @@ contract FoundationRegistry is GovernedUpgradeable {
         return _foundationStorage().records[node];
     }
 
+    /// @notice Region-key accessor consumed by `ComputeTierRegistry` (#89)
+    /// for its Phase 1 witness geographic-diversity check, without requiring
+    /// that caller to depend on the full `FoundationRecord` struct shape.
+    function getFoundationRegion(address node) external view returns (bytes32) {
+        return _foundationStorage().records[node].region;
+    }
+
     /// @notice Total currently-active foundation nodes — the read surface a
     /// public node-directory indexer (§7, out-of-scope on-chain service; a
     /// TODO/stub per the Arch pass's "event-sourced off-chain projection,
