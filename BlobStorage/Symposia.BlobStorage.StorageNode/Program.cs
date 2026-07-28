@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.Options;
 using Symposia.BlobStorage.StorageNode;
 using Symposia.BlobStorage.StorageNode.Grpc;
 using Symposia.BlobStorage.StorageNode.Identity;
@@ -18,6 +19,15 @@ builder.Services.AddSingleton<NodeIdentity>();
 builder.Services.AddSingleton<LocalBlobStore>();
 builder.Services.AddSingleton<ManifestStore>();
 builder.Services.AddHostedService<IntegritySelfCheckWorker>();
+builder.Services.AddHttpClient<NodeRegistrationClient>((sp, http) =>
+{
+    var gatewayUrl = sp.GetRequiredService<IOptions<StorageNodeOptions>>().Value.BlockchainGatewayUrl;
+    if (!string.IsNullOrWhiteSpace(gatewayUrl))
+    {
+        http.BaseAddress = new Uri(gatewayUrl);
+    }
+});
+builder.Services.AddHostedService<NodeRegistrationHostedService>();
 builder.Services.AddGrpc();
 
 var app = builder.Build();

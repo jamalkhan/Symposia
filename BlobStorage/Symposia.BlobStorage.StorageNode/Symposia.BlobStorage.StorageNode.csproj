@@ -8,6 +8,7 @@
   <ItemGroup>
     <PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="Nethereum.Web3" Version="4.29.0" />
   </ItemGroup>
 
   <PropertyGroup>
