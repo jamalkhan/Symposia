@@ -197,12 +197,16 @@ Of the **92% capacity** emission:
 | Node type | Base weight | Rationale |
 |---|---|---|
 | **Storage** | **40%** | Core durability product |
-| **OLTP** | **22%** | Martech + DB compute |
+| **OLTP** | **22%** | Martech transactional layer (contact records, segmentation, event writes — see [Node Types and Rewards](../Platform/node-types-and-rewards.md#oltp-node)) |
 | **Analytics** | **13%** | Report/query tier |
 | **Consensus** | **13%** | Chain security / participation |
 | **Serverless** | **12%** | Event-driven functions, webhooks, Journey side-effects |
 
 Weights sum to 100% of the capacity slice.
+
+> **Correction (post-#90 Arch):** earlier drafts of this table described the OLTP row as "Martech + DB compute," implying Symposia's own Postgres database-service compute nodes ([Compute Nodes](../Database/compute-nodes.md)) shared this emission-based type pool with martech OLTP nodes. That is incorrect and has been removed. Compute nodes are **not** part of any emission-based type pool — per compute-nodes.md's Reward Pool section, they are rewarded entirely from a separate, **fee-based** compute reward pool funded by tenant compute billing revenue (see §7 and [FeeSplitter's `depositOltpFeeRevenue`](../Database/compute-nodes.md#reward-calculation)), not token emission. The OLTP row above is scoped to the martech-track OLTP node type only.
+
+
 
 ### 6.2 Dynamic multiplier (formula)
 
@@ -333,12 +337,15 @@ Stake is in **SYM**, locked for the node’s registration. Unstake subject to **
 | Node type | Minimum stake | Scaling |
 |---|---|---|
 | **Storage** | **25,000 SYM** base | **+ 2,500 SYM per TB** offered (ceil) |
-| **OLTP** | **75,000 SYM** base | **+ 15,000 SYM per compute-size step** above `medium` (see database sizes: large=+1, xlarge=+2, …) |
+| **OLTP** | **75,000 SYM** base | **+ 15,000 SYM per compute-size step** above `medium` (see database sizes: large=+1, xlarge=+2, …) — martech transactional layer only, see note below |
+| **Compute** | **40,000 SYM** base *(illustrative — subject to governance)* | **+ 5,000 SYM per vCPU** offered (ceil) *(illustrative — subject to governance)* |
 | **Analytics** | **60,000 SYM** base | **+ 10,000 SYM per 32 GB RAM** committed above 32 GB |
 | **Consensus** | **150,000 SYM** | Flat per consensus node identity |
 | **Serverless** | **50,000 SYM** base | **+ 5,000 SYM per concurrent invoke slot** committed (ceil) |
 | **Verifier** | **5×** the Storage base for a **0 TB** “verifier-only” registration = **125,000 SYM** | Matches “5× standard” intent in verifier requirements |
 | **Email IP Address** | **0 SYM mining stake** | Optional **abuse bond** later; not mining collateral |
+
+> **`Compute` node type (added post-#90 Arch):** Symposia's own Postgres-as-a-service compute nodes ([Compute Nodes](../Database/compute-nodes.md)) are **a distinct `NodeType` from `OLTP`**, not a reuse of it. `OLTP` in this document refers exclusively to the martech track's internal transactional layer (contact records, segmentation queries — [Node Types and Rewards](../Platform/node-types-and-rewards.md#oltp-node)). The two were previously conflated in this document's type-pool table (§6.1) and risked being conflated in `StakeRegistry`'s `NodeType` enum (issue #74) as well. Reasons for the split: (1) compute-nodes.md's own stake guidance ("scales similarly to storage nodes per GB") describes a **continuous per-vCPU** formula, structurally different from OLTP's tiered per-compute-size-step formula; (2) compute nodes are fee-funded (§7), not emission-funded, and keeping them a distinct type keeps that distinction visible in the stake/registry layer; (3) the two node types may diverge further as non-Postgres OLTP or non-database compute classes are added later. The `40,000 SYM` base and `5,000 SYM`/vCPU figures above are illustrative placeholders pending a governance pass — unlike the other rows in this table, they were not part of the original MVP numbers and need explicit confirmation before mainnet.
 
 ### 9.2 Stake-to-earn communication
 

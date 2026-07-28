@@ -168,12 +168,13 @@ Compute nodes use the same 4-stage progressive penalty system as storage nodes (
 
 ## Staking
 
-Compute node operators stake tokens proportional to their offered compute capacity:
-- The minimum stake per vCPU offered scales similarly to storage nodes per GB.
-- Staking requirements are governance parameters.
+Compute node operators stake under a **distinct on-chain node type, `Compute`** — not the platform's general `OLTP` node type, which is reserved for the martech track's internal transactional layer (see [Node Types and Rewards](../Platform/node-types-and-rewards.md#oltp-node)). This distinction was confirmed during Arch review of node onboarding (#90): compute nodes scale stake continuously with declared vCPU capacity (matching Storage's per-TB shape), rather than OLTP's tiered per-compute-size-step formula, and compute nodes are fee-funded rather than emission-funded (see Reward Pool, above), making them a materially different economic object from OLTP despite the superficial "both run Postgres" similarity.
+
+- The minimum stake per vCPU offered scales similarly to storage nodes per GB (continuous, not stepped).
+- Staking requirements and exact rates are governance parameters — see [Tokenomics MVP §9.1](../Blockchain/tokenomics-mvp.md#91-by-node-type) for illustrative figures.
 - Unstaking follows the same cooldown period as storage nodes.
 
-Compute node operators may also run storage nodes on separate hardware. The two roles use separate stake deposits and separate reward streams.
+Compute node operators may also run storage nodes, or a martech OLTP node, on separate hardware. Each role uses its own stake deposit and its own reward stream — a `Compute` node's stake is entirely independent of any `OLTP` or `Storage` stake the same operator holds.
 
 ---
 
