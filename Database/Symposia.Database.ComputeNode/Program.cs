@@ -54,6 +54,10 @@ builder.Services.AddSingleton<IProxyRoutingClient, ProxyRoutingClient>();
 builder.Services.AddHttpClient<IBlobBucketProvisioner, HttpBlobBucketProvisioner>();
 builder.Services.AddSingleton<DatabaseLifecycleOrchestrator>();
 
+// Read replica provisioning and routing (issue #96). Reuses #95's placement/routing collaborators
+// and reads (never mutates) the primary's lifecycle state via DatabaseLifecycleOrchestrator.
+builder.Services.AddSingleton<ReplicaOrchestrator>();
+
 var app = builder.Build();
 
 app.Services.GetRequiredService<NodeIdentity>().EnsureLoadedOrGenerated();
@@ -226,6 +230,78 @@ app.MapDelete("/databases/lifecycle/{dbId}", async (string dbId, DatabaseLifecyc
     };
 });
 
+// Read replica API (issue #96): provisioning, listing, resize, suspend/resume, deletion, lag, and
+// minimal-scope manual promotion, all independent of the primary's own lifecycle endpoints above.
+app.MapPost("/databases/{dbId}/replicas", async (string dbId, CreateReplicaRequest request, ReplicaOrchestrator replicas, CancellationToken cancellationToken) =>
+{
+    var replicaId = Guid.NewGuid().ToString();
+    var result = await replicas.ProvisionReplicaAsync(new ProvisionReplicaRequest(dbId, replicaId, request.ComputeSize, request.DatabaseName, request.Region), cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Created($"/databases/{dbId}/replicas/{replicaId}", result.Replica),
+        LifecycleOperationOutcome.NotFound => Results.NotFound(),
+        LifecycleOperationOutcome.NoQualifyingNode => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Conflict(new { error = result.Reason }),
+    };
+});
+
+app.MapGet("/databases/{dbId}/replicas", (string dbId, ReplicaOrchestrator replicas) =>
+    Results.Ok(replicas.ListReplicas(dbId)));
+
+app.MapGet("/databases/{dbId}/replicas/{replicaId}", (string dbId, string replicaId, ReplicaOrchestrator replicas) =>
+{
+    var replica = replicas.GetState(replicaId);
+    return replica is not null && replica.DatabaseId == dbId ? Results.Ok(replica) : Results.NotFound();
+});
+
+app.MapGet("/databases/{dbId}/replicas/{replicaId}/lag", (string dbId, string replicaId, ReplicaOrchestrator replicas) =>
+{
+    var replica = replicas.GetState(replicaId);
+    return replica is not null && replica.DatabaseId == dbId
+        ? Results.Ok(new { replica.ReplicaLsn, replica.LagBytes, replica.Status })
+        : Results.NotFound();
+});
+
+app.MapPatch("/databases/{dbId}/replicas/{replicaId}", async (string dbId, string replicaId, ResizeRequest request, ReplicaOrchestrator replicas, CancellationToken cancellationToken) =>
+{
+    var result = await replicas.ResizeReplicaAsync(replicaId, request.ComputeSize, cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Ok(result.Replica),
+        LifecycleOperationOutcome.NotFound => Results.NotFound(),
+        LifecycleOperationOutcome.NoQualifyingNode => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapDelete("/databases/{dbId}/replicas/{replicaId}", async (string dbId, string replicaId, ReplicaOrchestrator replicas, CancellationToken cancellationToken) =>
+{
+    var result = await replicas.DeleteReplicaAsync(replicaId, cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Ok(result.Replica),
+        LifecycleOperationOutcome.NotFound => Results.NotFound(),
+        _ => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapPost("/databases/{dbId}/replicas/{replicaId}/promote", async (string dbId, string replicaId, ReplicaOrchestrator replicas, CancellationToken cancellationToken) =>
+{
+    var result = await replicas.PromoteAsync(replicaId, cancellationToken);
+    return result.Outcome switch
+    {
+        LifecycleOperationOutcome.Ok => Results.Ok(result.Replica),
+        LifecycleOperationOutcome.NotFound => Results.NotFound(),
+        _ => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapPost("/internal/databases/{dbId}/replicas/{replicaId}/lag", (string dbId, string replicaId, ReportLagRequest request, ReplicaOrchestrator replicas) =>
+{
+    var result = replicas.ReportLag(replicaId, request.ReplicaLsn, request.LagBytes);
+    return result.Outcome == LifecycleOperationOutcome.Ok ? Results.Ok(result.Replica) : Results.NotFound();
+});
+
 app.Run();
 
 namespace Symposia.Database.ComputeNode
@@ -233,6 +309,8 @@ namespace Symposia.Database.ComputeNode
     public sealed record UpsertRoutingRequest(Symposia.Database.ComputeNode.Proxy.ComputeEndpoint Primary, IReadOnlyList<Symposia.Database.ComputeNode.Proxy.ComputeEndpoint>? Replicas, int MaxConnections = 200);
     public sealed record ConnectRequest(string Username, string SecretHash, bool ReadOnly = false);
     public sealed record ResizeRequest(Symposia.Database.ComputeNode.Lifecycle.DatabaseSize ComputeSize);
+    public sealed record CreateReplicaRequest(Symposia.Database.ComputeNode.Lifecycle.DatabaseSize ComputeSize, string DatabaseName, string? Region = null);
+    public sealed record ReportLagRequest(long ReplicaLsn, long LagBytes);
 }
 
 namespace Symposia.Database.ComputeNode
