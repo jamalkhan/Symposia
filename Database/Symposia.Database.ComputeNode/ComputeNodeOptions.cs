@@ -39,4 +39,20 @@ public sealed class ComputeNodeOptions
 
     /// <summary>Window in which MaxRestartAttempts consecutive crashes are counted as a crash loop.</summary>
     public int CrashLoopWindowSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Total sustained-measurement window for POST /benchmark/run (issue #89, FR9). Deliberately
+    /// long enough to outlast a burstable/shared-vCPU credit window rather than being gameable by
+    /// a short instantaneous sample -- see BenchmarkBurstDiscardSeconds.
+    /// </summary>
+    public int BenchmarkSustainedWindowSeconds { get; set; } = 90;
+
+    /// <summary>
+    /// Leading portion of BenchmarkSustainedWindowSeconds discarded before averaging (FR9's
+    /// burst-absorption window); only samples after this point count toward the reported rate.
+    /// </summary>
+    public int BenchmarkBurstDiscardSeconds { get; set; } = 30;
+
+    /// <summary>Interval between samples taken during the sustained benchmark window.</summary>
+    public int BenchmarkSampleIntervalSeconds { get; set; } = 5;
 }
