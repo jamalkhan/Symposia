@@ -96,6 +96,14 @@ abstract contract CoreProtocolTestBase is Test {
         cfg.setUint(ConfigKeys.REWARD_RESERVE_SWEEP_EPOCHS, 2);
         cfg.setUint(ConfigKeys.REWARD_FINALITY_WINDOW, 1 hours);
         cfg.setAddress(ConfigKeys.REWARD_METRIC_SIGNER, metricSigner);
+        // Storage factor weights (tokenomics-mvp.md §6.3), node type 0.
+        cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 0), 3_000); // retrieval speed
+        cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 1), 2_000); // uptime
+        cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 2), 1_500); // latency/TTFB
+        cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 3), 1_000); // I/O throughput
+        cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 4), 1_000); // network bandwidth
+        cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 5), 800); // available storage
+        cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 6), 700); // used storage
         cfg.setUint(ConfigKeys.rewardStagePenaltyBps(1), 7_000); // Stage 1 -> 70%
         cfg.setUint(ConfigKeys.rewardStagePenaltyBps(2), 4_000); // Stage 2 -> 40%
         cfg.setUint(ConfigKeys.rewardStagePenaltyBps(3), 0);
@@ -139,6 +147,21 @@ abstract contract CoreProtocolTestBase is Test {
             abi.encodePacked(
                 "\x19Ethereum Signed Message:\n32",
                 keccak256(abi.encode(address(rewards), node, epoch, score, heartbeatBps))
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(metricSignerPk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _signFactorMetrics(address node, uint256 epoch, uint256[7] memory values, uint256 heartbeatBps)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19Ethereum Signed Message:\n32",
+                keccak256(abi.encode(address(rewards), node, epoch, values, heartbeatBps))
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(metricSignerPk, digest);

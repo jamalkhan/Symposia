@@ -63,6 +63,21 @@ library ConfigKeys {
         return keccak256(abi.encode("reward.stagePenaltyBps", stage));
     }
 
+    /// @notice Per-node-type, per-factor weight (bps, sums to 10_000 across a
+    /// type's active factor table) used by the #53 per-factor scoring path.
+    /// `factorIndex` for Storage (tokenomics-mvp.md §6.3): 0=retrieval speed,
+    /// 1=uptime, 2=latency/TTFB, 3=I/O throughput, 4=network bandwidth,
+    /// 5=available storage, 6=used storage.
+    function rewardFactorWeightBps(uint8 nodeType, uint8 factorIndex) internal pure returns (bytes32) {
+        return keccak256(abi.encode("reward.factorWeightBps", nodeType, factorIndex));
+    }
+
+    /// @notice Reliability-bonus parameters (tokenomics-mvp.md §6.4): a
+    /// trailing-30-epoch reliability ratio >= this bps threshold multiplies
+    /// gross payout by `REWARD_RELIABILITY_BONUS_BPS` (e.g. 10_500 = 1.05x).
+    bytes32 internal constant REWARD_RELIABILITY_BONUS_THRESHOLD_BPS = keccak256("reward.reliabilityBonusThresholdBps");
+    bytes32 internal constant REWARD_RELIABILITY_BONUS_BPS = keccak256("reward.reliabilityBonusBps");
+
     // --- SlashingController ---
     bytes32 internal constant SLASHING_STAGE3_PCT_PER_EPOCH_BPS = keccak256("slashing.stage3.pctPerEpochBps");
     bytes32 internal constant SLASHING_STAGE3_CAP_BPS = keccak256("slashing.stage3.capBps");
