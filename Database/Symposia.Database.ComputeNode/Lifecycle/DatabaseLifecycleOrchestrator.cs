@@ -15,7 +15,8 @@ public sealed class DatabaseLifecycleOrchestrator(
     IBlobBucketProvisioner bucketProvisioner,
     ISafekeeperAssignmentClient safekeepers,
     IProxyRoutingClient routing,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    IPostgresVersionCatalog? versionCatalog = null)
 {
     private const int DefaultMaxConnections = 200;
 
@@ -24,6 +25,7 @@ public sealed class DatabaseLifecycleOrchestrator(
     private readonly Dictionary<string, SemaphoreSlim> _leases = [];
     private readonly Dictionary<string, DateTimeOffset> _idleSince = [];
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly IPostgresVersionCatalog _versionCatalog = versionCatalog ?? new InMemoryPostgresVersionCatalog();
 
     public DatabaseLifecycleRecord? GetState(string databaseId)
     {
@@ -69,14 +71,21 @@ public sealed class DatabaseLifecycleOrchestrator(
             if (_records.ContainsKey(request.DatabaseId))
                 return LifecycleOperationResult.Rejected($"Database '{request.DatabaseId}' already exists.");
 
+            // FR1.4/AC2: default to the current latest supported major when the tenant doesn't
+            // specify one; an explicit selection must be in the currently supported set.
+            var postgresMajorVersion = request.PostgresMajorVersion ?? _versionCatalog.LatestSupportedMajor;
+            if (!_versionCatalog.IsSupported(postgresMajorVersion))
+                return LifecycleOperationResult.UnsupportedMajorVersion(postgresMajorVersion);
+
             var provisioning = new DatabaseLifecycleRecord(
                 request.DatabaseId, request.Region, LifecycleState.Provisioning, StateVersion: 0,
                 request.ComputeSize, PrimaryNodeId: null, SafekeeperPeerIds: [], BlobBucketId: null,
-                request.IdleSuspendSeconds, ConnectionString: null);
+                request.IdleSuspendSeconds, ConnectionString: null, PostgresMajorVersion: postgresMajorVersion);
             Store(provisioning);
 
             var requiredTier = request.ComputeSize.RequiredTier();
-            var node = placement.SelectNode(request.Region, requiredTier, excludeNodeIds: []);
+            // FR1.5: only route to a node that has declared support for the database's major version.
+            var node = placement.SelectNode(request.Region, requiredTier, excludeNodeIds: [], requiredPostgresMajor: postgresMajorVersion);
             if (node is null)
             {
                 Store(provisioning with { State = LifecycleState.Failed, FailureReason = "No qualifying compute node available." });
@@ -317,6 +326,43 @@ public sealed class DatabaseLifecycleOrchestrator(
             var deleted = current with { State = LifecycleState.Deleted, PrimaryNodeId = null, SafekeeperPeerIds = [] };
             Store(deleted);
             return LifecycleOperationResult.Ok(deleted);
+        }
+        finally
+        {
+            lease.Release();
+        }
+    }
+
+    /// <summary>
+    /// Mutation hook used by the #102 Compute Attachment Swap orchestrator once a swap's cutover has
+    /// completed: rewrites the primary node, safekeeper quorum, and Postgres major version onto this
+    /// database's lifecycle record. Takes this orchestrator's own per-database lease so it is
+    /// serialized against resize/suspend/resume/delete the same as every other transition -- the
+    /// swap orchestrator's own lock only protects swap-specific state (concurrency rule / audit),
+    /// not the lifecycle record itself.
+    /// </summary>
+    public async Task<LifecycleOperationResult> ApplyComputeAttachmentSwapAsync(
+        string databaseId, string newPrimaryNodeId, IReadOnlyList<string> newSafekeeperPeerIds, int newPostgresMajorVersion, CancellationToken cancellationToken = default)
+    {
+        var lease = LeaseFor(databaseId);
+        await lease.WaitAsync(cancellationToken);
+        try
+        {
+            var current = GetState(databaseId);
+            if (current is null)
+                return LifecycleOperationResult.NotFound(databaseId);
+
+            if (current.State != LifecycleState.Active)
+                return LifecycleOperationResult.Rejected($"Cannot apply a compute attachment swap while database is in state '{current.State}'; must be Active.", current);
+
+            var updated = current with
+            {
+                PrimaryNodeId = newPrimaryNodeId,
+                SafekeeperPeerIds = newSafekeeperPeerIds,
+                PostgresMajorVersion = newPostgresMajorVersion,
+            };
+            Store(updated);
+            return LifecycleOperationResult.Ok(updated);
         }
         finally
         {

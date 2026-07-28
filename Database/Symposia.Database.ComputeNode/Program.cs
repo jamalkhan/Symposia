@@ -58,6 +58,13 @@ builder.Services.AddSingleton<DatabaseLifecycleOrchestrator>();
 // and reads (never mutates) the primary's lifecycle state via DatabaseLifecycleOrchestrator.
 builder.Services.AddSingleton<ReplicaOrchestrator>();
 
+// Postgres major version support and upgrade policy (issue #102). Governance-configured version
+// catalog (FR1) plus the Compute Attachment Swap primitive (FR2): a major-version upgrade is a new
+// compute-node attachment against unchanged storage, reusing #95's placement/routing and #94's
+// safekeeper coordination rather than a data migration.
+builder.Services.AddSingleton<IPostgresVersionCatalog, InMemoryPostgresVersionCatalog>();
+builder.Services.AddSingleton<ComputeAttachmentSwapOrchestrator>();
+
 var app = builder.Build();
 
 app.Services.GetRequiredService<NodeIdentity>().EnsureLoadedOrGenerated();
@@ -185,6 +192,7 @@ app.MapPost("/databases/lifecycle", async (ProvisionDatabaseRequest request, Dat
     {
         LifecycleOperationOutcome.Ok => Results.Created($"/databases/lifecycle/{request.DatabaseId}", result.Record),
         LifecycleOperationOutcome.NoQualifyingNode => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        LifecycleOperationOutcome.UnsupportedMajorVersion => Results.UnprocessableEntity(new { error = result.Reason }),
         _ => Results.Conflict(new { error = result.Reason }),
     };
 });
@@ -302,6 +310,47 @@ app.MapPost("/internal/databases/{dbId}/replicas/{replicaId}/lag", (string dbId,
     return result.Outcome == LifecycleOperationOutcome.Ok ? Results.Ok(result.Replica) : Results.NotFound();
 });
 
+// Postgres major version catalog (issue #102, FR1.1): public, unauthenticated per the spec --
+// tenants and prospective compute-node operators both need this before any account/auth context.
+app.MapGet("/platform/postgres-versions", (IPostgresVersionCatalog catalog) =>
+    Results.Ok(catalog.GetSupportedVersions().Select(v => new
+    {
+        major = v.Major,
+        status = "supported",
+        platformEolDate = v.PlatformEolDate,
+    })));
+
+// Compute Attachment Swap upgrade API (issue #102, FR2.3-FR2.5): tenant-initiated major-version
+// upgrade and its rollback, plus the FR3.3/AC7 audit trail. EOL-enforced swaps are out of scope for
+// this pass (no sweep job calls UpgradeAsync with SwapTrigger.EolEnforced yet).
+app.MapPost("/databases/{dbId}/upgrade", async (string dbId, UpgradeRequest request, ComputeAttachmentSwapOrchestrator swaps, CancellationToken cancellationToken) =>
+{
+    var result = await swaps.UpgradeAsync(dbId, request.TargetMajor, cancellationToken: cancellationToken);
+    return result.Outcome switch
+    {
+        SwapOperationOutcome.Accepted => Results.Accepted($"/databases/{dbId}/upgrade/{result.Swap!.SwapId}", result.Swap),
+        SwapOperationOutcome.NotFound => Results.NotFound(new { error = result.Reason }),
+        SwapOperationOutcome.Conflict => Results.Conflict(new { error = result.Reason, activeSwap = result.Swap }),
+        SwapOperationOutcome.NoRegionalCapacity => Results.UnprocessableEntity(new { error = result.Reason, reason = "no-regional-capacity" }),
+        _ => Results.UnprocessableEntity(new { error = result.Reason, reason = "unsupported-major-version" }),
+    };
+});
+
+app.MapPost("/databases/{dbId}/upgrade/{swapId}/rollback", async (string dbId, string swapId, ComputeAttachmentSwapOrchestrator swaps, CancellationToken cancellationToken) =>
+{
+    var result = await swaps.RollbackAsync(dbId, swapId, cancellationToken);
+    return result.Outcome switch
+    {
+        SwapOperationOutcome.RolledBack => Results.Ok(result.Swap),
+        SwapOperationOutcome.NotFound => Results.NotFound(new { error = result.Reason }),
+        SwapOperationOutcome.RollbackWindowExpired => Results.Conflict(new { error = result.Reason }),
+        _ => Results.UnprocessableEntity(new { error = result.Reason }),
+    };
+});
+
+app.MapGet("/databases/{dbId}/upgrades", (string dbId, ComputeAttachmentSwapOrchestrator swaps) =>
+    Results.Ok(swaps.GetAuditRecords(dbId)));
+
 app.Run();
 
 namespace Symposia.Database.ComputeNode
@@ -311,6 +360,7 @@ namespace Symposia.Database.ComputeNode
     public sealed record ResizeRequest(Symposia.Database.ComputeNode.Lifecycle.DatabaseSize ComputeSize);
     public sealed record CreateReplicaRequest(Symposia.Database.ComputeNode.Lifecycle.DatabaseSize ComputeSize, string DatabaseName, string? Region = null);
     public sealed record ReportLagRequest(long ReplicaLsn, long LagBytes);
+    public sealed record UpgradeRequest(int TargetMajor);
 }
 
 namespace Symposia.Database.ComputeNode

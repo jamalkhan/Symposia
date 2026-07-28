@@ -7,7 +7,12 @@ namespace Symposia.Database.ComputeNode.Lifecycle;
 /// </summary>
 public interface IComputeNodePlacementService
 {
-    NodeCandidate? SelectNode(string region, int requiredTier, IReadOnlyCollection<string> excludeNodeIds);
+    /// <summary>
+    /// <paramref name="requiredPostgresMajor"/> is the version-aware filter added by issue #102
+    /// (FR1.5/FR4.2): when supplied, only nodes that have declared support for that major are
+    /// eligible; <c>null</c> preserves the pre-#102 behavior of ignoring major version entirely.
+    /// </summary>
+    NodeCandidate? SelectNode(string region, int requiredTier, IReadOnlyCollection<string> excludeNodeIds, int? requiredPostgresMajor = null);
 
     NodeCandidate? GetNode(string nodeId);
 }
@@ -27,12 +32,13 @@ public sealed class InMemoryComputeNodePlacementService : IComputeNodePlacementS
         }
     }
 
-    public NodeCandidate? SelectNode(string region, int requiredTier, IReadOnlyCollection<string> excludeNodeIds)
+    public NodeCandidate? SelectNode(string region, int requiredTier, IReadOnlyCollection<string> excludeNodeIds, int? requiredPostgresMajor = null)
     {
         lock (_gate)
         {
             return _candidates
                 .Where(c => c.Region == region && c.Tier <= requiredTier && c.AvailableCapacity > 0 && !excludeNodeIds.Contains(c.NodeId))
+                .Where(c => requiredPostgresMajor is null || c.SupportsPostgresMajor(requiredPostgresMajor.Value))
                 .OrderBy(c => c.Tier) // prefer the lowest-tier node that still qualifies, per the arch's bin-packing note
                 .FirstOrDefault();
         }
