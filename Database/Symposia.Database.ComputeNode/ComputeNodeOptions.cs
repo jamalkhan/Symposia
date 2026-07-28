@@ -74,4 +74,10 @@ public sealed class ComputeNodeOptions
 
     /// <summary>Interval between samples taken during the sustained benchmark window.</summary>
     public int BenchmarkSampleIntervalSeconds { get; set; } = 5;
+
+    /// <summary>Base delay for exponential backoff between WAL archival upload retries (issue #94, FR7).</summary>
+    public double ArchivalRetryBackoffBaseSeconds { get; set; } = 1;
+
+    /// <summary>Upper bound on archival retry backoff, so a persistently failing upload never grows unbounded.</summary>
+    public double ArchivalMaxRetryBackoffSeconds { get; set; } = 60;
 }

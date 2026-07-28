@@ -15,4 +15,6 @@ public sealed record TenantDatabase(
     int PostgresMajorVersion,
     string[] Extensions,
     string[] SafekeeperPeers,
-    TenantDatabaseState State);
+    TenantDatabaseState State,
+    string? BlobBucketUrl = null,
+    string? BlobBucketCredential = null);

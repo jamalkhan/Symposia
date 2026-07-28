@@ -10,4 +10,5 @@ public sealed record PlaceDatabaseRequest(
     string BlobBucketCredential,
     int PgVersion,
     string[] Extensions,
-    string[] SafekeeperPeers);
+    string[] SafekeeperPeers,
+    string? BlobBucketUrl = null);

@@ -1,7 +1,9 @@
 using Symposia.Database.ComputeNode;
+using Symposia.Database.ComputeNode.Archival;
 using Symposia.Database.ComputeNode.Benchmark;
 using Symposia.Database.ComputeNode.Databases;
 using Symposia.Database.ComputeNode.Identity;
+using Symposia.Database.ComputeNode.Safekeeping;
 using Symposia.Database.ComputeNode.Supervision;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,6 +15,22 @@ builder.Services.AddSingleton<ComputeNodeSupervisor>();
 builder.Services.AddSingleton<IHostInfoProbe, OsHostInfoProbe>();
 builder.Services.AddSingleton<IWorkloadSampler, DefaultWorkloadSampler>();
 builder.Services.AddSingleton<SustainedBenchmarkRunner>();
+builder.Services.AddSingleton<SafekeeperCoordinationService>();
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IBlobUploader>(sp =>
+{
+    var supervisor = sp.GetRequiredService<ComputeNodeSupervisor>();
+    var httpClient = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(HttpBlobUploader));
+    return new HttpBlobUploader(httpClient, tenantDatabaseId =>
+    {
+        var database = supervisor.GetDatabase(tenantDatabaseId)
+            ?? throw new InvalidOperationException($"No hosted database '{tenantDatabaseId}' to resolve an archival destination for.");
+        return new WalArchivalDestination(
+            database.BlobBucketUrl ?? throw new InvalidOperationException($"Database '{tenantDatabaseId}' has no BlobBucketUrl configured."),
+            database.BlobBucketCredential ?? throw new InvalidOperationException($"Database '{tenantDatabaseId}' has no BlobBucketCredential configured."));
+    });
+});
+builder.Services.AddSingleton<WalArchiver>();
 
 var app = builder.Build();
 
@@ -66,6 +84,48 @@ app.MapGet("/hostinfo", (IHostInfoProbe probe) => Results.Ok(probe.Probe()));
 
 app.MapPost("/benchmark/run", async (SustainedBenchmarkRunner runner, CancellationToken cancellationToken) =>
     Results.Ok(await runner.RunAsync(cancellationToken)));
+
+// WAL safekeeper quorum coordination and archival (issue #94). Internal, control-plane-only
+// surfaces per the architectural plan -- not tenant-facing. #95's provisioning flow calls the
+// safekeeper assignment endpoints; the /safekeeper/timelines endpoints are this node's own
+// self-reporting surface (RTT breach, archival watermark) consumed by the coordination service.
+app.MapPost("/internal/databases/{dbId}/safekeepers", (string dbId, AssignSafekeepersRequest request, SafekeeperCoordinationService coordination) =>
+{
+    var result = coordination.AssignInitialPeers(dbId, request.PrimaryNodeId, request.Region, request.Candidates);
+    return result.Outcome == AssignSafekeepersOutcome.Assigned
+        ? Results.Created($"/internal/databases/{dbId}/safekeepers", result.Assignment)
+        : Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable);
+});
+
+app.MapGet("/internal/databases/{dbId}/safekeepers", (string dbId, SafekeeperCoordinationService coordination) =>
+{
+    var assignment = coordination.GetAssignment(dbId);
+    return assignment is not null ? Results.Ok(assignment) : Results.NotFound();
+});
+
+app.MapPost("/internal/databases/{dbId}/safekeepers/reassign", (string dbId, ReassignSafekeeperRequest request, SafekeeperCoordinationService coordination) =>
+{
+    var result = coordination.ReassignPeer(dbId, request.DegradedPeerNodeId, request.Candidates);
+    return result.Outcome == AssignSafekeepersOutcome.Assigned
+        ? Results.Ok(result.Assignment)
+        : Results.Json(new { error = result.Reason, assignment = result.Assignment }, statusCode: StatusCodes.Status503ServiceUnavailable);
+});
+
+app.MapGet("/internal/databases/{dbId}/wal-archival-status", (string dbId, WalArchiver archiver) =>
+    Results.Ok(new
+    {
+        archivedLsn = archiver.GetArchivedLsn(dbId),
+        backlogBytes = archiver.GetBacklogBytes(dbId),
+        escalated = archiver.IsEscalated(dbId),
+    }));
+
+app.MapPost("/safekeeper/timelines/{timelineId}/rtt-breach", (string timelineId, RttBreachReport report, SafekeeperCoordinationService coordination) =>
+{
+    var result = coordination.ReassignPeer(report.DatabaseId, report.DegradedPeerNodeId, report.Candidates);
+    return result.Outcome == AssignSafekeepersOutcome.Assigned
+        ? Results.Ok(result.Assignment)
+        : Results.Json(new { error = result.Reason, assignment = result.Assignment }, statusCode: StatusCodes.Status503ServiceUnavailable);
+});
 
 app.Run();
 
