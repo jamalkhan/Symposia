@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Symposia.Database.ComputeNode/Symposia.Database.ComputeNode.csproj" />
+  <Project Path="Symposia.Database.ComputeNode.Tests/Symposia.Database.ComputeNode.Tests.csproj" />
+</Solution>
