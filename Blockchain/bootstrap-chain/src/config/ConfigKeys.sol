@@ -145,4 +145,54 @@ library ConfigKeys {
 
     // --- ComputeNodeManifest (issue #90) ---
     bytes32 internal constant COMPUTE_TIER_REGISTRY_ADDRESS = keccak256("computeNodeManifest.tierRegistryAddress");
+
+    // --- ComputePenaltyStateMachine (issue #91) ---
+    /// @notice Single allowlisted caller address authorized to invoke the
+    /// additive `applyComputePenaltySlash` hook on SlashingController and
+    /// the `forceDeregister` hook on StakingNodeRegistry -- mirrors the
+    /// existing single-address allowlist pattern (`REGISTRY_SLASHING_CONTROLLER`,
+    /// `FOUNDATION_REGISTRY_ADDRESS`) rather than inventing a multi-address
+    /// allowlist mechanism.
+    bytes32 internal constant COMPUTE_PENALTY_STATE_MACHINE_ADDRESS = keccak256("computePenalty.stateMachineAddress");
+    bytes32 internal constant COMPUTE_PENALTY_TIER_REGISTRY_ADDRESS = keccak256("computePenalty.tierRegistryAddress");
+    bytes32 internal constant COMPUTE_PENALTY_DATA_LOSS_ORACLE = keccak256("computePenalty.dataLossOracle");
+    bytes32 internal constant COMPUTE_PENALTY_FAILURE_ORACLE = keccak256("computePenalty.failureOracle");
+
+    /// @notice Stage 1 trigger thresholds (compute-nodes.md's Reliability &
+    /// Fault Handling table).
+    bytes32 internal constant COMPUTE_PENALTY_LATENCY_MULT_BPS = keccak256("computePenalty.latencyMultBps"); // 1.5x = 15_000
+    bytes32 internal constant COMPUTE_PENALTY_MIN_COHORT_SIZE = keccak256("computePenalty.minCohortSize"); // 5
+    bytes32 internal constant COMPUTE_PENALTY_RESTART_THRESHOLD = keccak256("computePenalty.restartThreshold"); // >3/epoch
+    bytes32 internal constant COMPUTE_PENALTY_WAL_LAG_THRESHOLD_SECONDS =
+        keccak256("computePenalty.walLagThresholdSeconds"); // 5 min = 300
+
+    /// @notice Consecutive-troubled-epoch thresholds for Stage 1/2/3 entry
+    /// via persistence (2 / 4 / 6 -- each stage requires 2 more troubled
+    /// epochs than the last, per the spec's "persists 2 more epochs" rule
+    /// applied uniformly).
+    bytes32 internal constant COMPUTE_PENALTY_STAGE1_TROUBLE_EPOCHS = keccak256("computePenalty.stage1TroubleEpochs");
+    bytes32 internal constant COMPUTE_PENALTY_STAGE2_TROUBLE_EPOCHS = keccak256("computePenalty.stage2TroubleEpochs");
+    bytes32 internal constant COMPUTE_PENALTY_STAGE3_TROUBLE_EPOCHS = keccak256("computePenalty.stage3TroubleEpochs");
+    bytes32 internal constant COMPUTE_PENALTY_RECOVERY_CLEAN_EPOCHS = keccak256("computePenalty.recoveryCleanEpochs"); // 3
+
+    bytes32 internal constant COMPUTE_PENALTY_STAGE3_PCT_PER_EPOCH_BPS =
+        keccak256("computePenalty.stage3PctPerEpochBps"); // 500 = 5%
+    bytes32 internal constant COMPUTE_PENALTY_STAGE3_CAP_BPS = keccak256("computePenalty.stage3CapBps"); // 2_500 = 25%
+    bytes32 internal constant COMPUTE_PENALTY_STAGE4_IMMEDIATE_BPS = keccak256("computePenalty.stage4ImmediateBps"); // 2_000 = 20%
+    bytes32 internal constant COMPUTE_PENALTY_STAGE4_ONGOING_BPS = keccak256("computePenalty.stage4OngoingBps"); // 500 = 5%
+
+    /// @notice Absolute per-tier P99 latency ceiling (ms) used as the Stage 1
+    /// latency-trigger fallback when a node's tier cohort has fewer than
+    /// `COMPUTE_PENALTY_MIN_COHORT_SIZE` same-tier peers this epoch (tier
+    /// ordinal matches `ComputeTierRegistry.ComputeTier`: 1=Tier3, 2=Tier2,
+    /// 3=Tier1).
+    function computePenaltyAbsLatencyMs(uint8 tier) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computePenalty.absLatencyMs", tier));
+    }
+
+    /// @notice Reward multiplier (bps) applied for a node currently in
+    /// `stage` (0-4), read by `stagePenaltyMult`.
+    function computePenaltyStageMultBps(uint8 stage) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computePenalty.stageMultBps", stage));
+    }
 }
