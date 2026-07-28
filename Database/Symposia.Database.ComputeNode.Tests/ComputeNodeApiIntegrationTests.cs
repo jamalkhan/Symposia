@@ -5,8 +5,10 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Symposia.Database.ComputeNode.Benchmark;
 using Symposia.Database.ComputeNode.Databases;
 using Symposia.Database.ComputeNode.Supervision;
+using Symposia.Database.ComputeNode.Tests.Benchmark;
 using Symposia.Database.ComputeNode.Tests.Supervision;
 
 namespace Symposia.Database.ComputeNode.Tests;
@@ -69,6 +71,27 @@ public sealed class ComputeNodeApiIntegrationTests : IClassFixture<ComputeNodeAp
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task GetHostInfo_ReportsObservedCoresAndRam()
+    {
+        var hostInfo = await _client.GetFromJsonAsync<HostInfo>("/hostinfo");
+
+        Assert.NotNull(hostInfo);
+        Assert.True(hostInfo!.PhysicalCores > 0);
+    }
+
+    [Fact]
+    public async Task PostBenchmarkRun_ReturnsSustainedMeasurements()
+    {
+        var response = await _client.PostAsync("/benchmark/run", content: null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var report = await response.Content.ReadFromJsonAsync<BenchmarkReport>();
+        Assert.NotNull(report);
+        Assert.Equal(2, report!.SampleWindowSec);
+        Assert.Equal(1, report.BurstDiscardSec);
+    }
+
     public sealed class NodeFactory : WebApplicationFactory<Program>
     {
         private readonly string _dataDir = Path.Combine(Path.GetTempPath(), $"symposia-compute-test-{Guid.NewGuid():N}");
@@ -82,6 +105,9 @@ public sealed class ComputeNodeApiIntegrationTests : IClassFixture<ComputeNodeAp
                     ["ComputeNode:DataRoot"] = _dataDir,
                     ["ComputeNode:NodeIdentityKeyPath"] = Path.Combine(_dataDir, "node-identity.pem"),
                     ["ComputeNode:MaxHostedDatabases"] = "8",
+                    ["ComputeNode:BenchmarkSustainedWindowSeconds"] = "2",
+                    ["ComputeNode:BenchmarkBurstDiscardSeconds"] = "1",
+                    ["ComputeNode:BenchmarkSampleIntervalSeconds"] = "1",
                 });
             });
 
@@ -89,6 +115,8 @@ public sealed class ComputeNodeApiIntegrationTests : IClassFixture<ComputeNodeAp
             {
                 services.RemoveAll<IProcessLauncher>();
                 services.AddSingleton<IProcessLauncher, FakeProcessLauncher>();
+                services.RemoveAll<IWorkloadSampler>();
+                services.AddSingleton<IWorkloadSampler>(new FakeWorkloadSampler(mipsSequence: [1000, 1000, 1000]));
             });
         }
 

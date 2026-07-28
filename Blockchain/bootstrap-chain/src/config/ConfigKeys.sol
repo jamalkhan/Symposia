@@ -109,4 +109,37 @@ library ConfigKeys {
     function operationalCostBaseline(address node) internal pure returns (bytes32) {
         return keccak256(abi.encode("foundation.operationalCostBaseline", node));
     }
+
+    // --- ComputeTierRegistry (issue #89) ---
+    bytes32 internal constant COMPUTE_TIER_MAX_EPOCHS_BETWEEN_VERIFICATIONS =
+        keccak256("computeTier.maxEpochsBetweenVerifications");
+    bytes32 internal constant COMPUTE_TIER_HARDWARE_TOLERANCE_BPS = keccak256("computeTier.hardwareToleranceBps");
+
+    /// @notice Per-tier (ComputeTier ordinal: 1=Tier3, 2=Tier2, 3=Tier1) minimum thresholds
+    /// backing `ComputeTierRegistry.classifyTier`. Governance-tunable per
+    /// compute-nodes.md's "illustrative current thresholds" note — changing
+    /// tier bars is a governance action, not a contract change.
+    function computeTierMinCores(uint8 tier) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computeTier.minCores", tier));
+    }
+
+    function computeTierMinMips(uint8 tier) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computeTier.minMips", tier));
+    }
+
+    function computeTierMinRamGB(uint8 tier) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computeTier.minRamGB", tier));
+    }
+
+    function computeTierMinRamBandwidthGBs(uint8 tier) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computeTier.minRamBandwidthGBs", tier));
+    }
+
+    function computeTierMinIops(uint8 tier) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computeTier.minIops", tier));
+    }
+
+    function computeTierMaxRttMs(uint8 tier) internal pure returns (bytes32) {
+        return keccak256(abi.encode("computeTier.maxRttMs", tier));
+    }
 }

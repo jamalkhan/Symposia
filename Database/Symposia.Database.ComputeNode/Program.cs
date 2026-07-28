@@ -1,4 +1,5 @@
 using Symposia.Database.ComputeNode;
+using Symposia.Database.ComputeNode.Benchmark;
 using Symposia.Database.ComputeNode.Databases;
 using Symposia.Database.ComputeNode.Identity;
 using Symposia.Database.ComputeNode.Supervision;
@@ -9,6 +10,9 @@ builder.Services.Configure<ComputeNodeOptions>(builder.Configuration.GetSection(
 builder.Services.AddSingleton<NodeIdentity>();
 builder.Services.AddSingleton<IProcessLauncher, OsProcessLauncher>();
 builder.Services.AddSingleton<ComputeNodeSupervisor>();
+builder.Services.AddSingleton<IHostInfoProbe, OsHostInfoProbe>();
+builder.Services.AddSingleton<IWorkloadSampler, DefaultWorkloadSampler>();
+builder.Services.AddSingleton<SustainedBenchmarkRunner>();
 
 var app = builder.Build();
 
@@ -52,6 +56,16 @@ app.MapPost("/databases", (PlaceDatabaseRequest request, ComputeNodeSupervisor s
 
 app.MapDelete("/databases/{tenantDatabaseId}", (string tenantDatabaseId, ComputeNodeSupervisor supervisor) =>
     supervisor.RemoveDatabase(tenantDatabaseId) ? Results.NoContent() : Results.NotFound());
+
+// Benchmark suite (issue #89). Like the rest of this control API, restricting these to an
+// authenticated witness identity is mTLS-gating work carried as a follow-on alongside #88's own
+// deferred public-listener auth -- this loopback/orchestration-only surface does not yet enforce
+// caller identity. The daemon only executes and reports; classification happens on the
+// witness/registry side (ComputeTierRegistry), never here.
+app.MapGet("/hostinfo", (IHostInfoProbe probe) => Results.Ok(probe.Probe()));
+
+app.MapPost("/benchmark/run", async (SustainedBenchmarkRunner runner, CancellationToken cancellationToken) =>
+    Results.Ok(await runner.RunAsync(cancellationToken)));
 
 app.Run();
 
