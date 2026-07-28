@@ -142,4 +142,7 @@ library ConfigKeys {
     function computeTierMaxRttMs(uint8 tier) internal pure returns (bytes32) {
         return keccak256(abi.encode("computeTier.maxRttMs", tier));
     }
+
+    // --- ComputeNodeManifest (issue #90) ---
+    bytes32 internal constant COMPUTE_TIER_REGISTRY_ADDRESS = keccak256("computeNodeManifest.tierRegistryAddress");
 }
