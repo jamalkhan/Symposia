@@ -40,7 +40,9 @@ These guarantees are the basis for both reward calculation and workload scheduli
 
 ### OLTP Node
 
-Runs the Postgres-compatible transactional database layer (contact records, segmentation queries, event writes).
+Runs the Postgres-compatible transactional database layer (contact records, segmentation queries, event writes) for the martech platform's own internal use.
+
+> **Not the same as `Compute` nodes.** Symposia's tenant-facing Postgres-as-a-service offering ([Compute Nodes](../Database/compute-nodes.md)) is a separate, later-added participant class with its own `NodeType` (`Compute`, not `OLTP`) and its own fee-funded reward pool, rather than the emission-funded pool described below. The two were conflated in earlier tokenomics drafts; see the correction in [Tokenomics MVP §6.1](../Blockchain/tokenomics-mvp.md#61-base-pool-weights-before-demand-adjustment).
 
 | Resource | Requirement | Rationale |
 |---|---|---|
