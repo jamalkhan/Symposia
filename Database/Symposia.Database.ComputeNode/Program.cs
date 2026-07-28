@@ -3,6 +3,7 @@ using Symposia.Database.ComputeNode.Archival;
 using Symposia.Database.ComputeNode.Benchmark;
 using Symposia.Database.ComputeNode.Databases;
 using Symposia.Database.ComputeNode.Identity;
+using Symposia.Database.ComputeNode.Proxy;
 using Symposia.Database.ComputeNode.Safekeeping;
 using Symposia.Database.ComputeNode.Supervision;
 
@@ -31,6 +32,17 @@ builder.Services.AddSingleton<IBlobUploader>(sp =>
     });
 });
 builder.Services.AddSingleton<WalArchiver>();
+
+// DB proxy connection pooling/routing/auth control-plane skeleton (issue #93). The proxy binary
+// itself is a separate forked-pooler process per the #93 architectural plan; these services are
+// the shared routing/auth/admission/wake-on-connect logic a proxy sidecar would consume, exposed
+// here as internal control-plane endpoints for now.
+builder.Services.AddSingleton<RoutingTableService>();
+builder.Services.AddSingleton<AuthCacheService>();
+builder.Services.AddSingleton<ConnectionAdmissionService>();
+builder.Services.AddHttpClient<ILifecycleClient, HttpLifecycleClient>();
+builder.Services.AddSingleton<WakeOnConnectCoordinator>();
+builder.Services.AddSingleton<ConnectionRouter>();
 
 var app = builder.Build();
 
@@ -127,7 +139,37 @@ app.MapPost("/safekeeper/timelines/{timelineId}/rtt-breach", (string timelineId,
         : Results.Json(new { error = result.Reason, assignment = result.Assignment }, statusCode: StatusCodes.Status503ServiceUnavailable);
 });
 
+// DB proxy connection routing (issue #93). Internal, control-plane-only surfaces: the routing
+// table is populated by provisioning (#95) and migration (#92) events, and the connect endpoint
+// is what a proxy sidecar calls per incoming client connection to get an auth+routing decision.
+app.MapPost("/internal/proxy/databases/{dbId}/routing", (string dbId, UpsertRoutingRequest request, RoutingTableService routingTable) =>
+    Results.Ok(routingTable.Upsert(dbId, request.Primary, request.Replicas, request.MaxConnections)));
+
+app.MapGet("/internal/proxy/databases/{dbId}/routing", (string dbId, RoutingTableService routingTable) =>
+{
+    var entry = routingTable.Get(dbId);
+    return entry is not null ? Results.Ok(entry) : Results.NotFound();
+});
+
+app.MapPost("/internal/proxy/databases/{dbId}/connect", async (string dbId, ConnectRequest request, ConnectionRouter router) =>
+{
+    var decision = await router.RouteAsync(new Symposia.Database.ComputeNode.Proxy.ConnectionRequest(dbId, request.Username, request.SecretHash, request.ReadOnly));
+    return decision.Outcome switch
+    {
+        ConnectionOutcome.Routed => Results.Ok(decision.Endpoint),
+        ConnectionOutcome.AuthRejected => Results.Json(new { error = decision.Reason }, statusCode: StatusCodes.Status401Unauthorized),
+        ConnectionOutcome.ConnectionLimitExceeded => Results.Json(new { error = decision.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(new { error = decision.Reason }, statusCode: StatusCodes.Status404NotFound),
+    };
+});
+
 app.Run();
+
+namespace Symposia.Database.ComputeNode
+{
+    public sealed record UpsertRoutingRequest(Symposia.Database.ComputeNode.Proxy.ComputeEndpoint Primary, IReadOnlyList<Symposia.Database.ComputeNode.Proxy.ComputeEndpoint>? Replicas, int MaxConnections = 200);
+    public sealed record ConnectRequest(string Username, string SecretHash, bool ReadOnly = false);
+}
 
 namespace Symposia.Database.ComputeNode
 {
