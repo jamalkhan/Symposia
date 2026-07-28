@@ -16,7 +16,8 @@ public sealed class DatabaseLifecycleOrchestrator(
     ISafekeeperAssignmentClient safekeepers,
     IProxyRoutingClient routing,
     TimeProvider? timeProvider = null,
-    IPostgresVersionCatalog? versionCatalog = null)
+    IPostgresVersionCatalog? versionCatalog = null,
+    IExtensionAllowlist? extensionAllowlist = null)
 {
     private const int DefaultMaxConnections = 200;
 
@@ -26,6 +27,7 @@ public sealed class DatabaseLifecycleOrchestrator(
     private readonly Dictionary<string, DateTimeOffset> _idleSince = [];
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IPostgresVersionCatalog _versionCatalog = versionCatalog ?? new InMemoryPostgresVersionCatalog();
+    private readonly IExtensionAllowlist _extensionAllowlist = extensionAllowlist ?? new InMemoryExtensionAllowlist();
 
     public DatabaseLifecycleRecord? GetState(string databaseId)
     {
@@ -77,6 +79,14 @@ public sealed class DatabaseLifecycleOrchestrator(
             if (!_versionCatalog.IsSupported(postgresMajorVersion))
                 return LifecycleOperationResult.UnsupportedMajorVersion(postgresMajorVersion);
 
+            // Issue #103, FR3.4/TC-03 vs TC-14: reject non-allowlisted extensions up front, before
+            // touching any node or lifecycle record, distinct from "allowlisted but unavailable here"
+            // which can only be known after attempting placement below.
+            var requiredExtensions = request.RequiredExtensions ?? (IReadOnlySet<string>)new HashSet<string>();
+            var notAllowlisted = requiredExtensions.FirstOrDefault(ext => !_extensionAllowlist.IsAllowlisted(ext));
+            if (notAllowlisted is not null)
+                return LifecycleOperationResult.ExtensionNotAllowlisted(notAllowlisted);
+
             var provisioning = new DatabaseLifecycleRecord(
                 request.DatabaseId, request.Region, LifecycleState.Provisioning, StateVersion: 0,
                 request.ComputeSize, PrimaryNodeId: null, SafekeeperPeerIds: [], BlobBucketId: null,
@@ -85,9 +95,23 @@ public sealed class DatabaseLifecycleOrchestrator(
 
             var requiredTier = request.ComputeSize.RequiredTier();
             // FR1.5: only route to a node that has declared support for the database's major version.
-            var node = placement.SelectNode(request.Region, requiredTier, excludeNodeIds: [], requiredPostgresMajor: postgresMajorVersion);
+            // FR3.2: additionally, only route to a node whose declared extension set is a superset of
+            // the tenant's required-extension-set (independent, additive filters on the same call).
+            var node = placement.SelectNode(request.Region, requiredTier, excludeNodeIds: [], requiredPostgresMajor: postgresMajorVersion, requiredExtensions: requiredExtensions);
             if (node is null)
             {
+                // AC8: give the caller a distinguishable, extension-naming reason rather than a
+                // generic capacity/version failure, when the extension constraint is the actual cause.
+                if (requiredExtensions.Count > 0)
+                {
+                    var unavailable = FindUnavailableExtensions(request.Region, requiredTier, requiredExtensions);
+                    if (unavailable.Count > 0)
+                    {
+                        Store(provisioning with { State = LifecycleState.Failed, FailureReason = $"Required extension(s) unavailable: {string.Join(", ", unavailable)}." });
+                        return LifecycleOperationResult.ExtensionUnavailable(unavailable);
+                    }
+                }
+
                 Store(provisioning with { State = LifecycleState.Failed, FailureReason = "No qualifying compute node available." });
                 return LifecycleOperationResult.NoQualifyingNode();
             }
@@ -180,6 +204,14 @@ public sealed class DatabaseLifecycleOrchestrator(
         var node = placement.GetNode(nodeId);
         return node is not null && node.Region == region && node.Tier <= requiredTier && node.AvailableCapacity > 0;
     }
+
+    /// <summary>
+    /// Issue #103, AC8: identifies exactly which of the tenant's required extensions have no
+    /// qualifying node anywhere in the region/tier, checked individually so the resulting error can
+    /// enumerate all of them rather than reporting only the first mismatch found.
+    /// </summary>
+    private IReadOnlyList<string> FindUnavailableExtensions(string region, int requiredTier, IReadOnlyCollection<string> requiredExtensions) =>
+        [.. requiredExtensions.Where(ext => placement.SelectNode(region, requiredTier, excludeNodeIds: [], requiredExtensions: [ext]) is null)];
 
     /// <summary>Proxy-reported signal (FR9/FR10): a database's active connection count dropped to zero.</summary>
     public void RecordConnectionCountZero(string databaseId)
