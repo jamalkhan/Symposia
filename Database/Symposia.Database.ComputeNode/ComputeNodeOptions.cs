@@ -28,6 +28,25 @@ public sealed class ComputeNodeOptions
     /// <summary>Upper bound on simultaneously hosted tenant databases on this node (per #90 capacity limits).</summary>
     public int MaxHostedDatabases { get; set; } = 8;
 
+    /// <summary>Operator-declared maximum aggregate vCPU allocation across all hosted databases (#90 capacity declaration).</summary>
+    public int MaxAllocatedVcpu { get; set; }
+
+    /// <summary>Operator-declared maximum aggregate RAM (MB) allocation across all hosted databases (#90 capacity declaration).</summary>
+    public int MaxAllocatedRamMB { get; set; }
+
+    /// <summary>Physical core count this node reports, used to evaluate the 80% vCPU over-subscription guardrail (#90).</summary>
+    public int PhysicalCores { get; set; }
+
+    /// <summary>Physical RAM (MB) this node reports, used to evaluate the 85% RAM over-subscription guardrail (#90).</summary>
+    public int PhysicalRamMB { get; set; }
+
+    /// <summary>
+    /// Whether the operator opted in to hosting HIPAA-designated workloads on this node (#90 BAA/HIPAA
+    /// declaration). Opting out does not block registration -- it only constrains which databases the
+    /// orchestration layer will ever place on this node.
+    /// </summary>
+    public bool HipaaEligible { get; set; }
+
     /// <summary>Detection window for a process failing to report healthy (FR4/FR6).</summary>
     public int CrashDetectionWindowSeconds { get; set; } = 10;
 

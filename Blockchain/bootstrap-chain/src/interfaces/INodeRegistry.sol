@@ -24,7 +24,13 @@ interface INodeRegistry {
         Consensus,
         Serverless,
         Verifier,
-        EmailIP
+        EmailIP,
+        // Appended rather than inserted to avoid renumbering existing
+        // ordinals used as on-chain config keys (issue #90 decision:
+        // distinct from OLTP -- compute-nodes.md's continuous per-vCPU
+        // stake formula and fee-funded reward model diverge from OLTP's
+        // tiered-step formula and emission-funded model).
+        Compute
     }
 
     function statusOf(address node) external view returns (NodeStatus);
