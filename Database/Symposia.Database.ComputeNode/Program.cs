@@ -65,6 +65,14 @@ builder.Services.AddSingleton<ReplicaOrchestrator>();
 builder.Services.AddSingleton<IPostgresVersionCatalog, InMemoryPostgresVersionCatalog>();
 builder.Services.AddSingleton<ComputeAttachmentSwapOrchestrator>();
 
+// Postgres extension support policy for compute nodes (issue #103). Governance-configured Extension
+// Allowlist (FR1) consumed by node extension-declaration validation (Onboarding/NodeExtensionDeclarationValidator,
+// FR2.3/AC6) and by #95's provisioning flow for extension-aware placement filtering (FR3). A
+// capability-matching problem, not a version-progression one -- extensions have no ordered upgrade
+// path the way #102's Postgres majors do, so this is deliberately not layered onto the Compute
+// Attachment Swap primitive.
+builder.Services.AddSingleton<IExtensionAllowlist, InMemoryExtensionAllowlist>();
+
 var app = builder.Build();
 
 app.Services.GetRequiredService<NodeIdentity>().EnsureLoadedOrGenerated();
@@ -193,6 +201,11 @@ app.MapPost("/databases/lifecycle", async (ProvisionDatabaseRequest request, Dat
         LifecycleOperationOutcome.Ok => Results.Created($"/databases/lifecycle/{request.DatabaseId}", result.Record),
         LifecycleOperationOutcome.NoQualifyingNode => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
         LifecycleOperationOutcome.UnsupportedMajorVersion => Results.UnprocessableEntity(new { error = result.Reason }),
+        // #103, FR3.4/TC-03 vs TC-14: distinct reasons -- not on the allowlist at all is a client
+        // request error (422); allowlisted but unavailable in this region/tier is a capacity-shaped
+        // failure (503), matching NoQualifyingNode's status code family.
+        LifecycleOperationOutcome.ExtensionNotAllowlisted => Results.UnprocessableEntity(new { error = result.Reason }),
+        LifecycleOperationOutcome.ExtensionUnavailable => Results.Json(new { error = result.Reason }, statusCode: StatusCodes.Status503ServiceUnavailable),
         _ => Results.Conflict(new { error = result.Reason }),
     };
 });
@@ -350,6 +363,19 @@ app.MapPost("/databases/{dbId}/upgrade/{swapId}/rollback", async (string dbId, s
 
 app.MapGet("/databases/{dbId}/upgrades", (string dbId, ComputeAttachmentSwapOrchestrator swaps) =>
     Results.Ok(swaps.GetAuditRecords(dbId)));
+
+// Extension allowlist (issue #103, FR1.1/FR6.1): public, unauthenticated per the spec -- mirrors
+// #102's /platform/postgres-versions in shape and audience.
+app.MapGet("/platform/extensions", (IExtensionAllowlist allowlist) =>
+    Results.Ok(allowlist.GetEntries().Select(e => new
+    {
+        name = e.Name,
+        minVersion = e.MinVersion,
+        maxVersion = e.MaxVersion,
+        compatiblePostgresMajors = e.CompatiblePostgresMajors.OrderDescending(),
+        supportTier = e.SupportTier.ToString(),
+        privilegeClass = e.PrivilegeClass.ToString(),
+    })));
 
 app.Run();
 

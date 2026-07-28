@@ -8,19 +8,19 @@ namespace Symposia.Database.ComputeNode.Tests.Lifecycle;
 /// </summary>
 public sealed class DatabaseLifecycleOrchestratorTests
 {
-    private static (DatabaseLifecycleOrchestrator Orchestrator, InMemoryComputeNodePlacementService Placement, FakeBlobBucketProvisioner Bucket, FakeSafekeeperAssignmentClient Safekeepers, FakeProxyRoutingClient Routing, FakeTimeProvider Time) Build(IPostgresVersionCatalog? versionCatalog = null)
+    private static (DatabaseLifecycleOrchestrator Orchestrator, InMemoryComputeNodePlacementService Placement, FakeBlobBucketProvisioner Bucket, FakeSafekeeperAssignmentClient Safekeepers, FakeProxyRoutingClient Routing, FakeTimeProvider Time) Build(IPostgresVersionCatalog? versionCatalog = null, IExtensionAllowlist? extensionAllowlist = null)
     {
         var placement = new InMemoryComputeNodePlacementService();
         var bucket = new FakeBlobBucketProvisioner();
         var safekeepers = new FakeSafekeeperAssignmentClient();
         var routing = new FakeProxyRoutingClient();
         var time = new FakeTimeProvider();
-        var orchestrator = new DatabaseLifecycleOrchestrator(placement, bucket, safekeepers, routing, time, versionCatalog);
+        var orchestrator = new DatabaseLifecycleOrchestrator(placement, bucket, safekeepers, routing, time, versionCatalog, extensionAllowlist);
         return (orchestrator, placement, bucket, safekeepers, routing, time);
     }
 
-    private static ProvisionDatabaseRequest Request(string dbId = "db-1", string region = "us-east", DatabaseSize size = DatabaseSize.Medium, int? idleSeconds = 900, int? postgresMajorVersion = null) =>
-        new(dbId, region, size, "tenantdb", idleSeconds, postgresMajorVersion);
+    private static ProvisionDatabaseRequest Request(string dbId = "db-1", string region = "us-east", DatabaseSize size = DatabaseSize.Medium, int? idleSeconds = 900, int? postgresMajorVersion = null, IReadOnlySet<string>? requiredExtensions = null) =>
+        new(dbId, region, size, "tenantdb", idleSeconds, postgresMajorVersion, requiredExtensions);
 
     [Fact]
     public async Task ProvisionAsync_GoldenPath_AssignsNodeBucketSafekeepersAndRouteBeforeReturningConnectionString()
@@ -376,6 +376,116 @@ public sealed class DatabaseLifecycleOrchestratorTests
 
         Assert.Equal(LifecycleOperationOutcome.Rejected, result.Outcome);
         Assert.Equal(LifecycleState.Suspended, orchestrator.GetState("db-1")!.State); // never left in a mixed state
+    }
+
+    // #103 FR3.1-FR3.4/AC7-AC9 -- extension-aware placement filtering and provisioning integration.
+
+    [Fact]
+    public async Task ProvisionAsync_RequiredExtensionNotAllowlisted_RejectedBeforeAnyNodeTouched()
+    {
+        var (orchestrator, placement, _, safekeepers, routing, _) = Build();
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432));
+
+        var result = await orchestrator.ProvisionAsync(Request(requiredExtensions: new HashSet<string> { "dblink" }));
+
+        Assert.Equal(LifecycleOperationOutcome.ExtensionNotAllowlisted, result.Outcome);
+        Assert.Contains("dblink", result.Reason);
+        Assert.Null(orchestrator.GetState("db-1")); // never even reached Provisioning, mirrors #102's UnsupportedMajorVersion test
+        Assert.Empty(routing.Routes);
+        Assert.Equal(0, safekeepers.AssignCallCount);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_AllowlistedExtensionAvailableOnNode_PlacedThere()
+    {
+        var (orchestrator, placement, _, _, routing, _) = Build();
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432,
+            DeclaredExtensionVersions: new Dictionary<string, string> { ["pgvector"] = "0.7.0" }));
+
+        var result = await orchestrator.ProvisionAsync(Request(requiredExtensions: new HashSet<string> { "pgvector" }));
+
+        Assert.Equal(LifecycleOperationOutcome.Ok, result.Outcome);
+        Assert.Equal("node-1", result.Record!.PrimaryNodeId);
+        Assert.Equal("node-1", routing.Routes["db-1"]);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_RoutedOnlyToNodeSatisfyingFullRequiredExtensionSet()
+    {
+        // Gherkin "Database is routed only to nodes supporting its required extension set".
+        var (orchestrator, placement, _, _, _, _) = Build();
+        placement.Register(new NodeCandidate("node-a", "us-east", 2, 10, "10.0.0.1", 5432,
+            DeclaredExtensionVersions: new Dictionary<string, string> { ["pgvector"] = "0.7.0" }));
+        placement.Register(new NodeCandidate("node-c", "us-east", 2, 10, "10.0.0.2", 5432,
+            DeclaredExtensionVersions: new Dictionary<string, string> { ["pgvector"] = "0.7.0", ["postgis"] = "3.4.0" }));
+
+        var result = await orchestrator.ProvisionAsync(Request(requiredExtensions: new HashSet<string> { "pgvector", "postgis" }));
+
+        Assert.Equal(LifecycleOperationOutcome.Ok, result.Outcome);
+        Assert.Equal("node-c", result.Record!.PrimaryNodeId);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_AllowlistedExtensionUnavailableInRegion_FailsWithExtensionNamingError()
+    {
+        // AC8: distinguishable, extension-identifying error rather than a generic NoQualifyingNode.
+        var (orchestrator, placement, _, safekeepers, routing, _) = Build();
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432)); // declares nothing
+
+        var result = await orchestrator.ProvisionAsync(Request(requiredExtensions: new HashSet<string> { "postgis" }));
+
+        Assert.Equal(LifecycleOperationOutcome.ExtensionUnavailable, result.Outcome);
+        Assert.Contains("postgis", result.Reason);
+        Assert.Equal(LifecycleState.Failed, orchestrator.GetState("db-1")!.State);
+        Assert.Empty(routing.Routes);
+        Assert.Equal(0, safekeepers.AssignCallCount);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_MultipleRequiredExtensionsUnavailable_ErrorEnumeratesAll()
+    {
+        var (orchestrator, placement, _, _, _, _) = Build();
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432));
+
+        var result = await orchestrator.ProvisionAsync(Request(requiredExtensions: new HashSet<string> { "postgis", "pg_cron" }));
+
+        Assert.Equal(LifecycleOperationOutcome.ExtensionUnavailable, result.Outcome);
+        Assert.Contains("postgis", result.Reason);
+        Assert.Contains("pg_cron", result.Reason);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_NoRequiredExtensions_UnaffectedByExtensionFiltering()
+    {
+        // Regression guard (QA TC-34): the new placement filter must short-circuit as a no-op.
+        var (orchestrator, placement, _, _, _, _) = Build();
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432)); // declares nothing
+
+        var result = await orchestrator.ProvisionAsync(Request());
+
+        Assert.Equal(LifecycleOperationOutcome.Ok, result.Outcome);
+        Assert.Equal("node-1", result.Record!.PrimaryNodeId);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_ExtensionAndPostgresMajorFiltersAreBothApplied()
+    {
+        // Additive filters, per the #102/#103 conflict-resolution note: a node must satisfy both.
+        var catalog = new InMemoryPostgresVersionCatalog([new(17, DateTimeOffset.UtcNow.AddYears(3)), new(16, DateTimeOffset.UtcNow.AddYears(2))]);
+        var (orchestrator, placement, _, _, _, _) = Build(catalog);
+        placement.Register(new NodeCandidate("node-16-with-ext", "us-east", 2, 10, "10.0.0.1", 5432,
+            SupportedPostgresMajorVersions: new HashSet<int> { 16 },
+            DeclaredExtensionVersions: new Dictionary<string, string> { ["pgvector"] = "0.7.0" }));
+        placement.Register(new NodeCandidate("node-17-no-ext", "us-east", 2, 10, "10.0.0.2", 5432,
+            SupportedPostgresMajorVersions: new HashSet<int> { 17 }));
+
+        var result = await orchestrator.ProvisionAsync(Request(postgresMajorVersion: 17, requiredExtensions: new HashSet<string> { "pgvector" }));
+
+        // node-16-with-ext has the extension but wrong major; node-17-no-ext has the right major but
+        // no extension -- neither qualifies, and the failure must be reported as NoQualifyingNode
+        // (there IS a node with the extension in-region, just not satisfying the major-version filter
+        // too) rather than misleadingly as ExtensionUnavailable.
+        Assert.Equal(LifecycleOperationOutcome.NoQualifyingNode, result.Outcome);
     }
 }
 
