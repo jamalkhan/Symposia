@@ -8,19 +8,19 @@ namespace Symposia.Database.ComputeNode.Tests.Lifecycle;
 /// </summary>
 public sealed class DatabaseLifecycleOrchestratorTests
 {
-    private static (DatabaseLifecycleOrchestrator Orchestrator, InMemoryComputeNodePlacementService Placement, FakeBlobBucketProvisioner Bucket, FakeSafekeeperAssignmentClient Safekeepers, FakeProxyRoutingClient Routing, FakeTimeProvider Time) Build()
+    private static (DatabaseLifecycleOrchestrator Orchestrator, InMemoryComputeNodePlacementService Placement, FakeBlobBucketProvisioner Bucket, FakeSafekeeperAssignmentClient Safekeepers, FakeProxyRoutingClient Routing, FakeTimeProvider Time) Build(IPostgresVersionCatalog? versionCatalog = null)
     {
         var placement = new InMemoryComputeNodePlacementService();
         var bucket = new FakeBlobBucketProvisioner();
         var safekeepers = new FakeSafekeeperAssignmentClient();
         var routing = new FakeProxyRoutingClient();
         var time = new FakeTimeProvider();
-        var orchestrator = new DatabaseLifecycleOrchestrator(placement, bucket, safekeepers, routing, time);
+        var orchestrator = new DatabaseLifecycleOrchestrator(placement, bucket, safekeepers, routing, time, versionCatalog);
         return (orchestrator, placement, bucket, safekeepers, routing, time);
     }
 
-    private static ProvisionDatabaseRequest Request(string dbId = "db-1", string region = "us-east", DatabaseSize size = DatabaseSize.Medium, int? idleSeconds = 900) =>
-        new(dbId, region, size, "tenantdb", idleSeconds);
+    private static ProvisionDatabaseRequest Request(string dbId = "db-1", string region = "us-east", DatabaseSize size = DatabaseSize.Medium, int? idleSeconds = 900, int? postgresMajorVersion = null) =>
+        new(dbId, region, size, "tenantdb", idleSeconds, postgresMajorVersion);
 
     [Fact]
     public async Task ProvisionAsync_GoldenPath_AssignsNodeBucketSafekeepersAndRouteBeforeReturningConnectionString()
@@ -63,6 +63,76 @@ public sealed class DatabaseLifecycleOrchestratorTests
         var result = await orchestrator.ProvisionAsync(Request());
 
         Assert.Equal(LifecycleOperationOutcome.Rejected, result.Outcome);
+    }
+
+    // #102 FR1.4/AC2 -- provisioning default/explicit Postgres major version, and FR1.5/AC8 -- version-aware node routing.
+
+    [Fact]
+    public async Task ProvisionAsync_NoVersionSpecified_DefaultsToLatestSupportedMajor()
+    {
+        var catalog = new InMemoryPostgresVersionCatalog([new(17, DateTimeOffset.UtcNow.AddYears(3)), new(16, DateTimeOffset.UtcNow.AddYears(2)), new(15, DateTimeOffset.UtcNow.AddYears(1))]);
+        var (orchestrator, placement, _, _, _, _) = Build(catalog);
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432)); // no declared version set => supports every major
+
+        var result = await orchestrator.ProvisionAsync(Request());
+
+        Assert.Equal(LifecycleOperationOutcome.Ok, result.Outcome);
+        Assert.Equal(17, result.Record!.PostgresMajorVersion);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_ExplicitOlderSupportedMajor_CreatedOnThatMajorNoError()
+    {
+        var catalog = new InMemoryPostgresVersionCatalog([new(17, DateTimeOffset.UtcNow.AddYears(3)), new(16, DateTimeOffset.UtcNow.AddYears(2)), new(15, DateTimeOffset.UtcNow.AddYears(1))]);
+        var (orchestrator, placement, _, _, _, _) = Build(catalog);
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432));
+
+        var result = await orchestrator.ProvisionAsync(Request(postgresMajorVersion: 15));
+
+        Assert.Equal(LifecycleOperationOutcome.Ok, result.Outcome);
+        Assert.Equal(15, result.Record!.PostgresMajorVersion);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_ExplicitUnsupportedMajor_RejectedBeforeAnyNodeProvisioned()
+    {
+        var catalog = new InMemoryPostgresVersionCatalog([new(17, DateTimeOffset.UtcNow.AddYears(3)), new(16, DateTimeOffset.UtcNow.AddYears(2)), new(15, DateTimeOffset.UtcNow.AddYears(1))]);
+        var (orchestrator, placement, bucket, safekeepers, routing, _) = Build(catalog);
+        placement.Register(new NodeCandidate("node-1", "us-east", 2, 10, "10.0.0.1", 5432));
+
+        var result = await orchestrator.ProvisionAsync(Request(postgresMajorVersion: 13));
+
+        Assert.Equal(LifecycleOperationOutcome.UnsupportedMajorVersion, result.Outcome);
+        Assert.Null(orchestrator.GetState("db-1")); // never even reached Provisioning
+        Assert.Empty(routing.Routes);
+        Assert.Equal(0, safekeepers.AssignCallCount);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_NodeDoesNotDeclareRequiredMajor_NeverRoutedThere()
+    {
+        var catalog = new InMemoryPostgresVersionCatalog([new(17, DateTimeOffset.UtcNow.AddYears(3)), new(16, DateTimeOffset.UtcNow.AddYears(2))]);
+        var (orchestrator, placement, _, _, _, _) = Build(catalog);
+        placement.Register(new NodeCandidate("node-16-only", "us-east", 2, 10, "10.0.0.1", 5432, SupportedPostgresMajorVersions: new HashSet<int> { 16 }));
+
+        var result = await orchestrator.ProvisionAsync(Request(postgresMajorVersion: 17));
+
+        Assert.Equal(LifecycleOperationOutcome.NoQualifyingNode, result.Outcome);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_NodeDeclaresRequiredMajor_Routed()
+    {
+        var catalog = new InMemoryPostgresVersionCatalog([new(17, DateTimeOffset.UtcNow.AddYears(3)), new(16, DateTimeOffset.UtcNow.AddYears(2))]);
+        var (orchestrator, placement, _, _, routing, _) = Build(catalog);
+        placement.Register(new NodeCandidate("node-16-only", "us-east", 2, 10, "10.0.0.1", 5432, SupportedPostgresMajorVersions: new HashSet<int> { 16 }));
+        placement.Register(new NodeCandidate("node-17-only", "us-east", 2, 10, "10.0.0.2", 5432, SupportedPostgresMajorVersions: new HashSet<int> { 17 }));
+
+        var result = await orchestrator.ProvisionAsync(Request(postgresMajorVersion: 16));
+
+        Assert.Equal(LifecycleOperationOutcome.Ok, result.Outcome);
+        Assert.Equal("node-16-only", result.Record!.PrimaryNodeId);
+        Assert.Equal("node-16-only", routing.Routes["db-1"]);
     }
 
     [Fact]
