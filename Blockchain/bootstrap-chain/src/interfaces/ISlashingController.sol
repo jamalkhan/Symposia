@@ -31,4 +31,22 @@ interface ISlashingController {
     /// duplicating burn/redistribute logic in the new contract. Restricted
     /// to the single allowlisted `computePenalty.stateMachineAddress`.
     function applyComputePenaltySlash(address node, uint256 amount) external returns (uint256);
+
+    /// @notice Issue #82: the storage-node `StoragePenaltyStateMachine` runs
+    /// its own telemetry-driven stage progression (distinct trigger table
+    /// from the hardware-fault Stage 1-4 model this contract owns via
+    /// `submitFaultAttestation`) and has already computed the exact
+    /// `amount` to slash; this just reuses SlashingController's existing
+    /// token-disposition plumbing rather than duplicating burn/redistribute
+    /// logic in the new contract. Restricted to the single allowlisted
+    /// `storagePenalty.stateMachineAddress`.
+    function applyStoragePenaltySlash(address node, uint256 amount) external returns (uint256);
+
+    /// @notice Issue #82 Stage 4: forces `node` out of the active registry
+    /// (immediate ban expiry -- re-registration permitted right away,
+    /// gated only by the registry's own minimum-stake/re-verification
+    /// requirements) so it must re-register/re-verify to rejoin, without
+    /// reusing the in-place 3-consecutive-epoch recovery path. Restricted
+    /// to the single allowlisted `storagePenalty.stateMachineAddress`.
+    function forceDeregisterStorageNode(address node) external;
 }
