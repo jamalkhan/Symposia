@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="MacysProductFeed.csproj" />
+  <Project Path="MacysProductFeed.Tests/MacysProductFeed.Tests.csproj" />
+</Solution>
