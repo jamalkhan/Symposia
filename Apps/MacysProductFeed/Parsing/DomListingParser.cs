@@ -1,5 +1,6 @@
 using AngleSharp;
 using AngleSharp.Dom;
+using MacysProductFeed.Scraping;
 
 namespace MacysProductFeed.Parsing;
 
@@ -8,7 +9,8 @@ namespace MacysProductFeed.Parsing;
 /// usable JSON payload was captured for a page. Selectors are centralized
 /// in <see cref="Selectors"/> so a markup change only requires updating this
 /// file, not the orchestrator/CLI/CSV layers (per the Arch plan's
-/// maintainability notes).
+/// maintainability notes). Returns null (deferring to whatever parser comes
+/// after it, if any) if no product tiles are found at all.
 /// </summary>
 public sealed class DomListingParser : IListingPageParser
 {
@@ -23,19 +25,27 @@ public sealed class DomListingParser : IListingPageParser
         public const string ProductLink = "a.productDescLink, a[data-testid='product-link']";
         public const string Image = "img.productThumbnailImage, img[data-testid='product-image']";
         public const string Availability = "[data-testid='product-availability']";
+        public const string Category = "[data-testid='product-category']";
+        public const string Breadcrumb = ".breadcrumb li:last-child, [data-testid='breadcrumb'] li:last-child";
         public const string NextPageLink = "a[rel='next'], [data-testid='pagination-next']:not([aria-disabled='true'])";
     }
 
     private static readonly IBrowsingContext Context = BrowsingContext.New(Configuration.Default);
 
-    public ParsedPage? TryParse(string source, Action<string> onTileError)
+    public ParsedPage? TryParse(FetchedPage fetched, Action<string> onTileError)
     {
-        IDocument document = Context.OpenAsync(req => req.Content(source)).GetAwaiter().GetResult();
+        IDocument document = Context.OpenAsync(req => req.Content(fetched.RenderedHtml)).GetAwaiter().GetResult();
         var tiles = document.QuerySelectorAll(Selectors.ProductTile);
         if (tiles.Length == 0)
         {
             return null;
         }
+
+        // Category is usually a page-level concept (breadcrumb), not per-tile;
+        // derive it once and use it as a fallback for any tile that doesn't
+        // carry its own category value (FR-4: "derived from the input listing
+        // URL or breadcrumb, if available").
+        var pageCategory = TextOrNull(document.DocumentElement, Selectors.Breadcrumb);
 
         var products = new List<ProductRecord>(tiles.Length);
         foreach (var tile in tiles)
@@ -59,7 +69,7 @@ public sealed class DomListingParser : IListingPageParser
                     ProductUrl: tile.QuerySelector(Selectors.ProductLink)?.GetAttribute("href"),
                     ImageUrl: tile.QuerySelector(Selectors.Image)?.GetAttribute("src"),
                     Availability: TextOrNull(tile, Selectors.Availability),
-                    Category: null));
+                    Category: TextOrNull(tile, Selectors.Category) ?? pageCategory));
             }
             catch (Exception ex)
             {
@@ -71,9 +81,9 @@ public sealed class DomListingParser : IListingPageParser
         return new ParsedPage(products, hasNextPage);
     }
 
-    private static string? TextOrNull(IElement tile, string selector)
+    private static string? TextOrNull(IElement? element, string selector)
     {
-        var text = tile.QuerySelector(selector)?.TextContent?.Trim();
+        var text = element?.QuerySelector(selector)?.TextContent?.Trim();
         return string.IsNullOrWhiteSpace(text) ? null : text;
     }
 

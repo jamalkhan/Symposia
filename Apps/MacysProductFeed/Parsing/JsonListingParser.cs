@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MacysProductFeed.Scraping;
 
 namespace MacysProductFeed.Parsing;
 
@@ -7,16 +8,22 @@ namespace MacysProductFeed.Parsing;
 /// the listing page's own network traffic (see PlaywrightListingFetcher),
 /// rather than screen-scraping HTML. More resilient to markup churn than the
 /// DOM fallback since it reads the same structured data the page itself
-/// consumes to render the grid.
+/// consumes to render the grid. Returns null (deferring to the next parser
+/// in the orchestrator's chain) if no JSON was captured for this page at all.
 /// </summary>
 public sealed class JsonListingParser : IListingPageParser
 {
-    public ParsedPage? TryParse(string source, Action<string> onTileError)
+    public ParsedPage? TryParse(FetchedPage fetched, Action<string> onTileError)
     {
+        if (fetched.CapturedJson is null)
+        {
+            return null;
+        }
+
         JsonDocument document;
         try
         {
-            document = JsonDocument.Parse(source);
+            document = JsonDocument.Parse(fetched.CapturedJson);
         }
         catch (JsonException)
         {

@@ -22,13 +22,42 @@ var progressLogger = new ConsoleProgressLogger(loggerFactory.CreateLogger("Macys
 
 var rateLimiter = new RateLimiter(options.DelayMs);
 await using var fetcher = new PlaywrightListingFetcher(rateLimiter);
-using var csvWriter = new CsvFeedWriter(options.OutputPath);
 
-var deduper = new ProductDeduper();
-var summary = new RunSummary();
-IReadOnlyList<IListingPageParser> parsers = [new JsonListingParser(), new DomListingParser()];
+ICsvFeedWriter csvWriter;
+try
+{
+    csvWriter = new CsvFeedWriter(options.OutputPath);
+}
+catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+{
+    Console.Error.WriteLine($"Failed to open output path '{options.OutputPath}': {ex.Message}");
+    return 1;
+}
 
-var orchestrator = new ScrapeOrchestrator(fetcher, parsers, deduper, csvWriter, progressLogger, summary);
-await orchestrator.RunAsync(options);
+using (csvWriter)
+{
+    var deduper = new ProductDeduper();
+    var summary = new RunSummary();
+    IReadOnlyList<IListingPageParser> parsers = [new JsonListingParser(), new DomListingParser()];
+    var retryBackoff = TimeSpan.FromMilliseconds(options.DelayMs * 2);
 
-return summary.ExitCode;
+    var orchestrator = new ScrapeOrchestrator(fetcher, parsers, deduper, csvWriter, progressLogger, summary, retryBackoff);
+
+    try
+    {
+        await orchestrator.RunAsync(options);
+        csvWriter.Complete();
+    }
+    catch (BrowserLaunchException ex)
+    {
+        Console.Error.WriteLine(ex.Message);
+        return 1;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Unexpected error: {ex.Message}");
+        return 1;
+    }
+
+    return summary.ExitCode;
+}

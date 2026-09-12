@@ -14,12 +14,13 @@ public class CsvFeedWriterTests : IDisposable
         new(id, title, "Brand", 10m, null, "USD", "https://example.com/p1", "https://example.com/p1.jpg", "In Stock", category);
 
     [Fact]
-    public void WriteRecord_WritesHeaderAndRow()
+    public void Complete_WritesHeaderAndRow()
     {
         var path = Path.Combine(_tempDir, "feed.csv");
         using (var writer = new CsvFeedWriter(path))
         {
             writer.WriteRecord(Product(title: "Basic Tee"));
+            writer.Complete();
         }
 
         var lines = File.ReadAllLines(path);
@@ -29,15 +30,67 @@ public class CsvFeedWriterTests : IDisposable
     }
 
     [Fact]
-    public void Dispose_WritesHeaderOnly_WhenNoRecordsWritten()
+    public void Complete_WritesHeaderOnly_WhenNoRecordsWritten()
     {
         var path = Path.Combine(_tempDir, "empty-feed.csv");
 
-        using (new CsvFeedWriter(path)) { }
+        using (var writer = new CsvFeedWriter(path))
+        {
+            writer.Complete();
+        }
 
         var lines = File.ReadAllLines(path);
         Assert.Single(lines);
         Assert.Contains("ProductId", lines[0]);
+    }
+
+    [Fact]
+    public void Dispose_WithoutComplete_DoesNotCreateDestinationFile()
+    {
+        var path = Path.Combine(_tempDir, "never-completed.csv");
+
+        using (var writer = new CsvFeedWriter(path))
+        {
+            writer.WriteRecord(Product());
+            // Deliberately not calling Complete() — simulates a run that failed partway through.
+        }
+
+        Assert.False(File.Exists(path));
+        Assert.Empty(Directory.GetFiles(_tempDir, "*.tmp-*"));
+    }
+
+    [Fact]
+    public void Dispose_WithoutComplete_LeavesExistingDestinationFileUntouched()
+    {
+        var path = Path.Combine(_tempDir, "existing-feed.csv");
+        File.WriteAllText(path, "ProductId\r\nOLD-GOOD-DATA\r\n");
+
+        using (var writer = new CsvFeedWriter(path))
+        {
+            writer.WriteRecord(Product(id: "NEW-PARTIAL-DATA"));
+            // Run fails before Complete() is called.
+        }
+
+        var content = File.ReadAllText(path);
+        Assert.Contains("OLD-GOOD-DATA", content);
+        Assert.DoesNotContain("NEW-PARTIAL-DATA", content);
+    }
+
+    [Fact]
+    public void Complete_OverwritesExistingDestinationFile()
+    {
+        var path = Path.Combine(_tempDir, "overwrite-feed.csv");
+        File.WriteAllText(path, "ProductId\r\nOLD-DATA\r\n");
+
+        using (var writer = new CsvFeedWriter(path))
+        {
+            writer.WriteRecord(Product(id: "NEW-DATA"));
+            writer.Complete();
+        }
+
+        var content = File.ReadAllText(path);
+        Assert.Contains("NEW-DATA", content);
+        Assert.DoesNotContain("OLD-DATA", content);
     }
 
     [Fact]
@@ -47,6 +100,7 @@ public class CsvFeedWriterTests : IDisposable
         using (var writer = new CsvFeedWriter(path))
         {
             writer.WriteRecord(Product(title: "Women's Cotton, Slim Fit Top"));
+            writer.Complete();
         }
 
         var content = File.ReadAllText(path);
@@ -60,6 +114,7 @@ public class CsvFeedWriterTests : IDisposable
         using (var writer = new CsvFeedWriter(path))
         {
             writer.WriteRecord(Product(title: "The \"Best\" Top"));
+            writer.Complete();
         }
 
         var content = File.ReadAllText(path);
@@ -73,6 +128,7 @@ public class CsvFeedWriterTests : IDisposable
         using (var writer = new CsvFeedWriter(path))
         {
             writer.WriteRecord(Product(title: "Line one\nLine two"));
+            writer.Complete();
         }
 
         var lines = File.ReadAllLines(path);
@@ -87,8 +143,9 @@ public class CsvFeedWriterTests : IDisposable
     {
         var nestedPath = Path.Combine(_tempDir, "nested", "does-not-exist-yet", "feed.csv");
 
-        using (new CsvFeedWriter(nestedPath))
+        using (var writer = new CsvFeedWriter(nestedPath))
         {
+            writer.Complete();
         }
 
         Assert.True(File.Exists(nestedPath));
@@ -102,6 +159,7 @@ public class CsvFeedWriterTests : IDisposable
         {
             writer.WriteRecord(Product("P1"));
             writer.WriteRecord(Product("P2"));
+            writer.Complete();
         }
 
         var lines = File.ReadAllLines(path);

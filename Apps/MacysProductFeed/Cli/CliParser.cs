@@ -41,7 +41,8 @@ public static class CliParser
                     urls.AddRange(ReadUrlFile(urlFile));
                 }
 
-                if (urls.Count == 0)
+                var distinctUrls = urls.Distinct().ToList();
+                if (distinctUrls.Count == 0)
                 {
                     throw new CliValidationException(
                         "No input URLs provided. Supply at least one --url or a --url-file with at least one URL.");
@@ -60,7 +61,7 @@ public static class CliParser
                 }
 
                 parsedOptions = new ScrapeOptions(
-                    Urls: urls,
+                    Urls: distinctUrls,
                     OutputPath: context.ParseResult.GetValueForOption(outputOption) ?? ScrapeOptions.DefaultOutputPath,
                     MaxPages: maxPages,
                     DelayMs: delayMs);
@@ -88,8 +89,16 @@ public static class CliParser
             throw new CliValidationException($"--url-file path does not exist: {path}");
         }
 
-        return File.ReadLines(path)
-            .Select(line => line.Trim())
-            .Where(line => line.Length > 0);
+        try
+        {
+            return File.ReadLines(path)
+                .Select(line => line.Trim())
+                .Where(line => line.Length > 0)
+                .ToList();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new CliValidationException($"Failed to read --url-file at {path}: {ex.Message}");
+        }
     }
 }

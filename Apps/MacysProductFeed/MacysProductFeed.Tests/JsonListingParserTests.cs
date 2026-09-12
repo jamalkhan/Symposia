@@ -1,4 +1,5 @@
 using MacysProductFeed.Parsing;
+using MacysProductFeed.Scraping;
 
 namespace MacysProductFeed.Tests;
 
@@ -6,10 +7,12 @@ public class JsonListingParserTests
 {
     private readonly JsonListingParser _parser = new();
 
+    private static FetchedPage Fetched(string json) => new(json, "");
+
     [Fact]
     public void TryParse_ReturnsNull_WhenSourceIsNotJson()
     {
-        var result = _parser.TryParse("<html><body>not json</body></html>", _ => { });
+        var result = _parser.TryParse(Fetched("<html><body>not json</body></html>"), _ => { });
 
         Assert.Null(result);
     }
@@ -17,7 +20,7 @@ public class JsonListingParserTests
     [Fact]
     public void TryParse_ReturnsNull_WhenNoProductArrayFound()
     {
-        var result = _parser.TryParse("""{"unrelated":"payload"}""", _ => { });
+        var result = _parser.TryParse(Fetched("""{"unrelated":"payload"}"""), _ => { });
 
         Assert.Null(result);
     }
@@ -44,7 +47,7 @@ public class JsonListingParserTests
         }
         """;
 
-        var result = _parser.TryParse(json, _ => { });
+        var result = _parser.TryParse(Fetched(json), _ => { });
 
         Assert.NotNull(result);
         Assert.True(result!.HasNextPage);
@@ -66,7 +69,7 @@ public class JsonListingParserTests
     {
         var json = """{"products":[{"productId":"P1","regularPrice":20.00}]}""";
 
-        var result = _parser.TryParse(json, _ => { });
+        var result = _parser.TryParse(Fetched(json), _ => { });
 
         Assert.Null(Assert.Single(result!.Products).SalePrice);
     }
@@ -77,7 +80,7 @@ public class JsonListingParserTests
         var json = """{"products":[{"title":"No ID here"},{"productId":"P2","title":"Valid"}]}""";
         var errors = new List<string>();
 
-        var result = _parser.TryParse(json, errors.Add);
+        var result = _parser.TryParse(Fetched(json), errors.Add);
 
         Assert.Single(result!.Products);
         Assert.Equal("P2", result.Products[0].ProductId);
@@ -89,7 +92,7 @@ public class JsonListingParserTests
     {
         var json = """{"items":[{"id":"P3","name":"Fallback Name","brandName":"Fallback Brand","price":15.5}]}""";
 
-        var result = _parser.TryParse(json, _ => { });
+        var result = _parser.TryParse(Fetched(json), _ => { });
 
         var product = Assert.Single(result!.Products);
         Assert.Equal("P3", product.ProductId);
@@ -103,7 +106,7 @@ public class JsonListingParserTests
     {
         var json = """{"products":[{"productId":"P4"}]}""";
 
-        var result = _parser.TryParse(json, _ => { });
+        var result = _parser.TryParse(Fetched(json), _ => { });
 
         Assert.False(result!.HasNextPage);
     }

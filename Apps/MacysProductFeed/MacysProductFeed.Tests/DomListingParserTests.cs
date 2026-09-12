@@ -1,10 +1,13 @@
 using MacysProductFeed.Parsing;
+using MacysProductFeed.Scraping;
 
 namespace MacysProductFeed.Tests;
 
 public class DomListingParserTests
 {
     private readonly DomListingParser _parser = new();
+
+    private static FetchedPage Fetched(string html) => new(null, html);
 
     private static string Tile(
         string productId = "P1",
@@ -37,7 +40,7 @@ public class DomListingParserTests
     [Fact]
     public void TryParse_ReturnsNull_WhenNoTilesFound()
     {
-        var result = _parser.TryParse(Page("<div>no products here</div>"), _ => { });
+        var result = _parser.TryParse(Fetched(Page("<div>no products here</div>")), _ => { });
 
         Assert.Null(result);
     }
@@ -47,7 +50,7 @@ public class DomListingParserTests
     {
         var html = Page(Tile(salePrice: "$34.99"), hasNextPage: true);
 
-        var result = _parser.TryParse(html, _ => { });
+        var result = _parser.TryParse(Fetched(html), _ => { });
 
         Assert.NotNull(result);
         Assert.True(result!.HasNextPage);
@@ -68,7 +71,7 @@ public class DomListingParserTests
     {
         var html = Page(Tile(salePrice: null));
 
-        var result = _parser.TryParse(html, _ => { });
+        var result = _parser.TryParse(Fetched(html), _ => { });
 
         Assert.Null(Assert.Single(result!.Products).SalePrice);
     }
@@ -78,7 +81,7 @@ public class DomListingParserTests
     {
         var html = Page(Tile(availability: null));
 
-        var result = _parser.TryParse(html, _ => { });
+        var result = _parser.TryParse(Fetched(html), _ => { });
 
         Assert.Null(Assert.Single(result!.Products).Availability);
     }
@@ -90,7 +93,7 @@ public class DomListingParserTests
         var html = Page(brokenTile + Tile(productId: "P2"));
         var errors = new List<string>();
 
-        var result = _parser.TryParse(html, errors.Add);
+        var result = _parser.TryParse(Fetched(html), errors.Add);
 
         Assert.Single(result!.Products);
         Assert.Equal("P2", result.Products[0].ProductId);
@@ -100,7 +103,7 @@ public class DomListingParserTests
     [Fact]
     public void TryParse_NoNextPage_WhenNextLinkAbsent()
     {
-        var result = _parser.TryParse(Page(Tile(), hasNextPage: false), _ => { });
+        var result = _parser.TryParse(Fetched(Page(Tile(), hasNextPage: false)), _ => { });
 
         Assert.False(result!.HasNextPage);
     }

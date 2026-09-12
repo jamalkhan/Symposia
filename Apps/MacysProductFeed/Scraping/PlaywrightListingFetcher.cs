@@ -39,7 +39,7 @@ public sealed class PlaywrightListingFetcher : IListingFetcher
         }
         catch (PlaywrightException ex)
         {
-            throw new InvalidOperationException(
+            throw new BrowserLaunchException(
                 "Failed to launch headless Chromium. Run 'playwright install chromium' before using this tool.", ex);
         }
 
@@ -57,23 +57,28 @@ public sealed class PlaywrightListingFetcher : IListingFetcher
             string? capturedJson = null;
             page.Response += async (_, response) =>
             {
-                if (capturedJson is not null)
+                // This is a fire-and-forget async handler on a synchronous Playwright
+                // event: any exception that escapes it becomes an unobserved exception
+                // that can crash the whole process, bypassing every error boundary the
+                // orchestrator relies on. Best-effort capture only — never let a failure
+                // here be anything but silently skipped.
+                try
                 {
-                    return;
-                }
+                    if (capturedJson is not null)
+                    {
+                        return;
+                    }
 
-                if (response.Request.ResourceType is "xhr" or "fetch" &&
-                    response.Headers.TryGetValue("content-type", out var contentType) &&
-                    contentType.Contains("application/json", StringComparison.OrdinalIgnoreCase))
-                {
-                    try
+                    if (response.Request.ResourceType is "xhr" or "fetch" &&
+                        response.Headers.TryGetValue("content-type", out var contentType) &&
+                        contentType.Contains("application/json", StringComparison.OrdinalIgnoreCase))
                     {
                         capturedJson = await response.TextAsync();
                     }
-                    catch (PlaywrightException)
-                    {
-                        // Response body no longer available (e.g. navigation moved on); ignore.
-                    }
+                }
+                catch
+                {
+                    // Response body no longer available, connection torn down, etc. Ignore.
                 }
             };
 
