@@ -35,13 +35,47 @@ public sealed class BootstrapChainClient
     /// cost of a known-redundant relay should check <see cref="IsRegisteredAsync"/>
     /// first.
     /// </summary>
-    public Task<string> RegisterAsync(string node, byte[] signature) =>
-        _web3.Eth.GetContractTransactionHandler<RegisterFunction>()
+    public async Task<string> RegisterAsync(string node, string endpoint, ulong nonce, byte[] signature)
+    {
+        var receipt = await _web3.Eth.GetContractTransactionHandler<RegisterFunction>()
             .SendRequestAndWaitForReceiptAsync(_nodeRegistryAddress, new RegisterFunction
             {
                 Node = node,
+                Endpoint = endpoint,
+                RegistrationNonce = nonce,
                 Signature = signature,
-            }).ContinueWith(t => t.Result.TransactionHash);
+            });
+        return receipt.TransactionHash;
+    }
+
+    public Task<string> GetEndpointAsync(string node) =>
+        _web3.Eth.GetContractQueryHandler<EndpointOfFunction>()
+            .QueryAsync<string>(_nodeRegistryAddress, new EndpointOfFunction { Node = node });
+
+    public async Task<ulong> GetNonceAsync(string node) =>
+        (ulong)await _web3.Eth.GetContractQueryHandler<NonceOfFunction>()
+            .QueryAsync<System.Numerics.BigInteger>(_nodeRegistryAddress, new NonceOfFunction { Node = node });
+
+    /// <summary>
+    /// Enumerates every registered node with its advertised endpoint (issue
+    /// #129 FR-B5) via the contract's count/index views. O(n) view calls,
+    /// which is fine at Phase 0/1 scale per the #129 Arch pass.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Node, string Endpoint)>> ListNodesAsync()
+    {
+        var count = (int)await _web3.Eth.GetContractQueryHandler<NodeCountFunction>()
+            .QueryAsync<System.Numerics.BigInteger>(_nodeRegistryAddress, new NodeCountFunction());
+
+        var nodes = new List<(string, string)>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var node = await _web3.Eth.GetContractQueryHandler<NodeAtFunction>()
+                .QueryAsync<string>(_nodeRegistryAddress, new NodeAtFunction { Index = i });
+            nodes.Add((node, await GetEndpointAsync(node)));
+        }
+
+        return nodes;
+    }
 
     public Task<string> SubmitRootAsync(string node, ulong epoch, byte[] root, byte[] signature) =>
         _web3.Eth.GetContractTransactionHandler<SubmitRootFunction>()

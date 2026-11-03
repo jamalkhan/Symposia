@@ -37,13 +37,16 @@ public static class Eip712TestSigner
         return Keccak.CalculateHash(payload);
     }
 
-    public static byte[] SignRegister(string privateKeyHex, string nodeAddress, string contractAddress, ulong chainId)
+    public static byte[] SignRegister(
+        string privateKeyHex, string nodeAddress, string endpoint, ulong nonce, string contractAddress, ulong chainId)
     {
         var abiEncode = new ABIEncode();
-        var typeHash = HashUtf8("Register(address node)");
+        var typeHash = HashUtf8("Register(address node,string endpoint,uint256 nonce)");
         var structHash = Keccak.CalculateHash(abiEncode.GetABIEncoded(
             new ABIValue("bytes32", typeHash),
-            new ABIValue("address", nodeAddress)));
+            new ABIValue("address", nodeAddress),
+            new ABIValue("bytes32", HashUtf8(endpoint)),
+            new ABIValue("uint256", nonce)));
 
         var digest = TypedDataDigest(DomainSeparator("Symposia.NodeRegistry", contractAddress, chainId), structHash);
         return Sign(privateKeyHex, digest);

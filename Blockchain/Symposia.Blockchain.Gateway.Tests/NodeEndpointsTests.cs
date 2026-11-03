@@ -34,10 +34,11 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
     public async Task Register_FreshNode_Succeeds()
     {
         var (address, privateKey) = NewNode();
-        var signature = Eip712TestSigner.SignRegister(privateKey, address, _fixture.NodeRegistryAddress, ChainFixture.ChainId);
+        var signature = Eip712TestSigner.SignRegister(
+            privateKey, address, Endpoint, 0, _fixture.NodeRegistryAddress, ChainFixture.ChainId);
 
         var resp = await _client.PostAsJsonAsync("/v1/nodes/register",
-            new { node = address, signature = "0x" + Convert.ToHexString(signature) });
+            new { node = address, endpoint = Endpoint, nonce = 0, signature = "0x" + Convert.ToHexString(signature) });
 
         resp.EnsureSuccessStatusCode();
 
@@ -51,10 +52,10 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
     {
         var (address, privateKey) = NewNode();
         var signature = "0x" + Convert.ToHexString(
-            Eip712TestSigner.SignRegister(privateKey, address, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
+            Eip712TestSigner.SignRegister(privateKey, address, Endpoint, 0, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
 
-        var first = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, signature });
-        var second = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, signature });
+        var first = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, endpoint = Endpoint, nonce = 0, signature });
+        var second = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, endpoint = Endpoint, nonce = 0, signature });
 
         first.EnsureSuccessStatusCode();
         second.EnsureSuccessStatusCode();
@@ -168,11 +169,54 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
     }
 
-    private async Task RegisterAsync(string address, string privateKey)
+    // #129 FR-B5 / TC-6: registered nodes are listed with their endpoints.
+    [Fact]
+    public async Task ListNodes_IncludesRegisteredNodeWithEndpoint()
     {
-        var signature = "0x" + Convert.ToHexString(
-            Eip712TestSigner.SignRegister(privateKey, address, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
-        var resp = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, signature });
+        var (address, privateKey) = NewNode();
+        await RegisterAsync(address, privateKey, "http://10.1.2.3:5180");
+
+        var nodes = await _client.GetFromJsonAsync<JsonElement>("/v1/nodes");
+
+        Assert.Contains(nodes.EnumerateArray(), n =>
+            string.Equals(n.GetProperty("node").GetString(), address, StringComparison.OrdinalIgnoreCase) &&
+            n.GetProperty("endpoint").GetString() == "http://10.1.2.3:5180");
+    }
+
+    // #129 TC-9: an endpoint change is relayed, not short-circuited as a duplicate.
+    [Fact]
+    public async Task Register_EndpointChange_IsRelayedAndUpdatesNonce()
+    {
+        var (address, privateKey) = NewNode();
+        await RegisterAsync(address, privateKey, "http://10.0.0.1:5180");
+        await RegisterAsync(address, privateKey, "http://10.0.0.2:5180", nonce: 1);
+
+        var status = await _client.GetFromJsonAsync<JsonElement>($"/v1/nodes/{address}");
+        Assert.Equal("http://10.0.0.2:5180", status.GetProperty("endpoint").GetString());
+        Assert.Equal(2UL, status.GetProperty("nonce").GetUInt64());
+    }
+
+    // #129 Gherkin: an endpoint not signed by the node's key is rejected.
+    [Fact]
+    public async Task Register_EndpointNotSignedByNode_IsRejected()
+    {
+        var (address, privateKey) = NewNode();
+        var signature = "0x" + Convert.ToHexString(Eip712TestSigner.SignRegister(
+            privateKey, address, "http://honest:5180", 0, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
+
+        var resp = await _client.PostAsJsonAsync("/v1/nodes/register",
+            new { node = address, endpoint = "http://attacker:5180", nonce = 0, signature });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    private const string Endpoint = "http://127.0.0.1:5180";
+
+    private async Task RegisterAsync(string address, string privateKey, string endpoint = Endpoint, ulong nonce = 0)
+    {
+        var signature = "0x" + Convert.ToHexString(Eip712TestSigner.SignRegister(
+            privateKey, address, endpoint, nonce, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
+        var resp = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, endpoint, nonce, signature });
         resp.EnsureSuccessStatusCode();
     }
 

@@ -9,8 +9,38 @@ public sealed class RegisterFunction : FunctionMessage
     [Parameter("address", "node", 1)]
     public string Node { get; set; } = "";
 
-    [Parameter("bytes", "signature", 2)]
+    [Parameter("string", "endpoint", 2)]
+    public string Endpoint { get; set; } = "";
+
+    [Parameter("uint256", "nonce", 3)]
+    public System.Numerics.BigInteger RegistrationNonce { get; set; }
+
+    [Parameter("bytes", "signature", 4)]
     public byte[] Signature { get; set; } = [];
+}
+
+[Function("endpointOf", "string")]
+public sealed class EndpointOfFunction : FunctionMessage
+{
+    [Parameter("address", "node", 1)]
+    public string Node { get; set; } = "";
+}
+
+[Function("nonceOf", "uint256")]
+public sealed class NonceOfFunction : FunctionMessage
+{
+    [Parameter("address", "node", 1)]
+    public string Node { get; set; } = "";
+}
+
+[Function("nodeCount", "uint256")]
+public sealed class NodeCountFunction : FunctionMessage;
+
+[Function("nodeAt", "address")]
+public sealed class NodeAtFunction : FunctionMessage
+{
+    [Parameter("uint256", "index", 1)]
+    public System.Numerics.BigInteger Index { get; set; }
 }
 
 [Function("isRegistered", "bool")]

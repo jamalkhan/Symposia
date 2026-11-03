@@ -1,10 +1,11 @@
+using Nethereum.ABI.FunctionEncoding;
 using Nethereum.Hex.HexConvertors.Extensions;
 using Nethereum.JsonRpc.Client;
 using Symposia.Blockchain.Gateway.Chain;
 
 namespace Symposia.Blockchain.Gateway.Nodes;
 
-public sealed record RegisterRequest(string Node, string Signature);
+public sealed record RegisterRequest(string Node, string Endpoint, ulong Nonce, string Signature);
 public sealed record SubmitEpochRootRequest(ulong Epoch, string Root, string Signature);
 
 /// <summary>
@@ -23,18 +24,19 @@ public static class NodeEndpoints
             // Anti-abuse (per the Arch pass): don't relay a transaction the
             // contract would just no-op anyway — the contract's own
             // idempotency (Functional Requirement 10) is the backstop either
-            // way, this only saves the relayer's gas.
-            if (await chain.IsRegisteredAsync(req.Node))
+            // way, this only saves the relayer's gas. An endpoint change
+            // (issue #129 FR-B3) is not redundant and is always relayed.
+            if (await chain.IsRegisteredAsync(req.Node) && await chain.GetEndpointAsync(req.Node) == req.Endpoint)
             {
-                return Results.Ok(new { node = req.Node, registered = true, relayed = false });
+                return Results.Ok(new { node = req.Node, endpoint = req.Endpoint, registered = true, relayed = false });
             }
 
             try
             {
-                var txHash = await chain.RegisterAsync(req.Node, req.Signature.HexToByteArray());
-                return Results.Ok(new { node = req.Node, registered = true, relayed = true, txHash });
+                var txHash = await chain.RegisterAsync(req.Node, req.Endpoint, req.Nonce, req.Signature.HexToByteArray());
+                return Results.Ok(new { node = req.Node, endpoint = req.Endpoint, registered = true, relayed = true, txHash });
             }
-            catch (RpcResponseException ex)
+            catch (Exception ex) when (ex is RpcResponseException or SmartContractRevertException)
             {
                 // The contract itself is the authoritative rejector for a
                 // forged registration signature (Requirement 5's analogue
@@ -43,10 +45,19 @@ public static class NodeEndpoints
             }
         });
 
+        // Membership listing for peer discovery (issue #129 FR-B5/FR-C1).
+        app.MapGet("/v1/nodes", async (BootstrapChainClient chain) =>
+        {
+            var nodes = await chain.ListNodesAsync();
+            return Results.Ok(nodes.Select(n => new { node = n.Node, endpoint = n.Endpoint }));
+        });
+
         app.MapGet("/v1/nodes/{address}", async (string address, BootstrapChainClient chain) =>
         {
             var registered = await chain.IsRegisteredAsync(address);
-            return Results.Ok(new { node = address, registered });
+            var endpoint = registered ? await chain.GetEndpointAsync(address) : "";
+            var nonce = await chain.GetNonceAsync(address);
+            return Results.Ok(new { node = address, registered, endpoint, nonce });
         });
 
         app.MapPost("/v1/nodes/{address}/epoch-roots", async (string address, SubmitEpochRootRequest req, BootstrapChainClient chain) =>
