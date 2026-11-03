@@ -22,6 +22,12 @@ public sealed class PeerDiscoveryService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var o = options.Value;
+        if (!o.EnableDiscovery)
+        {
+            logger.LogDebug("Peer discovery disabled for this host.");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(o.BlockchainGatewayUrl) || string.IsNullOrWhiteSpace(o.NodeRegistryAddress))
         {
             logger.LogInformation("Blockchain gateway not configured; peer discovery disabled.");

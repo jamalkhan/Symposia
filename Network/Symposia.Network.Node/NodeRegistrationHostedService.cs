@@ -24,6 +24,12 @@ public sealed class NodeRegistrationHostedService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var o = options.Value;
+        if (!o.EnableRegistration)
+        {
+            logger.LogDebug("On-chain registration disabled for this host.");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(o.BlockchainGatewayUrl) || string.IsNullOrWhiteSpace(o.NodeRegistryAddress))
         {
             logger.LogInformation("Blockchain gateway not configured; skipping on-chain node registration.");

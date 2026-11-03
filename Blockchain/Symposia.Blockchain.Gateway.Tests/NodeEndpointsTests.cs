@@ -210,6 +210,17 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
+    // #133: a node can join knowing only the gateway URL.
+    [Fact]
+    public async Task Network_DescribesChainAndContracts()
+    {
+        var network = await _client.GetFromJsonAsync<JsonElement>("/v1/network");
+
+        Assert.Equal(ChainFixture.ChainId, network.GetProperty("chainId").GetUInt64());
+        Assert.Equal(_fixture.NodeRegistryAddress, network.GetProperty("nodeRegistryAddress").GetString(), ignoreCase: true);
+        Assert.Equal(_fixture.EpochRootRegistryAddress, network.GetProperty("epochRootRegistryAddress").GetString(), ignoreCase: true);
+    }
+
     private const string Endpoint = "http://127.0.0.1:5180";
 
     private async Task RegisterAsync(string address, string privateKey, string endpoint = Endpoint, ulong nonce = 0)

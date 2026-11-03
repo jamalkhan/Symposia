@@ -25,6 +25,29 @@ public sealed class BootstrapChainClient
         _epochRootRegistryAddress = o.EpochRootRegistryAddress;
     }
 
+    private Task<ulong>? _chainId;
+
+    public string NodeRegistryAddress => _nodeRegistryAddress;
+
+    public string EpochRootRegistryAddress => _epochRootRegistryAddress;
+
+    /// <summary>The connected chain's ID, read from the RPC endpoint and cached once it succeeds.</summary>
+    public async Task<ulong> GetChainIdAsync()
+    {
+        var pending = _chainId ??= FetchChainIdAsync();
+        try
+        {
+            return await pending;
+        }
+        catch
+        {
+            _chainId = null;
+            throw;
+        }
+    }
+
+    private async Task<ulong> FetchChainIdAsync() => (ulong)(await _web3.Eth.ChainId.SendRequestAsync()).Value;
+
     public Task<bool> IsRegisteredAsync(string node) =>
         _web3.Eth.GetContractQueryHandler<IsRegisteredFunction>()
             .QueryAsync<bool>(_nodeRegistryAddress, new IsRegisteredFunction { Node = node });
