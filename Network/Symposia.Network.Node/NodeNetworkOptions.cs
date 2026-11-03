@@ -36,6 +36,9 @@ public sealed class NodeNetworkOptions
 
     public int HandshakeTimeoutSeconds { get; set; } = 5;
 
+    /// <summary>Upper bound on concurrent outbound handshakes per discovery cycle.</summary>
+    public int MaxConcurrentHandshakes { get; set; } = 8;
+
     /// <summary>Max handshake requests accepted per remote IP per minute.</summary>
     public int HandshakeRateLimitPerMinute { get; set; } = 60;
 }

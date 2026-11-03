@@ -143,6 +143,78 @@ public sealed class PeerVerificationTests : IDisposable
         Assert.DoesNotContain(peers, p => p.Endpoint == "http://self:5180");
     }
 
+    // Review: a peer that left the registry drops out of the table next cycle.
+    [Fact]
+    public async Task DiscoveryCycle_PeerRemovedFromRegistry_DropsOut()
+    {
+        var b = RegisteredPeer("http://b:5180");
+        var table = new PeerTable();
+        var discovery = Discovery(table);
+        await discovery.RunCycleAsync(CancellationToken.None);
+
+        _registry.Members.Remove(b.NodeId);
+        await discovery.RunCycleAsync(CancellationToken.None);
+
+        Assert.Empty(table.Snapshot());
+    }
+
+    // Review: two registry members advertising one endpoint stay separate rows.
+    [Fact]
+    public async Task DiscoveryCycle_TwoMembersSameEndpoint_KeepsBothRows()
+    {
+        var honest = RegisteredPeer("http://b:5180");
+        var squatter = TestSupport.NewIdentity(_dataDir);
+        _registry.Members[squatter.NodeId] = "http://b:5180";
+        var table = new PeerTable();
+
+        await Discovery(table).RunCycleAsync(CancellationToken.None);
+
+        Assert.Equal(2, table.Snapshot().Count);
+        Assert.Contains(table.Snapshot(), p => p.ExpectedAddress == honest.NodeId && p.Status == PeerStatus.Recognized);
+        Assert.Contains(table.Snapshot(), p => p.ExpectedAddress == squatter.NodeId && p.Reason == PeerFailureReason.AddressMismatch);
+    }
+
+    // Review: link-local / metadata endpoints are never dialed.
+    [Theory]
+    [InlineData("http://169.254.169.254:80")]
+    [InlineData("http://[fe80::1]:5180")]
+    [InlineData("file:///etc/passwd")]
+    [InlineData("http://b:5180/admin")]
+    public async Task UndialableEndpoint_IsNeverDialed(string endpoint)
+    {
+        var dialed = false;
+        _network.Responders[endpoint] = _ => { dialed = true; throw new InvalidOperationException(); };
+
+        var entry = await Verifier().VerifyAsync(endpoint, null, CancellationToken.None);
+
+        Assert.Equal(PeerFailureReason.EndpointNotDialable, entry.Reason);
+        Assert.False(dialed);
+    }
+
+    // Review: a malformed (null) handshake body is a failed verification, not a crash.
+    [Fact]
+    public async Task NullHandshakeResponse_IsSignatureInvalid()
+    {
+        _network.Responders["http://b:5180"] = _ => null!;
+
+        var entry = await Verifier().VerifyAsync("http://b:5180", null, CancellationToken.None);
+
+        Assert.Equal(PeerFailureReason.SignatureInvalid, entry.Reason);
+    }
+
+    // Review: a hanging peer times out without stopping the cycle.
+    [Fact]
+    public async Task HangingPeer_IsTimeout()
+    {
+        _options.HandshakeTimeoutSeconds = 1;
+        var hanging = new FakeHandshakeNetwork.Hang();
+
+        var verifier = new PeerVerifier(_self, hanging, _registry, Options.Create(_options), TimeProvider.System);
+        var entry = await verifier.VerifyAsync("http://b:5180", null, CancellationToken.None);
+
+        Assert.Equal(PeerFailureReason.Timeout, entry.Reason);
+    }
+
     // TC-14: gateway down keeps the last known table.
     [Fact]
     public async Task DiscoveryCycle_GatewayDown_KeepsLastPeerTable()

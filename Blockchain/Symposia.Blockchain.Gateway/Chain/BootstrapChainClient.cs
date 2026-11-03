@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
 
 namespace Symposia.Blockchain.Gateway.Chain;
@@ -58,20 +59,26 @@ public sealed class BootstrapChainClient
 
     /// <summary>
     /// Enumerates every registered node with its advertised endpoint (issue
-    /// #129 FR-B5) via the contract's count/index views. O(n) view calls,
-    /// which is fine at Phase 0/1 scale per the #129 Arch pass.
+    /// #129 FR-B5) via the contract's count/index views. Every call is pinned
+    /// to one block so a registration landing mid-listing can't produce a
+    /// torn result. O(n) view calls, fine at Phase 0/1 scale per the #129
+    /// Arch pass.
     /// </summary>
     public async Task<IReadOnlyList<(string Node, string Endpoint)>> ListNodesAsync()
     {
+        var block = new BlockParameter(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync());
+
         var count = (int)await _web3.Eth.GetContractQueryHandler<NodeCountFunction>()
-            .QueryAsync<System.Numerics.BigInteger>(_nodeRegistryAddress, new NodeCountFunction());
+            .QueryAsync<System.Numerics.BigInteger>(_nodeRegistryAddress, new NodeCountFunction(), block);
 
         var nodes = new List<(string, string)>(count);
         for (var i = 0; i < count; i++)
         {
             var node = await _web3.Eth.GetContractQueryHandler<NodeAtFunction>()
-                .QueryAsync<string>(_nodeRegistryAddress, new NodeAtFunction { Index = i });
-            nodes.Add((node, await GetEndpointAsync(node)));
+                .QueryAsync<string>(_nodeRegistryAddress, new NodeAtFunction { Index = i }, block);
+            var endpoint = await _web3.Eth.GetContractQueryHandler<EndpointOfFunction>()
+                .QueryAsync<string>(_nodeRegistryAddress, new EndpointOfFunction { Node = node }, block);
+            nodes.Add((node, endpoint));
         }
 
         return nodes;

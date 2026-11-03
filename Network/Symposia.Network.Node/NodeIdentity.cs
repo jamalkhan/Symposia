@@ -111,12 +111,26 @@ public sealed class NodeIdentity
     private EthECKey Key =>
         _key ?? throw new InvalidOperationException($"{nameof(NodeIdentity)} not loaded. Call {nameof(EnsureLoadedOrGenerated)}() first.");
 
+    /// <summary>
+    /// Writes via a temp file created owner-only from the start, then renames
+    /// it into place, so the key is never briefly world-readable and a crash
+    /// mid-write never leaves a truncated key behind.
+    /// </summary>
     private static void WriteOwnerOnly(string path, string content)
     {
-        File.WriteAllText(path, content);
+        var temp = path + ".tmp";
+        var fileOptions = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
         if (!OperatingSystem.IsWindows())
         {
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            fileOptions.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         }
+
+        File.Delete(temp);
+        using (var writer = new StreamWriter(temp, System.Text.Encoding.UTF8, fileOptions))
+        {
+            writer.Write(content);
+        }
+
+        File.Move(temp, path, overwrite: true);
     }
 }

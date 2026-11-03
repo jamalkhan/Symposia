@@ -2,10 +2,11 @@ using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
-using Nethereum.Hex.HexConvertors.Extensions;
 using Nethereum.Util;
 
 namespace Symposia.Network.Node;
@@ -22,7 +23,7 @@ public static class NodeNetworkExtensions
     public static IServiceCollection AddNodeNetwork(this IServiceCollection services, IConfigurationSection section)
     {
         services.Configure<NodeNetworkOptions>(section);
-        services.AddSingleton(TimeProvider.System);
+        services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<NodeIdentity>();
         services.AddSingleton<PeerTable>();
         services.AddSingleton<PeerVerifier>();
@@ -36,14 +37,16 @@ public static class NodeNetworkExtensions
                 http.BaseAddress = new Uri(gatewayUrl);
             }
         });
-        services.AddHttpClient<IPeerHandshakeClient, PeerHandshakeClient>();
+        // Never follow redirects: a peer's registered endpoint must not be able
+        // to bounce this node's request somewhere else.
+        services.AddHttpClient<IPeerHandshakeClient, PeerHandshakeClient>()
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 
         services.AddHostedService<NodeRegistrationHostedService>();
         services.AddHostedService(sp => sp.GetRequiredService<PeerDiscoveryService>());
 
         services.AddRateLimiter(limiter =>
         {
-            limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             limiter.AddPolicy(HandshakeRateLimitPolicy, http =>
             {
                 var perMinute = http.RequestServices.GetRequiredService<IOptions<NodeNetworkOptions>>().Value.HandshakeRateLimitPerMinute;
@@ -51,41 +54,54 @@ public static class NodeNetworkExtensions
                     http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                     _ => new FixedWindowRateLimiterOptions { PermitLimit = perMinute, Window = TimeSpan.FromMinutes(1) });
             });
+            limiter.OnRejected = (context, _) =>
+            {
+                context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                return ValueTask.CompletedTask;
+            };
         });
 
         return services;
     }
 
     /// <summary>
-    /// Loads (or first-launch generates) the node identity — failing startup
-    /// rather than silently re-keying an initialized node — and maps the
-    /// peer handshake and peer status endpoints.
+    /// Convenience for node hosts: <see cref="EnsureNodeIdentity"/>, the rate
+    /// limiter middleware the handshake policy needs, then
+    /// <see cref="MapNodeNetworkEndpoints"/>. Call it before mapping the
+    /// host's own endpoints.
     /// </summary>
     public static WebApplication UseNodeNetwork(this WebApplication app)
     {
-        app.Services.GetRequiredService<NodeIdentity>().EnsureLoadedOrGenerated();
+        app.EnsureNodeIdentity();
         app.UseRateLimiter();
+        app.MapNodeNetworkEndpoints();
+        return app;
+    }
 
-        app.MapPost("/v1/peer/handshake", (HandshakeRequest req, NodeIdentity identity) =>
+    /// <summary>
+    /// Loads (or first-launch generates) the node identity, failing startup
+    /// rather than silently re-keying an initialized node (#129 FR-A3).
+    /// </summary>
+    public static WebApplication EnsureNodeIdentity(this WebApplication app)
+    {
+        app.Services.GetRequiredService<NodeIdentity>().EnsureLoadedOrGenerated();
+        return app;
+    }
+
+    /// <summary>Maps the peer handshake (#129 FR-D1) and peer status (FR-D4) endpoints.</summary>
+    public static IEndpointRouteBuilder MapNodeNetworkEndpoints(this IEndpointRouteBuilder app)
+    {
+        app.MapPost("/v1/peer/handshake", (HandshakeRequest? req, NodeIdentity identity) =>
         {
-            if (!AddressUtil.Current.IsValidEthereumAddressHexFormat(req.Dialer))
+            if (req is null || string.IsNullOrEmpty(req.Dialer) || !AddressUtil.Current.IsValidEthereumAddressHexFormat(req.Dialer))
             {
                 return Results.BadRequest(new { error = "dialer must be a 0x-prefixed address" });
             }
 
-            byte[] nonce;
-            try
+            var nonce = TryParseNonce(req.Nonce);
+            if (nonce is null)
             {
-                nonce = req.Nonce.HexToByteArray();
-            }
-            catch (FormatException)
-            {
-                return Results.BadRequest(new { error = "nonce must be hex" });
-            }
-
-            if (nonce.Length != PeerHandshake.NonceLength)
-            {
-                return Results.BadRequest(new { error = $"nonce must be {PeerHandshake.NonceLength} bytes" });
+                return Results.BadRequest(new { error = $"nonce must be {PeerHandshake.NonceLength} bytes of 0x-prefixed hex" });
             }
 
             return Results.Ok(new HandshakeResponse(identity.NodeId, identity.SignHandshake(req.Dialer, nonce)));
@@ -97,6 +113,7 @@ public static class NodeNetworkExtensions
             peers = table.Snapshot().Select(p => new
             {
                 endpoint = p.Endpoint,
+                expectedAddress = p.ExpectedAddress,
                 address = p.Address,
                 status = p.Status.ToString(),
                 reason = p.Reason.ToString(),
@@ -105,5 +122,23 @@ public static class NodeNetworkExtensions
         }));
 
         return app;
+    }
+
+    private static byte[]? TryParseNonce(string? hex)
+    {
+        if (hex is null || !hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ||
+            hex.Length != 2 + PeerHandshake.NonceLength * 2)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Convert.FromHexString(hex.AsSpan(2));
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
     }
 }

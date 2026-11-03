@@ -6,10 +6,12 @@ namespace Symposia.Network.Node;
 
 /// <summary>
 /// Executes cold-start step 1 ("the node generates its keypair and registers
-/// on-chain", per Requirements/BlobStorage/metadata-architecture.md) and keeps
-/// the node's on-chain endpoint in sync with <see cref="NodeNetworkOptions.AdvertisedEndpoint"/>
-/// (issue #129 FR-C3). Runs in the background and retries until it succeeds,
-/// so a node started before its gateway still comes up and serves.
+/// on-chain", per Requirements/BlobStorage/metadata-architecture.md) and, at
+/// startup, brings the node's on-chain endpoint in line with
+/// <see cref="NodeNetworkOptions.AdvertisedEndpoint"/> (issue #129 FR-C3).
+/// Runs in the background and retries until it succeeds, so a node started
+/// before its gateway still comes up and serves. Each retry re-reads the
+/// registry nonce, so a lost response or concurrent update self-heals.
 /// </summary>
 public sealed class NodeRegistrationHostedService(
     NodeIdentity identity,
@@ -34,6 +36,12 @@ public sealed class NodeRegistrationHostedService(
             return;
         }
 
+        if (NodeEndpoint.Normalize(o.AdvertisedEndpoint) is null)
+        {
+            logger.LogError("AdvertisedEndpoint '{Endpoint}' must be an absolute http(s) URL with no path; skipping registration.", o.AdvertisedEndpoint);
+            return;
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -41,7 +49,7 @@ public sealed class NodeRegistrationHostedService(
                 await RegisterOnceAsync(stoppingToken);
                 return;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "On-chain node registration failed; retrying in {Delay}.", RetryDelay);
             }
@@ -54,16 +62,18 @@ public sealed class NodeRegistrationHostedService(
     {
         var o = options.Value;
         var address = identity.NodeId;
+        var endpoint = NodeEndpoint.Normalize(o.AdvertisedEndpoint)
+            ?? throw new InvalidOperationException($"AdvertisedEndpoint '{o.AdvertisedEndpoint}' is not a valid http(s) base URL.");
         var status = await registry.GetStatusAsync(address, ct);
 
-        if (status.Registered && status.Endpoint == o.AdvertisedEndpoint)
+        if (status.Registered && status.Endpoint == endpoint)
         {
             logger.LogInformation("Node {Address} is already registered on-chain at {Endpoint}.", address, status.Endpoint);
             return;
         }
 
-        var signature = identity.SignRegistration(o.AdvertisedEndpoint, status.Nonce, o.NodeRegistryAddress, o.ChainId);
-        await registry.RegisterAsync(address, o.AdvertisedEndpoint, status.Nonce, signature, ct);
-        logger.LogInformation("Registered node {Address} on-chain at {Endpoint}.", address, o.AdvertisedEndpoint);
+        var signature = identity.SignRegistration(endpoint, status.Nonce, o.NodeRegistryAddress, o.ChainId);
+        await registry.RegisterAsync(address, endpoint, status.Nonce, signature, ct);
+        logger.LogInformation("Registered node {Address} on-chain at {Endpoint}.", address, endpoint);
     }
 }

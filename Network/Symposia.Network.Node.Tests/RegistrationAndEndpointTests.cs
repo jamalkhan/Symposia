@@ -61,7 +61,9 @@ public sealed class RegistrationAndEndpointTests : IAsyncLifetime
     [InlineData("not-an-address", "0x" + "00000000000000000000000000000000000000000000000000000000000000AA")]
     [InlineData("0x5FbDB2315678afecb367f032d93F642f64180aa3", "0x1234")]
     [InlineData("0x5FbDB2315678afecb367f032d93F642f64180aa3", "zz")]
-    public async Task Handshake_MalformedRequest_IsBadRequest(string dialer, string nonce)
+    [InlineData("0x5FbDB2315678afecb367f032d93F642f64180aa3", null)]
+    [InlineData(null, "0x" + "00000000000000000000000000000000000000000000000000000000000000AA")]
+    public async Task Handshake_MalformedRequest_IsBadRequest(string? dialer, string? nonce)
     {
         var resp = await _client.PostAsJsonAsync("/v1/peer/handshake", new { dialer, nonce });
 
@@ -71,8 +73,8 @@ public sealed class RegistrationAndEndpointTests : IAsyncLifetime
     [Fact]
     public async Task Peers_ListsNodeAndPeerTable()
     {
-        _app.Services.GetRequiredService<PeerTable>().Upsert(new PeerEntry(
-            "http://b:5180", "0xabc", PeerStatus.Recognized, PeerFailureReason.None, DateTimeOffset.UtcNow));
+        _app.Services.GetRequiredService<PeerTable>().Replace([new PeerEntry(
+            "http://b:5180", "0xabc", "0xabc", PeerStatus.Recognized, PeerFailureReason.None, DateTimeOffset.UtcNow)]);
 
         var body = await _client.GetFromJsonAsync<JsonElement>("/v1/peers");
 
@@ -91,6 +93,7 @@ public sealed class RegistrationAndEndpointTests : IAsyncLifetime
         var service = new NodeRegistrationHostedService(identity, registry, Options.Create(options), NullLogger<NodeRegistrationHostedService>.Instance);
 
         await service.RegisterOnceAsync(CancellationToken.None);
+        options.AdvertisedEndpoint = "HTTP://A:5180/";
         await service.RegisterOnceAsync(CancellationToken.None);
         options.AdvertisedEndpoint = "http://a2:5180";
         await service.RegisterOnceAsync(CancellationToken.None);

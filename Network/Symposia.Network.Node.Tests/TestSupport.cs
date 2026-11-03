@@ -77,4 +77,14 @@ internal sealed class FakeHandshakeNetwork : IPeerHandshakeClient
         Responders.TryGetValue(endpoint, out var respond)
             ? Task.FromResult(respond(request))
             : throw new HttpRequestException("connection refused");
+
+    /// <summary>A peer that accepts the connection and never answers.</summary>
+    public sealed class Hang : IPeerHandshakeClient
+    {
+        public async Task<HandshakeResponse> ChallengeAsync(string endpoint, HandshakeRequest request, CancellationToken ct = default)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            throw new InvalidOperationException();
+        }
+    }
 }

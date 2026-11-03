@@ -16,18 +16,28 @@ public sealed class PeerVerifier(
     IOptions<NodeNetworkOptions> options,
     TimeProvider time)
 {
+    /// <param name="expectedAddress">
+    /// The registry's address for this endpoint. Registry-sourced peers are
+    /// known registered from the listing itself, so only seed peers (null)
+    /// need a separate registration lookup.
+    /// </param>
     public async Task<PeerEntry> VerifyAsync(string endpoint, string? expectedAddress, CancellationToken ct)
     {
         var o = options.Value;
+        if (!NodeEndpoint.IsDialable(endpoint))
+        {
+            return Fail(PeerFailureReason.EndpointNotDialable, expectedAddress);
+        }
+
         var nonce = RandomNumberGenerator.GetBytes(PeerHandshake.NonceLength);
 
-        HandshakeResponse response;
+        HandshakeResponse? response;
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(o.HandshakeTimeoutSeconds));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(o.HandshakeTimeoutSeconds), time);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
             response = await handshakeClient.ChallengeAsync(
-                endpoint, new HandshakeRequest(identity.NodeId, "0x" + Convert.ToHexString(nonce)), timeout.Token);
+                endpoint, new HandshakeRequest(identity.NodeId, "0x" + Convert.ToHexString(nonce)), linked.Token);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -36,6 +46,11 @@ public sealed class PeerVerifier(
         catch (Exception ex) when (ex is HttpRequestException or System.Text.Json.JsonException or UriFormatException)
         {
             return Fail(PeerFailureReason.Unreachable, expectedAddress);
+        }
+
+        if (response is null || string.IsNullOrEmpty(response.Address) || string.IsNullOrEmpty(response.Signature))
+        {
+            return Fail(PeerFailureReason.SignatureInvalid, expectedAddress);
         }
 
         var recovered = PeerHandshake.Recover(o.ChainId, o.NodeRegistryAddress, identity.NodeId, response.Address, nonce, response.Signature);
@@ -49,16 +64,15 @@ public sealed class PeerVerifier(
             return Fail(PeerFailureReason.AddressMismatch, recovered);
         }
 
-        var status = await registry.GetStatusAsync(recovered, ct);
-        if (!status.Registered)
+        if (expectedAddress is null && !(await registry.GetStatusAsync(recovered, ct)).Registered)
         {
             return Fail(PeerFailureReason.NotRegistered, recovered);
         }
 
-        return new PeerEntry(endpoint, recovered, PeerStatus.Recognized, PeerFailureReason.None, time.GetUtcNow());
+        return new PeerEntry(endpoint, expectedAddress, recovered, PeerStatus.Recognized, PeerFailureReason.None, time.GetUtcNow());
 
         PeerEntry Fail(PeerFailureReason reason, string? address) =>
-            new(endpoint, address, PeerStatus.Unrecognized, reason, time.GetUtcNow());
+            new(endpoint, expectedAddress, address, PeerStatus.Unrecognized, reason, time.GetUtcNow());
     }
 
     internal static bool SameAddress(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
