@@ -5,7 +5,7 @@ using Google.Protobuf;
 using Microsoft.Extensions.Options;
 using Symposia.BlobStorage.Domain;
 using Symposia.BlobStorage.Protocol;
-using Symposia.BlobStorage.StorageNode.Identity;
+using Symposia.Network.Node;
 using Symposia.BlobStorage.StorageNode.Storage;
 
 namespace Symposia.BlobStorage.StorageNode.Grpc;

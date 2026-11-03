@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
 
 namespace Symposia.Blockchain.Gateway.Chain;
@@ -35,13 +36,53 @@ public sealed class BootstrapChainClient
     /// cost of a known-redundant relay should check <see cref="IsRegisteredAsync"/>
     /// first.
     /// </summary>
-    public Task<string> RegisterAsync(string node, byte[] signature) =>
-        _web3.Eth.GetContractTransactionHandler<RegisterFunction>()
+    public async Task<string> RegisterAsync(string node, string endpoint, ulong nonce, byte[] signature)
+    {
+        var receipt = await _web3.Eth.GetContractTransactionHandler<RegisterFunction>()
             .SendRequestAndWaitForReceiptAsync(_nodeRegistryAddress, new RegisterFunction
             {
                 Node = node,
+                Endpoint = endpoint,
+                RegistrationNonce = nonce,
                 Signature = signature,
-            }).ContinueWith(t => t.Result.TransactionHash);
+            });
+        return receipt.TransactionHash;
+    }
+
+    public Task<string> GetEndpointAsync(string node) =>
+        _web3.Eth.GetContractQueryHandler<EndpointOfFunction>()
+            .QueryAsync<string>(_nodeRegistryAddress, new EndpointOfFunction { Node = node });
+
+    public async Task<ulong> GetNonceAsync(string node) =>
+        (ulong)await _web3.Eth.GetContractQueryHandler<NonceOfFunction>()
+            .QueryAsync<System.Numerics.BigInteger>(_nodeRegistryAddress, new NonceOfFunction { Node = node });
+
+    /// <summary>
+    /// Enumerates every registered node with its advertised endpoint (issue
+    /// #129 FR-B5) via the contract's count/index views. Every call is pinned
+    /// to one block so a registration landing mid-listing can't produce a
+    /// torn result. O(n) view calls, fine at Phase 0/1 scale per the #129
+    /// Arch pass.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Node, string Endpoint)>> ListNodesAsync()
+    {
+        var block = new BlockParameter(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync());
+
+        var count = (int)await _web3.Eth.GetContractQueryHandler<NodeCountFunction>()
+            .QueryAsync<System.Numerics.BigInteger>(_nodeRegistryAddress, new NodeCountFunction(), block);
+
+        var nodes = new List<(string, string)>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var node = await _web3.Eth.GetContractQueryHandler<NodeAtFunction>()
+                .QueryAsync<string>(_nodeRegistryAddress, new NodeAtFunction { Index = i }, block);
+            var endpoint = await _web3.Eth.GetContractQueryHandler<EndpointOfFunction>()
+                .QueryAsync<string>(_nodeRegistryAddress, new EndpointOfFunction { Node = node }, block);
+            nodes.Add((node, endpoint));
+        }
+
+        return nodes;
+    }
 
     public Task<string> SubmitRootAsync(string node, ulong epoch, byte[] root, byte[] signature) =>
         _web3.Eth.GetContractTransactionHandler<SubmitRootFunction>()

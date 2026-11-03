@@ -8,8 +8,6 @@ public sealed class ComputeNodeOptions
 {
     public string DataRoot { get; set; } = "data/compute";
 
-    public string NodeIdentityKeyPath { get; set; } = "data/compute/node-identity.pem";
-
     /// <summary>Path to the vendored pageserver binary (Neon, Apache 2.0).</summary>
     public string PageserverExecutablePath { get; set; } = "pageserver";
 

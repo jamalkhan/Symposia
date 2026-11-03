@@ -14,6 +14,8 @@ contract EpochRootRegistryTest is Test {
     address nodeA;
     address nodeB;
 
+    string constant ENDPOINT = "http://127.0.0.1:5180";
+
     function setUp() public {
         nodeRegistry = new NodeRegistry();
         rootRegistry = new EpochRootRegistry(nodeRegistry);
@@ -22,7 +24,11 @@ contract EpochRootRegistryTest is Test {
     }
 
     function _registerStructHash(address node) internal pure returns (bytes32) {
-        return keccak256(abi.encode(keccak256("Register(address node)"), node));
+        return keccak256(
+            abi.encode(
+                keccak256("Register(address node,string endpoint,uint256 nonce)"), node, keccak256(bytes(ENDPOINT)), uint256(0)
+            )
+        );
     }
 
     function _domainSeparator(string memory name, address verifyingContract) internal view returns (bytes32) {
@@ -42,7 +48,7 @@ contract EpochRootRegistryTest is Test {
             abi.encodePacked("\x19\x01", _domainSeparator("Symposia.NodeRegistry", address(nodeRegistry)), _registerStructHash(node))
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
-        nodeRegistry.register(node, abi.encodePacked(r, s, v));
+        nodeRegistry.register(node, ENDPOINT, 0, abi.encodePacked(r, s, v));
     }
 
     function _signRoot(uint256 privateKey, address node, uint64 epoch, bytes32 root) internal view returns (bytes memory) {
