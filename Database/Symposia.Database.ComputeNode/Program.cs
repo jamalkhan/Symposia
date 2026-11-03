@@ -2,16 +2,19 @@ using Symposia.Database.ComputeNode;
 using Symposia.Database.ComputeNode.Archival;
 using Symposia.Database.ComputeNode.Benchmark;
 using Symposia.Database.ComputeNode.Databases;
-using Symposia.Database.ComputeNode.Identity;
 using Symposia.Database.ComputeNode.Lifecycle;
 using Symposia.Database.ComputeNode.Proxy;
 using Symposia.Database.ComputeNode.Safekeeping;
 using Symposia.Database.ComputeNode.Supervision;
+using Symposia.Network.Node;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<ComputeNodeOptions>(builder.Configuration.GetSection("ComputeNode"));
-builder.Services.AddSingleton<NodeIdentity>();
+// Shared secp256k1 node identity, on-chain registration, peer discovery, and handshake
+// (issue #129), configured from this node's own "ComputeNode" section. Replaces the earlier
+// P-256 compute-only identity so compute and storage nodes share one ID scheme (#62 FR14).
+builder.Services.AddNodeNetwork(builder.Configuration.GetSection("ComputeNode"));
 builder.Services.AddSingleton<IProcessLauncher, OsProcessLauncher>();
 builder.Services.AddSingleton<ComputeNodeSupervisor>();
 builder.Services.AddSingleton<IHostInfoProbe, OsHostInfoProbe>();
@@ -75,7 +78,7 @@ builder.Services.AddSingleton<IExtensionAllowlist, InMemoryExtensionAllowlist>()
 
 var app = builder.Build();
 
-app.Services.GetRequiredService<NodeIdentity>().EnsureLoadedOrGenerated();
+app.UseNodeNetwork();
 app.Services.GetRequiredService<ComputeNodeSupervisor>().Start();
 
 // Internal plumbing (Postgres <-> pageserver, Postgres <-> safekeeper) stays on loopback/unix
