@@ -73,6 +73,10 @@ public static class Eip712TestSigner
         var signature = key.SignAndCalculateV(digest);
         // Contracts expect the packed r || s || v (v as a single byte, 27/28) layout,
         // matching Solidity's abi.encodePacked(r, s, v) used on the forge-test side.
-        return signature.R.Concat(signature.S).Concat([signature.V[0]]).ToArray();
+        return PadTo32(signature.R).Concat(PadTo32(signature.S)).Concat([signature.V[0]]).ToArray();
     }
+
+    // R/S drop leading zero bytes; left-pad so every signature is 65 bytes.
+    private static byte[] PadTo32(byte[] value) =>
+        value.Length >= 32 ? value[^32..] : new byte[32 - value.Length].Concat(value).ToArray();
 }
