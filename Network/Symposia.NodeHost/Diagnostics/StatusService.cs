@@ -18,8 +18,11 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
     {
         var context = supervisor.Context;
         var network = context.Network;
-        var chain = await CachedAsync("chain", () => ChainAsync(network, ct));
-        var registry = await CachedAsync("registry", () => RegistryAsync(ct));
+        // Keyed by network so a mode switch never shows the previous network's data; loads use
+        // their own timeout rather than the first caller's request token, since the result is shared.
+        var scope = network is null ? "none" : $"{network.GatewayUrl}|{network.ChainId}|{network.NodeRegistryAddress}";
+        var chain = await CachedAsync($"chain|{scope}", load => ChainAsync(network, load));
+        var registry = await CachedAsync($"registry|{scope}", RegistryAsync);
         var peers = supervisor.Network.Services?.GetService<PeerTable>()?.Snapshot() ?? [];
 
         return new
@@ -59,8 +62,15 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
             return null;
         }
 
-        var block = await ChainComponent.RpcAsync(network.RpcUrl, "eth_blockNumber", [], ct);
-        return new { latestBlock = block?.GetString() is { } hex ? Convert.ToUInt64(hex, 16) : (ulong?)null };
+        try
+        {
+            var block = await ChainComponent.RpcAsync(network.RpcUrl, "eth_blockNumber", [], ct);
+            return new { latestBlock = block?.GetString() is { } hex ? Convert.ToUInt64(hex, 16) : (ulong?)null };
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
+        {
+            return new { error = $"Unexpected RPC response: {ex.Message}" };
+        }
     }
 
     private async Task<object?> RegistryAsync(CancellationToken ct)
@@ -89,14 +99,24 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
         }
     }
 
-    private async Task<object?> CachedAsync(string key, Func<Task<object?>> load)
+    private async Task<object?> CachedAsync(string key, Func<CancellationToken, Task<object?>> load)
     {
         if (cache.TryGetValue(key, out object? hit))
         {
             return hit;
         }
 
-        var value = await load();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        object? value;
+        try
+        {
+            value = await load(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            value = new { error = "Timed out" };
+        }
+
         cache.Set(key, value, CacheFor);
         return value;
     }

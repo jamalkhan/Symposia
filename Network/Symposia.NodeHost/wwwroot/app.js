@@ -31,8 +31,11 @@ function show(view) {
 }
 
 async function route() {
-  const session = await (await fetch('/api/session')).json();
+  let session;
+  try { session = await (await fetch('/api/session')).json(); }
+  catch { document.body.dataset.offline = '1'; setTimeout(route, 3000); return; }
   $('#nav').hidden = !session.authenticated;
+  $('#setup-token').hidden = !session.setupTokenRequired;
   if (session.setupRequired) return show('setup');
   if (!session.authenticated) return show('login');
   show('diagnostics');
@@ -43,7 +46,7 @@ $('#setup-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target, err = $('[data-error]', f);
   if (f.password.value !== f.confirm.value) { err.textContent = 'Passwords do not match.'; return; }
-  try { await api('POST', '/setup', { password: f.password.value }); route(); } catch (ex) { err.textContent = ex.message; }
+  try { await api('POST', '/setup', { password: f.password.value, setupToken: f.setupToken.value || null }); route(); } catch (ex) { err.textContent = ex.message; }
 });
 $('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -61,7 +64,8 @@ const table = (head, rows) => `<tr>${head.map((h) => `<th>${esc(h)}</th>`).join(
 
 async function refresh() {
   let s;
-  try { s = await api('GET', '/status'); } catch { return; }
+  try { s = await api('GET', '/status'); $('#stale').hidden = true; }
+  catch (ex) { $('#stale').hidden = false; $('#stale').textContent = `Status unavailable (${ex.message}) — showing last known data.`; return; }
   $('#node-address').textContent = s.node;
   $('#unconfigured').hidden = s.mode !== 'Unconfigured';
   $('#components').innerHTML = table(['Component', 'Status', 'Detail'], s.components.map((c) =>
@@ -69,6 +73,7 @@ async function refresh() {
   const n = s.network || {};
   $('#network').innerHTML = dl([['Mode', s.mode], ['Gateway', n.gatewayUrl], ['Chain ID', n.chainId], ['RPC', n.rpcUrl],
     ['Latest block', s.chain?.latestBlock], ['NodeRegistry', n.nodeRegistryAddress], ['EpochRootRegistry', n.epochRootRegistryAddress], ['Data dir', s.dataDir]]);
+  if (s.chain?.error) $('#network').innerHTML += dl([['Chain', s.chain.error]]);
   const r = s.registry || {};
   $('#registration').innerHTML = r.error ? `<p class="error">${esc(r.error)}</p>` : dl([['Registered', s.registry ? (r.registered ? 'yes' : 'no') : ''],
     ['Endpoint on-chain', r.endpoint], ['Primary endpoint', s.primaryEndpoint], ['Nonce', r.nonce]]);
@@ -90,7 +95,9 @@ const set = (obj, path, value) => {
 };
 
 async function loadSettings() {
-  const data = await api('GET', '/settings');
+  let data;
+  try { data = await api('GET', '/settings'); }
+  catch (ex) { $('#save-result').textContent = `Could not load settings: ${ex.message}`; return; }
   current = data.settings;
   const form = $('#settings-form');
   $('#presets').innerHTML = data.presets.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}${p.deployed ? '' : ' (not yet deployed)'}</option>`).join('');
@@ -102,6 +109,7 @@ async function loadSettings() {
     if (el.type === 'radio') el.checked = el.value === value;
     else if (el.type === 'checkbox') el.checked = !!value;
     else el.value = Array.isArray(value) ? value.join(', ') : (value ?? '');
+    el.dataset.original = el.type === 'checkbox' || el.type === 'radio' ? String(el.checked) : el.value;
     const key = (name === 'Storage.MaxCapacityGb' ? 'Storage.MaxCapacityBytes' : name).toLowerCase();
     el.disabled = locked.has(key);
     if (el.disabled) el.title = 'Set by environment variable';
@@ -131,7 +139,9 @@ $('#settings-form').addEventListener('submit', async (e) => {
     if (el.type === 'radio') { if (el.checked) set(next, el.name, el.value); return; }
     if (el.closest('[data-mode][hidden]')) return;
     let v = el.type === 'checkbox' ? el.checked : el.value;
-    if (el.type === 'number') v = Number(v || 0);
+    // Untouched fields keep their exact current value (no GB rounding, no blank-to-0).
+    if (el.type !== 'checkbox' && el.value === el.dataset.original) return;
+    if (el.type === 'number') { if (v === '') return; v = Number(v); }
     if (el.name === 'Discovery.SeedPeers') v = v.split(',').map((x) => x.trim()).filter(Boolean);
     if (el.name === 'Storage.MaxCapacityGb') { set(next, 'Storage.MaxCapacityBytes', v * GB); return; }
     set(next, el.name, v);

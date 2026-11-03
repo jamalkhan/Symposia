@@ -24,6 +24,7 @@
       <form id="setup-form">
         <label>Password <input type="password" name="password" minlength="8" required autocomplete="new-password"></label>
         <label>Confirm <input type="password" name="confirm" minlength="8" required autocomplete="new-password"></label>
+        <label id="setup-token" hidden>Setup token <small>(printed in the node host's console)</small> <input name="setupToken" autocomplete="off"></label>
         <button type="submit">Set password</button>
         <p class="error" data-error></p>
       </form>
@@ -39,6 +40,7 @@
     </section>
 
     <section id="view-diagnostics" hidden>
+      <div id="stale" class="card notice" hidden></div>
       <div id="unconfigured" class="card notice" hidden>
         This node isn't connected to a network yet. Open <a href="#" data-goto="settings">Settings</a> to choose one.
       </div>

@@ -83,17 +83,27 @@ public sealed partial class ChainComponent : HostComponent
         _anvil = Process.Start(new ProcessStartInfo
         {
             FileName = anvilPath,
-            ArgumentList = { "--port", network.AnvilPort.ToString(), "--chain-id", AnvilChainId.ToString(), "--state", context.Paths.AnvilState, "--silent" },
+            // --state-interval: also save periodically, so a crash or hard kill (or Windows, which
+            // has no SIGINT) loses at most a few seconds of chain state.
+            ArgumentList = { "--port", network.AnvilPort.ToString(), "--chain-id", AnvilChainId.ToString(), "--state", context.Paths.AnvilState, "--state-interval", "5", "--silent" },
+            // Not redirected: undrained pipes would eventually block anvil.
             UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
         }) ?? throw new ComponentFaultException("Failed to start anvil.");
 
         await WaitForRpcAsync(rpcUrl, ct);
 
-        var deployment = SecureFile.Read<Deployment>(context.Paths.Deployment);
-        if (deployment is null || !await HasCodeAsync(rpcUrl, deployment.NodeRegistryAddress, ct))
+        var deployment = ReadDeployment(context);
+        var reusable = deployment is not null && deployment.RpcUrl == rpcUrl && deployment.ChainId == AnvilChainId
+            && await HasCodeAsync(rpcUrl, deployment.NodeRegistryAddress, ct);
+        if (!reusable)
         {
+            if (deployment is not null)
+            {
+                context.Log("Warning",
+                    "The local chain no longer has the previously deployed contracts (chain state was reset or the anvil port changed). " +
+                    "Redeploying: all earlier on-chain registrations on this local network are gone, and joined hosts must restart to pick up the new addresses.");
+            }
+
             deployment = await DeployAsync(network.FoundryBin, rpcUrl, ct);
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
         }
@@ -144,17 +154,42 @@ public sealed partial class ChainComponent : HostComponent
         return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, null);
     }
 
-    /// <summary>Probes a gateway URL; used by the UI to suggest joining a local network.</summary>
+    private static readonly HttpClient ProbeHttp = new() { Timeout = TimeSpan.FromSeconds(1) };
+    private static (DateTimeOffset At, string Url, bool Found) _lastProbe;
+
+    /// <summary>Quickly probes a gateway URL (1s timeout, cached 15s); used by the UI to suggest joining a local network.</summary>
     internal static async Task<bool> GatewayRespondsAsync(string gatewayUrl, CancellationToken ct)
+    {
+        var last = _lastProbe;
+        if (last.Url == gatewayUrl && DateTimeOffset.UtcNow - last.At < TimeSpan.FromSeconds(15))
+        {
+            return last.Found;
+        }
+
+        bool found;
+        try
+        {
+            using var response = await ProbeHttp.GetAsync(new Uri(new Uri(gatewayUrl), "/v1/network"), ct);
+            found = response.IsSuccessStatusCode;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
+        {
+            found = false;
+        }
+
+        _lastProbe = (DateTimeOffset.UtcNow, gatewayUrl, found);
+        return found;
+    }
+
+    private static Deployment? ReadDeployment(HostContext context)
     {
         try
         {
-            await JoinAsync(gatewayUrl, ct);
-            return true;
+            return SecureFile.Read<Deployment>(context.Paths.Deployment);
         }
-        catch (ComponentFaultException)
+        catch (CorruptFileException)
         {
-            return false;
+            return null; // Recoverable: just redeploy.
         }
     }
 
@@ -176,14 +211,23 @@ public sealed partial class ChainComponent : HostComponent
 
         var stdout = forge.StandardOutput.ReadToEndAsync(ct);
         var stderr = forge.StandardError.ReadToEndAsync(ct);
-        await forge.WaitForExitAsync(ct);
+        try
+        {
+            await forge.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Don't leave a half-done deploy running against the chain.
+            forge.Kill(entireProcessTree: true);
+            throw;
+        }
         if (forge.ExitCode != 0)
         {
             throw new ComponentFaultException($"Contract deployment failed: {(await stderr).Trim()} {(await stdout).Trim()}".Trim());
         }
 
         var output = await stdout;
-        return new Deployment(Extract(output, "NodeRegistry"), Extract(output, "EpochRootRegistry"));
+        return new Deployment(Extract(output, "NodeRegistry"), Extract(output, "EpochRootRegistry"), rpcUrl, AnvilChainId);
     }
 
     private static string Extract(string output, string label)
@@ -254,7 +298,7 @@ public sealed partial class ChainComponent : HostComponent
             var body = await response.Content.ReadFromJsonAsync<JsonElement>(ct);
             return body.TryGetProperty("result", out var result) ? result : null;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException && !ct.IsCancellationRequested)
         {
             return null;
         }
@@ -265,10 +309,11 @@ public sealed partial class ChainComponent : HostComponent
     private static async Task<bool> HasCodeAsync(string rpcUrl, string address, CancellationToken ct)
     {
         var code = await RpcAsync(rpcUrl, "eth_getCode", [address, "latest"], ct);
-        return code?.GetString() is { Length: > 2 };
+        return code is { ValueKind: JsonValueKind.String } && code.Value.GetString() is { Length: > 2 };
     }
 
-    private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress);
+    /// <summary>Deployed addresses, tagged with the chain they were deployed to (checked on load).</summary>
+    private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId);
 
     private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress);
 }

@@ -52,12 +52,18 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         }
     }
 
-    /// <summary>Applies new effective settings, restarting only affected components.</summary>
-    public async Task ApplyAsync(HostSettings previous, CancellationToken ct)
+    /// <summary>
+    /// Saves new settings and applies them, restarting only affected components.
+    /// Read-previous, save, and apply happen under one lock so concurrent saves
+    /// can't skip a restart.
+    /// </summary>
+    public async Task SaveAndApplyAsync(HostSettings updated, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
         try
         {
+            var previous = settings.Effective;
+            settings.Save(updated);
             var next = settings.Effective;
             var affected = Affected(previous, next);
             context.Settings = next;
@@ -100,9 +106,9 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         var affected = new List<HostComponent>();
         var storageChanged = Changed(previous.Storage, next.Storage);
         var computeChanged = Changed(previous.Compute, next.Compute);
-        if (storageChanged || computeChanged || Changed(previous.Discovery, next.Discovery))
+        if (HostContext.PrimaryEndpointFor(previous) != HostContext.PrimaryEndpointFor(next) || Changed(previous.Discovery, next.Discovery))
         {
-            // The primary endpoint, or discovery settings, may have moved.
+            // Only these change what the network component registers or how it discovers.
             affected.Add(Network);
         }
 

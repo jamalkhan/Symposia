@@ -26,7 +26,7 @@ public sealed class NodeRegistrationHostedService(
         var o = options.Value;
         if (!o.EnableRegistration)
         {
-            logger.LogDebug("On-chain registration disabled for this host.");
+            logger.LogInformation("On-chain registration disabled for this host (EnableRegistration=false).");
             return;
         }
 

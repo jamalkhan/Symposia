@@ -20,6 +20,11 @@ public abstract class WebAppComponent : HostComponent
 
     protected virtual bool BindsOwnPort => false;
 
+    /// <summary>Hook to add middleware to the built app before it starts (runs ahead of its endpoints).</summary>
+    protected virtual void Secure(WebApplication app)
+    {
+    }
+
     protected override string? SkipReason(HostContext context) =>
         context.Network is null ? "Waiting for the network (see chain component)" : null;
 
@@ -27,6 +32,10 @@ public abstract class WebAppComponent : HostComponent
     {
         var dir = context.Paths.Component(Name);
         Directory.CreateDirectory(dir);
+        if (Name is "storage" or "compute")
+        {
+            Directory.CreateDirectory(context.RoleDataDir(Name));
+        }
         var options = new WebApplicationOptions { ContentRootPath = dir, EnvironmentName = "Production" };
 
         _app = Build(options, builder =>
@@ -41,6 +50,7 @@ public abstract class WebAppComponent : HostComponent
             }
         }, context);
 
+        Secure(_app);
         await _app.StartAsync(ct);
     }
 

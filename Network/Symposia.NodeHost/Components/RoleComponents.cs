@@ -37,7 +37,7 @@ public sealed class StorageRoleComponent : WebAppComponent
     protected override IDictionary<string, string?> Configuration(HostContext context)
     {
         var storage = context.Settings.Storage;
-        var dir = context.Paths.Component(Name);
+        var dir = context.RoleDataDir(Name);
         var config = new Dictionary<string, string?>
         {
             ["StorageNode:ListenPort"] = storage.Port.ToString(),
@@ -73,6 +73,25 @@ public sealed class ComputeRoleComponent : WebAppComponent
 
     protected override int Port(HostContext context) => context.Settings.Compute.Port;
 
+    /// <summary>
+    /// The compute control API (placement, deletion, internal proxy/safekeeper routes) is
+    /// loopback/orchestration-only and unauthenticated (see ComputeNodeApp), but the
+    /// listener must be reachable for peer handshakes. So off-box callers get only the
+    /// handshake endpoint.
+    /// </summary>
+    protected override void Secure(WebApplication app) =>
+        app.Use(async (http, next) =>
+        {
+            var remote = http.Connection.RemoteIpAddress;
+            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && http.Request.Path != "/v1/peer/handshake")
+            {
+                http.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
+            await next();
+        });
+
     protected override IDictionary<string, string?> Configuration(HostContext context)
     {
         var compute = context.Settings.Compute;
@@ -82,7 +101,7 @@ public sealed class ComputeRoleComponent : WebAppComponent
 
         var config = new Dictionary<string, string?>
         {
-            ["ComputeNode:DataRoot"] = context.Paths.Component(Name),
+            ["ComputeNode:DataRoot"] = context.RoleDataDir(Name),
             ["ComputeNode:PageserverExecutablePath"] = pageserver,
             ["ComputeNode:SafekeeperExecutablePath"] = safekeeper,
             ["ComputeNode:PostgresExecutablePath"] = postgres,

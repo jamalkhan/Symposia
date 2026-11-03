@@ -47,7 +47,14 @@ public abstract class HostComponent
                 await OnStartAsync(context, ct);
                 Set(ComponentStatus.Running, null);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Host shutting down mid-start: release anything half-started (e.g. anvil).
+                await SafeStopAsync();
+                Set(ComponentStatus.Stopped, "Start cancelled");
+                throw;
+            }
+            catch (Exception ex)
             {
                 Set(ComponentStatus.Faulted, ex is ComponentFaultException ? ex.Message : $"{ex.GetType().Name}: {ex.Message}");
                 await SafeStopAsync();

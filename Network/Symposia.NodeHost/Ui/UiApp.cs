@@ -13,7 +13,7 @@ using Symposia.NodeHost.Settings;
 
 namespace Symposia.NodeHost.Ui;
 
-public sealed record PasswordRequest(string? Password);
+public sealed record PasswordRequest(string? Password, string? SetupToken = null);
 
 public sealed record SettingsUpdate(HostSettings? Settings, string? RelayerKey);
 
@@ -27,7 +27,12 @@ public static class UiApp
     public const int MinPasswordLength = 8;
     private const string LoginPolicy = "login";
 
-    public static WebApplication Create(int port, ComponentSupervisor supervisor, SettingsStore settings, SecretStore secrets, string nodeAddress)
+    /// <param name="setupToken">
+    /// One-time token printed to the host console on first run. Setting the
+    /// initial admin password needs it unless the request comes from this
+    /// machine, so nobody else on the network can claim a fresh node.
+    /// </param>
+    public static WebApplication Create(int port, ComponentSupervisor supervisor, SettingsStore settings, SecretStore secrets, string nodeAddress, string setupToken)
     {
         var context = supervisor.Context;
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -97,17 +102,22 @@ public static class UiApp
 
         var api = app.MapGroup("/api");
 
+        // Long-running applies use the host's lifetime, not the request: closing the
+        // browser tab mid-apply must not abandon components half-started.
+        var hostLifetime = app.Lifetime.ApplicationStopping;
+
         api.MapGet("/session", (HttpContext http) => Results.Ok(new
         {
             setupRequired = !secrets.HasPassword,
+            setupTokenRequired = !secrets.HasPassword && !IsLocal(http),
             authenticated = http.User.Identity?.IsAuthenticated == true,
         })).AllowAnonymous();
 
         api.MapPost("/setup", async (PasswordRequest req, HttpContext http) =>
         {
-            if (secrets.HasPassword)
+            if (!IsLocal(http) && !CryptographicEquals(req.SetupToken, setupToken))
             {
-                return Results.Conflict(new { error = "An admin password is already set." });
+                return Results.Json(new { error = "Setup from another machine needs the setup token printed in the node host's console." }, statusCode: StatusCodes.Status403Forbidden);
             }
 
             if (req.Password is null || req.Password.Length < MinPasswordLength)
@@ -115,7 +125,11 @@ public static class UiApp
                 return Results.BadRequest(new { error = $"Password must be at least {MinPasswordLength} characters." });
             }
 
-            secrets.SetPassword(req.Password);
+            if (!secrets.TrySetInitialPassword(req.Password))
+            {
+                return Results.Conflict(new { error = "An admin password is already set." });
+            }
+
             await SignInAsync(http);
             return Results.Ok();
         }).AllowAnonymous().RequireRateLimiting(LoginPolicy);
@@ -147,7 +161,7 @@ public static class UiApp
                 && await ChainComponent.GatewayRespondsAsync("http://127.0.0.1:8080", ct),
         }));
 
-        api.MapPut("/settings", async (SettingsUpdate update, CancellationToken ct) =>
+        api.MapPut("/settings", async (SettingsUpdate update) =>
         {
             if (update.Settings is null)
             {
@@ -165,19 +179,17 @@ public static class UiApp
                 secrets.SetRelayerKey(update.RelayerKey);
             }
 
-            var previous = settings.Effective;
-            settings.Save(update.Settings);
-            await supervisor.ApplyAsync(previous, ct);
+            await supervisor.SaveAndApplyAsync(update.Settings, hostLifetime);
             return Results.Ok();
         });
 
         api.MapGet("/status", async (StatusService status, CancellationToken ct) => Results.Ok(await status.SnapshotAsync(ct)));
 
-        api.MapPost("/components/{name}/restart", async (string name, CancellationToken ct) =>
+        api.MapPost("/components/{name}/restart", async (string name) =>
         {
             try
             {
-                await supervisor.RestartAsync(name, ct);
+                await supervisor.RestartAsync(name, hostLifetime);
                 return Results.Ok();
             }
             catch (ArgumentException ex)
@@ -240,6 +252,13 @@ public static class UiApp
             errors.Add($"{role} advertised endpoint must be an http(s) base URL like http://10.0.0.5:5180.");
         }
     }
+
+    private static bool IsLocal(HttpContext http) =>
+        http.Connection.RemoteIpAddress is { } ip && System.Net.IPAddress.IsLoopback(ip);
+
+    private static bool CryptographicEquals(string? a, string b) =>
+        a is not null && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(a), System.Text.Encoding.UTF8.GetBytes(b));
 
     private static Task SignInAsync(HttpContext http) =>
         http.SignInAsync(

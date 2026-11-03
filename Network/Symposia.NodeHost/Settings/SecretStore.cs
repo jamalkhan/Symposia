@@ -27,6 +27,23 @@ public sealed class SecretStore(HostPaths paths)
 
     public void SetPassword(string password) => Update(s => s.PasswordHash = Hasher.HashPassword(User, password));
 
+    /// <summary>Sets the admin password only if none exists yet, atomically; false if one already does.</summary>
+    public bool TrySetInitialPassword(string password)
+    {
+        lock (_gate)
+        {
+            var secrets = SecureFile.Read<Secrets>(paths.Secrets) ?? new Secrets();
+            if (secrets.PasswordHash is not null)
+            {
+                return false;
+            }
+
+            secrets.PasswordHash = Hasher.HashPassword(User, password);
+            SecureFile.Write(paths.Secrets, secrets, ownerOnly: true);
+            return true;
+        }
+    }
+
     public bool VerifyPassword(string password)
     {
         var hash = Load().PasswordHash;

@@ -87,10 +87,13 @@ public static class ComputeNodeApp
         // Attachment Swap primitive.
         builder.Services.AddSingleton<IExtensionAllowlist, InMemoryExtensionAllowlist>();
 
+        // Starting the Neon processes is part of host start, not Create(), so a failure surfaces
+        // from StartAsync and the built app (and anything it started) is disposed normally.
+        builder.Services.AddHostedService<ComputeNodeSupervisorStarter>();
+
         var app = builder.Build();
 
         app.UseNodeNetwork();
-        app.Services.GetRequiredService<ComputeNodeSupervisor>().Start();
 
         // Internal plumbing (Postgres <-> pageserver, Postgres <-> safekeeper) stays on loopback/unix
         // sockets and never traverses this listener. This HTTP surface is the local, node-scoped

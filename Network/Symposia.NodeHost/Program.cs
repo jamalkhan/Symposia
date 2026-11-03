@@ -28,12 +28,25 @@ catch (NodeIdentityException ex)
 }
 
 var logs = new LogBuffer();
-var settings = new SettingsStore(paths, cli.PortOffset);
+SettingsStore settings;
 var secrets = new SecretStore(paths);
+try
+{
+    settings = new SettingsStore(paths, cli.PortOffset);
+    _ = secrets.HasPassword;
+}
+catch (CorruptFileException ex)
+{
+    // Never fall back to defaults: an empty secrets file would re-open first-run setup to anyone.
+    Console.Error.WriteLine(ex.Message);
+    return 1;
+}
+
 var supervisor = new ComponentSupervisor(new HostContext(paths, secrets, logs), settings);
 var uiPort = cli.UiPort ?? 5170 + cli.PortOffset;
 
-var ui = UiApp.Create(uiPort, supervisor, settings, secrets, identity.NodeId);
+var setupToken = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(6)).ToLowerInvariant();
+var ui = UiApp.Create(uiPort, supervisor, settings, secrets, identity.NodeId, setupToken);
 await ui.StartAsync();
 
 Console.WriteLine($"""
@@ -41,7 +54,7 @@ Console.WriteLine($"""
   Symposia Node Host
     node address : {identity.NodeId}
     data dir     : {paths.DataDir}
-    config UI    : http://localhost:{uiPort}{(secrets.HasPassword ? "" : "   (first run: open it to set an admin password)")}
+    config UI    : http://localhost:{uiPort}{(secrets.HasPassword ? "" : $"   (first run: open it to set an admin password)\n    setup token  : {setupToken}   (only needed when setting it up from another machine)")}
 
 """);
 

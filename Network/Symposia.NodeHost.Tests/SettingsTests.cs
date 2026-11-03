@@ -138,6 +138,14 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(supervisor.All, supervisor.Affected(before, network));
 
         Assert.Empty(supervisor.Affected(before, HostSettings.Defaults(0)));
+
+        // Review (Carl 5): a change that doesn't move the primary endpoint leaves the network alone.
+        var capacity = HostSettings.Defaults(0);
+        capacity.Storage.Enabled = true;
+        var bigger = HostSettings.Defaults(0);
+        bigger.Storage.Enabled = true;
+        bigger.Storage.MaxCapacityBytes *= 2;
+        Assert.Equal([supervisor.Storage], supervisor.Affected(capacity, bigger));
     }
 
     // FR-D3: the registered endpoint is storage's when enabled, else compute's.
@@ -153,6 +161,31 @@ public sealed class SettingsTests : IDisposable
         context.Settings.Storage.Enabled = true;
         context.Settings.Storage.AdvertisedEndpoint = "http://10.0.0.5:5180";
         Assert.Equal("http://10.0.0.5:5180", context.PrimaryEndpoint);
+    }
+
+    // Review (Frank 3): role data is scoped to the network it belongs to.
+    [Fact]
+    public void RoleDataDir_IsScopedToNetwork()
+    {
+        var context = new HostContext(Paths, new SecretStore(Paths), new LogBuffer())
+        {
+            Network = new NetworkInfo("http://gw", 31337, "0x5FbDB2315678afecb367f032d93F642f64180aa3", "0xe7f1", null),
+        };
+        var local = context.RoleDataDir("storage");
+
+        context.Network = context.Network with { ChainId = 84532 };
+
+        Assert.EndsWith("31337-5fbdb231", local);
+        Assert.NotEqual(local, context.RoleDataDir("storage"));
+    }
+
+    // Review (Lenny 8): a corrupt settings file is reported, never silently reset.
+    [Fact]
+    public void CorruptSettings_Throws()
+    {
+        File.WriteAllText(Paths.Settings, "{ not json");
+
+        Assert.Throws<CorruptFileException>(() => new SettingsStore(Paths, 0, Env()));
     }
 
     public void Dispose() => _dir.Dispose();

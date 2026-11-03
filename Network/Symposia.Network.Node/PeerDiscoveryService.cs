@@ -24,7 +24,7 @@ public sealed class PeerDiscoveryService(
         var o = options.Value;
         if (!o.EnableDiscovery)
         {
-            logger.LogDebug("Peer discovery disabled for this host.");
+            logger.LogInformation("Peer discovery disabled for this host (EnableDiscovery=false).");
             return;
         }
 

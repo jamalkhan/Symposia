@@ -13,6 +13,7 @@ namespace Symposia.NodeHost.Tests;
 /// <summary>Config UI authentication and secret handling over real HTTP (issue #133 FR-E2; QA TC-1, TC-2, TC-13).</summary>
 public sealed class UiAuthTests : IAsyncLifetime
 {
+    private const string SetupToken = "abc123";
     private readonly TempDir _dir = new();
     private WebApplication _app = null!;
     private SecretStore _secrets = null!;
@@ -26,7 +27,7 @@ public sealed class UiAuthTests : IAsyncLifetime
         var supervisor = new ComponentSupervisor(new HostContext(paths, _secrets, new LogBuffer()), settings);
         var port = FreePort();
         _baseUrl = $"http://127.0.0.1:{port}";
-        _app = UiApp.Create(port, supervisor, settings, _secrets, "0x5FbDB2315678afecb367f032d93F642f64180aa3");
+        _app = UiApp.Create(port, supervisor, settings, _secrets, "0x5FbDB2315678afecb367f032d93F642f64180aa3", SetupToken);
         await _app.StartAsync();
     }
 
@@ -57,6 +58,23 @@ public sealed class UiAuthTests : IAsyncLifetime
         var again = await Client().PostAsJsonAsync("/api/setup", new { password = "attacker pass" });
         Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
         Assert.True(_secrets.VerifyPassword("correct horse"));
+    }
+
+    // Review (Lenny 1): two racing setups can't both win.
+    [Fact]
+    public void InitialPassword_CanOnlyBeSetOnce()
+    {
+        Assert.True(_secrets.TrySetInitialPassword("first password"));
+        Assert.False(_secrets.TrySetInitialPassword("second password"));
+        Assert.True(_secrets.VerifyPassword("first password"));
+    }
+
+    [Fact]
+    public async Task Session_FromLoopback_DoesNotNeedSetupToken()
+    {
+        var session = await Client().GetFromJsonAsync<JsonElement>("/api/session");
+
+        Assert.False(session.GetProperty("setupTokenRequired").GetBoolean());
     }
 
     [Fact]

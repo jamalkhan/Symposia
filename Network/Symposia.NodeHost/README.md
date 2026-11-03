@@ -15,7 +15,7 @@ Settings persist, so a restart comes back exactly as it was.
 dotnet run --project Network/Symposia.NodeHost
 ```
 
-1. Open the config UI URL it prints (default <http://localhost:5170>) and set an admin password.
+1. Open the config UI URL it prints (default <http://localhost:5170>) and set an admin password. If you're setting it up from another machine, you also need the **setup token** printed in the console. This stops anyone else on the network from claiming a fresh node.
 2. Under **Settings → Network**, pick one of:
    - **Local dev network**: starts a local chain (anvil) and gateway on this machine and deploys the contracts. Requires [Foundry](https://book.getfoundry.sh/getting-started/installation) and a repo checkout.
    - **Join a network**: enter another network's gateway URL. This is all you need for a testnet, or for a second host on your machine.
@@ -61,4 +61,4 @@ Any setting can be fixed with an environment variable, for example `SYMPOSIA__St
 | `settings.json` | Everything set in the UI |
 | `secrets.json` (0600) | Admin password hash and relayer key |
 | `anvil-state.json`, `network.json` | Local dev chain state and deployed contract addresses |
-| `storage/`, `compute/` | Role data |
+| `storage/`, `compute/` | Role data, kept in a separate folder per network (`<chainId>-<registry>`) |
