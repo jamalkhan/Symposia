@@ -149,6 +149,19 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         {
             foreach (var (url, nodeId) in grpcUrlToNodeId)
             {
+                // Same node, new address (DHCP change, LAN endpoint set later): move its replicas to the
+                // new URL instead of leaving a dead entry that still "holds" them (issue #135 review).
+                var moved = _nodes.FirstOrDefault(n => string.Equals(n.ExpectedNodeId, nodeId, StringComparison.OrdinalIgnoreCase)
+                    && !n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+                if (moved is not null)
+                {
+                    var renamed = _store.RenameReplicaUrl(moved.Url, url);
+                    _logger.LogInformation("Storage node {Node} moved from {Old} to {New}; re-pointed {Count} object(s).",
+                        nodeId, moved.Url, url, renamed);
+                    _nodes.Remove(moved);
+                    moved.Dispose();
+                }
+
                 var existing = _nodes.FirstOrDefault(n => n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
                 if (existing is not null)
                 {
@@ -193,7 +206,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
             {
                 _logger.LogWarning("Node at {Url} answered as {Actual} but the registry lists {Expected}; not using it.",
                     node.Url, response.NodeId, expected);
-                node.LastProbe = null;
+                node.MarkUnhealthy();
                 return;
             }
 

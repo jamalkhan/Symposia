@@ -38,7 +38,7 @@ public sealed class RegistryReplicationTests : IDisposable
         Assert.Equal(["one"], store.ListUnderReplicated(2, 100).Select(r => r.Key));
         Assert.Equal(1, store.CountUnderReplicated(2));
 
-        store.UpdateNodeIds("b", "one", ["http://a", "http://b"]);
+        store.AddReplicaForCid("cid-bone", "http://b");
         Assert.Empty(store.ListUnderReplicated(2, 100));
     }
 
@@ -66,7 +66,9 @@ public sealed class RegistryReplicationTests : IDisposable
         store.Initialize();
         store.Initialize(); // idempotent
 
-        Assert.Equal(["none", "one"], store.ListUnderReplicated(2, 100).Select(r => r.Key).Order());
+        // "none" has no copies left: not repairable, so not listed for repair, but still counted.
+        Assert.Equal(["one"], store.ListUnderReplicated(2, 100).Select(r => r.Key));
+        Assert.Equal(2, store.CountUnderReplicated(2));
     }
 
     [Fact]
@@ -80,7 +82,7 @@ public sealed class RegistryReplicationTests : IDisposable
         }
 
         var seen = new List<string>();
-        var cursor = "";
+        (string Bucket, string Key)? cursor = null;
         while (true)
         {
             var page = store.ListAllObjectsPaged(cursor, 2);
@@ -90,7 +92,7 @@ public sealed class RegistryReplicationTests : IDisposable
                 break;
             }
 
-            cursor = $"{page[^1].Bucket}/{page[^1].Key}";
+            cursor = (page[^1].Bucket, page[^1].Key);
         }
 
         Assert.Equal(["a/x", "a/y/z", "ab/a", "b/a", "b/b"], seen);
@@ -98,7 +100,7 @@ public sealed class RegistryReplicationTests : IDisposable
 
     // QA query-plan scenario: the replication paths must seek an index, not scan the table.
     [Theory]
-    [InlineData("SELECT bucket FROM objects WHERE replica_count < 2 ORDER BY replica_count LIMIT 500", "idx_objects_replica_count")]
+    [InlineData("SELECT bucket FROM objects WHERE replica_count BETWEEN 1 AND 1 AND (replica_count, bucket, key) > (1, 'a', 'b') ORDER BY replica_count, bucket, key LIMIT 500", "idx_objects_replicas")]
     [InlineData("SELECT bucket FROM objects WHERE (bucket, key) > ('a', 'b') ORDER BY bucket, key LIMIT 200", "INDEX")]
     public void ReplicationQueries_UseAnIndex(string sql, string expectedIndex)
     {

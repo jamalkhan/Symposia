@@ -110,27 +110,44 @@ public sealed class ReplicationMonitor : BackgroundService
     private void SweepUnderReplicated()
     {
         var minCopies = _options.Value.MinCopiesPerObject;
-        var shortObjects = _store.ListUnderReplicated(minCopies, UnderReplicatedBatch);
-        if (shortObjects.Count == 0)
+        if (_nodes.All.Count(n => n.IsHealthy) <= 1)
+        {
+            _logger.LogDebug("ReplicationMonitor: no second healthy node to copy to yet; skipping sweep.");
+            return;
+        }
+
+        // Page through every repairable object in (copies, bucket, key) order; the queue drops CIDs
+        // already waiting, so repeated sweeps don't pile up duplicates.
+        int found = 0, queued = 0;
+        (int Count, string Bucket, string Key)? cursor = null;
+        while (true)
+        {
+            var page = _store.ListUnderReplicated(minCopies, UnderReplicatedBatch, cursor);
+            foreach (var record in page)
+            {
+                found++;
+                if (_repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.UnderReplicated)))
+                {
+                    queued++;
+                }
+            }
+
+            if (page.Count < UnderReplicatedBatch)
+            {
+                break;
+            }
+
+            cursor = (page[^1].NodeIds.Count, page[^1].Bucket, page[^1].Key);
+        }
+
+        if (found == 0)
         {
             _logger.LogDebug("ReplicationMonitor: no under-replicated objects.");
             return;
         }
 
-        if (_nodes.Healthy.Count <= 1)
-        {
-            _logger.LogDebug("ReplicationMonitor: {Count} under-replicated object(s), but no second healthy node to copy to yet.",
-                shortObjects.Count);
-            return;
-        }
-
-        foreach (var record in shortObjects)
-        {
-            _repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.UnderReplicated));
-        }
-
-        _logger.LogInformation("ReplicationMonitor: queued repair for {Count} under-replicated object(s) (need {Need} copies).",
-            shortObjects.Count, minCopies);
+        _logger.LogInformation("ReplicationMonitor: {Found} under-replicated object(s), {Queued} newly queued for repair (need {Need} copies).",
+            found, queued, minCopies);
     }
 
     private async Task ScanAsync(CancellationToken ct)
@@ -138,10 +155,16 @@ public sealed class ReplicationMonitor : BackgroundService
         var minCopies = _options.Value.MinCopiesPerObject;
         var knownUrls = _nodes.All.Select(n => n.Url).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // Pruning by absence is only safe when the node list is the operator's static config.
+        // Registry-sourced nodes live in memory and appear only once a sync reaches them, so after a
+        // restart (or with the chain gateway down) a node that holds copies may simply not be loaded
+        // yet; pruning then would erase the only record of its replicas (issue #135 review).
+        var prune = _options.Value.NodeSource == NodeSourceKind.Static;
+
         _logger.LogInformation("ReplicationMonitor: starting compliance scan.");
         int scanned = 0, repairQueued = 0;
 
-        var cursor = "";
+        (string Bucket, string Key)? cursor = null;
         while (true)
         {
             var page = _store.ListAllObjectsPaged(cursor, PageSize);
@@ -151,17 +174,17 @@ public sealed class ReplicationMonitor : BackgroundService
             {
                 ct.ThrowIfCancellationRequested();
 
-                // a. Prune node_ids for nodes that have left the registry.
-                var knownReplicas = record.NodeIds
-                    .Where(url => knownUrls.Contains(url))
-                    .ToList();
+                // a. Prune node_ids for nodes that have left the (static) node list.
+                var knownReplicas = prune
+                    ? record.NodeIds.Where(url => knownUrls.Contains(url)).ToList()
+                    : [.. record.NodeIds];
 
                 if (knownReplicas.Count != record.NodeIds.Count)
                 {
                     _logger.LogDebug(
                         "Pruned {Count} stale node_ids from {Bucket}/{Key}.",
                         record.NodeIds.Count - knownReplicas.Count, record.Bucket, record.Key);
-                    _store.UpdateNodeIds(record.Bucket, record.Key, knownReplicas);
+                    _store.UpdateNodeIds(record.Bucket, record.Key, record.Cid, knownReplicas);
                 }
 
                 // b+c. IntegrityChallenge each replica; remove any that fail.
@@ -207,7 +230,7 @@ public sealed class ReplicationMonitor : BackgroundService
             }
 
             if (page.Count < PageSize) break;
-            cursor = $"{page[^1].Bucket}/{page[^1].Key}";
+            cursor = (page[^1].Bucket, page[^1].Key);
 
             // Yield between pages to avoid saturating I/O during live traffic.
             await Task.Yield();

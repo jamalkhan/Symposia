@@ -59,6 +59,26 @@ public sealed class RegistryNodeSync(
         logger.LogDebug("Registry sync: {Storage} storage node(s) of {Count} registered.", found.Count, members.Count);
     }
 
+    // The services document was fetched from this endpoint, so loopback here means the node is local.
+    private static bool IsLocal(string endpoint) => Uri.TryCreate(endpoint, UriKind.Absolute, out var u) && u.IsLoopback;
+
+    /// <summary>Loads the node list before the gateway starts serving, so the first requests after a restart aren't 503s.</summary>
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        using var first = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        first.CancelAfter(TimeSpan.FromSeconds(5));
+        try
+        {
+            await SyncOnceAsync(first.Token);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Initial registry sync did not finish ({Error}); continuing in the background.", ex.Message);
+        }
+
+        await base.StartAsync(cancellationToken);
+    }
+
     private async Task<string?> StorageGrpcUrlAsync(RegisteredNode member, CancellationToken ct)
     {
         var endpoint = NodeEndpoint.Normalize(member.Endpoint);
@@ -82,6 +102,14 @@ public sealed class RegistryNodeSync(
             {
                 logger.LogDebug("Skipping node {Node}: it offers no storage service.", member.Node);
                 return null;
+            }
+
+            // TC-60: a node on another machine advertising loopback is unreachable from here; the
+            // operator needs to set its advertised endpoint to a LAN address.
+            if (Uri.TryCreate(grpc, UriKind.Absolute, out var grpcUri) && grpcUri.IsLoopback && !IsLocal(endpoint))
+            {
+                logger.LogWarning("Node {Node} advertises loopback storage address {Grpc}; if it runs on another machine, set its advertised endpoint to a LAN address.",
+                    member.Node, grpc);
             }
 
             return grpc;

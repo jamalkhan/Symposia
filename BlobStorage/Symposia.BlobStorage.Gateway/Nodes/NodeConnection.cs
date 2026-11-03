@@ -65,5 +65,12 @@ public sealed class NodeConnection : IDisposable
     /// <summary>Time when the node was last observed to be unhealthy (or never). Used for grace-period checks.</summary>
     public DateTimeOffset LastUnhealthyAt { get; set; } = DateTimeOffset.MinValue;
 
+    /// <summary>Treat the node as down until its next successful probe (e.g. after a failed read).</summary>
+    public void MarkUnhealthy()
+    {
+        LastProbe = null;
+        LastProbeTime = DateTimeOffset.MinValue;
+    }
+
     public void Dispose() => _channel.Dispose();
 }

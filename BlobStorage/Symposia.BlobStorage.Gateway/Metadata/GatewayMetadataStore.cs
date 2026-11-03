@@ -68,23 +68,37 @@ public sealed class GatewayMetadataStore
         // replica_count mirrors the number of entries in node_ids so "which objects have too few
         // copies" is an index lookup instead of a full scan (issue #135). Added in place for
         // existing databases, then backfilled once from node_ids (comma separated).
-        var hasReplicaCount = false;
-        using (var pragma = Query(conn, "SELECT 1 FROM pragma_table_info('objects') WHERE name = 'replica_count'"))
+        // Check, ALTER and backfill run in one IMMEDIATE transaction: two processes starting together
+        // can't both add the column, and a crash can't leave the column added but never backfilled.
+        using (var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false))
         {
-            hasReplicaCount = pragma.ExecuteScalar() is not null;
+            bool hasReplicaCount;
+            using (var pragma = Query(conn, "SELECT 1 FROM pragma_table_info('objects') WHERE name = 'replica_count'"))
+            {
+                pragma.Transaction = tx;
+                hasReplicaCount = pragma.ExecuteScalar() is not null;
+            }
+
+            if (!hasReplicaCount)
+            {
+                using var migrate = Query(conn, """
+                    ALTER TABLE objects ADD COLUMN replica_count INTEGER NOT NULL DEFAULT 0;
+                    UPDATE objects SET replica_count =
+                        CASE WHEN node_ids = '' THEN 0
+                             ELSE length(node_ids) - length(replace(node_ids, ',', '')) + 1 END;
+                    """);
+                migrate.Transaction = tx;
+                migrate.ExecuteNonQuery();
+            }
+
+            tx.Commit();
         }
 
-        if (!hasReplicaCount)
-        {
-            Execute(conn, """
-                ALTER TABLE objects ADD COLUMN replica_count INTEGER NOT NULL DEFAULT 0;
-                UPDATE objects SET replica_count =
-                    CASE WHEN node_ids = '' THEN 0
-                         ELSE length(node_ids) - length(replace(node_ids, ',', '')) + 1 END;
-                """);
-        }
-
-        Execute(conn, "CREATE INDEX IF NOT EXISTS idx_objects_replica_count ON objects (replica_count);");
+        // (replica_count, bucket, key) lets the under-replication sweep range-scan and page in key order.
+        Execute(conn, """
+            DROP INDEX IF EXISTS idx_objects_replica_count;
+            CREATE INDEX IF NOT EXISTS idx_objects_replicas ON objects (replica_count, bucket, key);
+            """);
     }
 
     public bool BucketExists(string name)
@@ -192,45 +206,114 @@ public sealed class GatewayMetadataStore
     /// Updates the node_ids list for an existing object record.
     /// Used by RepairWorker after successfully re-replicating a blob to a new node.
     /// </summary>
-    public void UpdateNodeIds(string bucket, string key, IReadOnlyList<string> nodeIds)
+    /// <returns>False if the key no longer holds <paramref name="cid"/> (overwritten or deleted meanwhile):
+    /// a replica list read for one version must never be written onto another (issue #135 review).</returns>
+    public bool UpdateNodeIds(string bucket, string key, string cid, IReadOnlyList<string> nodeIds)
     {
         using var conn = Open();
-        Execute(Query(conn,
-            "UPDATE objects SET node_ids = $ni, replica_count = $rc WHERE bucket = $b AND key = $k",
-            ("$ni", string.Join(',', nodeIds)), ("$rc", nodeIds.Count), ("$b", bucket), ("$k", key)));
+        return Execute(Query(conn,
+            "UPDATE objects SET node_ids = $ni, replica_count = $rc WHERE bucket = $b AND key = $k AND cid = $cid",
+            ("$ni", string.Join(',', nodeIds)), ("$rc", nodeIds.Count), ("$b", bucket), ("$k", key), ("$cid", cid))) > 0;
+    }
+
+    /// <summary>
+    /// Atomically removes <paramref name="nodeUrl"/> from the object's replicas, re-reading the
+    /// current list inside the transaction, and only if the key still holds <paramref name="cid"/>.
+    /// </summary>
+    public bool RemoveReplica(string bucket, string key, string cid, string nodeUrl) =>
+        ModifyNodeIds("WHERE bucket = $b AND key = $k AND cid = $cid", [("$b", bucket), ("$k", key), ("$cid", cid)],
+            ids => ids.Where(u => !u.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase)).ToList()) > 0;
+
+    /// <summary>Adds <paramref name="nodeUrl"/> to every object holding <paramref name="cid"/> (idx_objects_cid); returns rows changed.</summary>
+    public int AddReplicaForCid(string cid, string nodeUrl) =>
+        ModifyNodeIds("WHERE cid = $cid", [("$cid", cid)],
+            ids => ids.Contains(nodeUrl, StringComparer.OrdinalIgnoreCase) ? ids : [.. ids, nodeUrl]);
+
+    /// <summary>
+    /// Re-points replicas and pending deletions from a node's old URL to its new one when the node
+    /// re-registers at a different address, so its copies stay counted and readable. Full scan of
+    /// objects, but only on the rare address-change event.
+    /// </summary>
+    public int RenameReplicaUrl(string oldUrl, string newUrl)
+    {
+        var changed = ModifyNodeIds("WHERE instr(',' || node_ids || ',', ',' || $old || ',') > 0", [("$old", oldUrl)],
+            ids => ids.Select(u => u.Equals(oldUrl, StringComparison.OrdinalIgnoreCase) ? newUrl : u)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        using var conn = Open();
+        Execute(Query(conn, "UPDATE gc_queue SET node_url = $new WHERE node_url = $old", ("$new", newUrl), ("$old", oldUrl)));
+        return changed;
+    }
+
+    private int ModifyNodeIds(string where, (string, object)[] parameters, Func<List<string>, List<string>> change)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        var rows = new List<(string Bucket, string Key, List<string> Ids)>();
+        using (var select = Query(conn, "SELECT bucket, key, node_ids FROM objects " + where, parameters))
+        {
+            select.Transaction = tx;
+            using var r = select.ExecuteReader();
+            while (r.Read())
+            {
+                rows.Add((r.GetString(0), r.GetString(1), SplitNodeIds(r.GetString(2)).ToList()));
+            }
+        }
+
+        var changed = 0;
+        foreach (var (bucket, key, ids) in rows)
+        {
+            var next = change(ids);
+            if (next.SequenceEqual(ids, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            using var update = Query(conn, "UPDATE objects SET node_ids = $ni, replica_count = $rc WHERE bucket = $b AND key = $k",
+                ("$ni", string.Join(',', next)), ("$rc", next.Count), ("$b", bucket), ("$k", key));
+            update.Transaction = tx;
+            changed += update.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        return changed;
     }
 
     /// <summary>
     /// Pages through all objects in the metadata store.
     /// Used by the ReplicationMonitor and NodeReconciler.
     /// </summary>
-    public IReadOnlyList<ObjectRecord> ListAllObjectsPaged(string afterKey, int limit)
+    public IReadOnlyList<ObjectRecord> ListAllObjectsPaged((string Bucket, string Key)? after, int limit)
     {
         using var conn = Open();
-        using var cmd = afterKey.Length == 0
+        using var cmd = after is null
             ? Query(conn,
                 "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects ORDER BY bucket, key LIMIT $limit",
                 ("$limit", limit))
             // Row-value comparison so the cursor seeks via idx_objects_bucket_key; the old
             // (bucket || '/' || key) expression forced a full scan per page (issue #135).
-            // Bucket names never contain '/', so the cursor splits unambiguously.
             : Query(conn,
                 "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE (bucket, key) > ($ab, $ak) ORDER BY bucket, key LIMIT $limit",
-                ("$ab", afterKey[..Math.Max(0, afterKey.IndexOf('/'))]), ("$ak", afterKey[(afterKey.IndexOf('/') + 1)..]), ("$limit", limit));
+                ("$ab", after.Value.Bucket), ("$ak", after.Value.Key), ("$limit", limit));
 
         return ReadRecords(cmd);
     }
 
     /// <summary>
-    /// Up to <paramref name="limit"/> objects recorded on fewer than <paramref name="minCopies"/>
-    /// nodes, fewest copies first. Backed by idx_objects_replica_count (issue #135).
+    /// Up to <paramref name="limit"/> repairable objects (at least one copy, fewer than
+    /// <paramref name="minCopies"/>) after the cursor, fewest copies first. Objects with no copies
+    /// can't be repaired and are excluded so they can't starve the rest (see CountUnderReplicated).
+    /// Backed by idx_objects_replicas (replica_count, bucket, key).
     /// </summary>
-    public IReadOnlyList<ObjectRecord> ListUnderReplicated(int minCopies, int limit)
+    public IReadOnlyList<ObjectRecord> ListUnderReplicated(int minCopies, int limit, (int Count, string Bucket, string Key)? after = null)
     {
         using var conn = Open();
-        using var cmd = Query(conn,
-            "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE replica_count < $min ORDER BY replica_count LIMIT $limit",
-            ("$min", minCopies), ("$limit", limit));
+        using var cmd = after is null
+            ? Query(conn,
+                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE replica_count BETWEEN 1 AND $max ORDER BY replica_count, bucket, key LIMIT $limit",
+                ("$max", minCopies - 1), ("$limit", limit))
+            : Query(conn,
+                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE replica_count BETWEEN 1 AND $max AND (replica_count, bucket, key) > ($c, $b, $k) ORDER BY replica_count, bucket, key LIMIT $limit",
+                ("$max", minCopies - 1), ("$c", after.Value.Count), ("$b", after.Value.Bucket), ("$k", after.Value.Key), ("$limit", limit));
         return ReadRecords(cmd);
     }
 

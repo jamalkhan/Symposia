@@ -19,10 +19,10 @@ public sealed class QuorumWriter
     private readonly GatewayMetadataStore _metadata;
     private readonly int _quorumCount;
     private readonly int _minCopies;
-    private readonly Repair.RepairQueue? _repairQueue;
+    private readonly Repair.RepairQueue _repairQueue;
 
     public QuorumWriter(INodeRegistry nodes, GatewayMetadataStore metadata, IOptions<GatewayOptions> options,
-        Repair.RepairQueue? repairQueue = null)
+        Repair.RepairQueue repairQueue)
     {
         _nodes = nodes;
         _metadata = metadata;
@@ -79,7 +79,7 @@ public sealed class QuorumWriter
         // missing copies now rather than waiting for the next replication scan.
         if (nodeIds.Count < _minCopies)
         {
-            _repairQueue?.Enqueue(new Repair.RepairTask(cid, null, Repair.RepairReason.UnderReplicated));
+            _repairQueue.Enqueue(new Repair.RepairTask(cid, null, Repair.RepairReason.UnderReplicated));
         }
 
         return record;

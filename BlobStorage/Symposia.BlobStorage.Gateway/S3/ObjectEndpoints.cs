@@ -121,9 +121,12 @@ internal static class ObjectEndpoints
         foreach (var candidate in replicas)
         {
             var attempt = candidate.Client.ReadBlob(request, deadline: DateTime.UtcNow.AddMinutes(30), cancellationToken: ctx.RequestAborted);
+            // A hung node must not stall the GET before a healthy replica is tried.
+            using var firstChunk = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+            firstChunk.CancelAfter(TimeSpan.FromSeconds(10));
             try
             {
-                hasFirst = await attempt.ResponseStream.MoveNext(ctx.RequestAborted);
+                hasFirst = await attempt.ResponseStream.MoveNext(firstChunk.Token);
                 node = candidate;
                 call = attempt;
                 break;
@@ -140,8 +143,14 @@ internal static class ObjectEndpoints
                 {
                     // Treat it as down until its next successful probe so other requests skip it.
                     logger.LogWarning("Read of CID {Cid} from {Url} failed ({Status}); trying another replica.", record.Cid, candidate.Url, ex.StatusCode);
-                    candidate.LastProbe = null;
+                    candidate.MarkUnhealthy();
                 }
+            }
+            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
+            {
+                attempt.Dispose();
+                logger.LogWarning("Read of CID {Cid} from {Url} sent nothing for 10 s; trying another replica.", record.Cid, candidate.Url);
+                candidate.MarkUnhealthy();
             }
         }
 
@@ -192,7 +201,7 @@ internal static class ObjectEndpoints
         {
             // Headers are already sent: the client gets a broken transfer and retries.
             logger.LogWarning("Read of CID {Cid} from {Url} failed mid-stream ({Status}); aborting.", record.Cid, node.Url, ex.StatusCode);
-            node.LastProbe = null;
+            node.MarkUnhealthy();
             ctx.Abort();
             return Results.Empty;
         }

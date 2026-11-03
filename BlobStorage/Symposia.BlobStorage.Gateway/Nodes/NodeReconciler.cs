@@ -87,7 +87,7 @@ public sealed class NodeReconciler
         // ── Reverse pass ─────────────────────────────────────────────────────
         // Every object the metadata claims lives on this node — verify the node still has it.
         int repaired = 0;
-        var cursor = "";
+        (string Bucket, string Key)? cursor = null;
         while (true)
         {
             var page = _store.ListAllObjectsPaged(cursor, MetaPageSize);
@@ -125,7 +125,7 @@ public sealed class NodeReconciler
             }
 
             if (page.Count < MetaPageSize) break;
-            cursor = $"{page[^1].Bucket}/{page[^1].Key}";
+            cursor = (page[^1].Bucket, page[^1].Key);
         }
 
         node.JustReconnected = false;

@@ -178,6 +178,7 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:ReplicationCheckIntervalSeconds"] = "60",
             ["Gateway:NodeSource"] = "Registry",
             ["Gateway:BlockchainGatewayUrl"] = network.GatewayUrl,
+            // Same cadence as peer discovery: both read the same registry, so one knob for both.
             ["Gateway:RegistryRefreshSeconds"] = context.Settings.Discovery.IntervalSeconds.ToString(),
             ["Gateway:Credentials:0:AccessKeyId"] = gateway.AccessKeyId,
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
