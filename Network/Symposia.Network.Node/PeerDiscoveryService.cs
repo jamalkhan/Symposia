@@ -22,6 +22,12 @@ public sealed class PeerDiscoveryService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var o = options.Value;
+        if (!o.EnableDiscovery)
+        {
+            logger.LogInformation("Peer discovery disabled for this host (EnableDiscovery=false).");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(o.BlockchainGatewayUrl) || string.IsNullOrWhiteSpace(o.NodeRegistryAddress))
         {
             logger.LogInformation("Blockchain gateway not configured; peer discovery disabled.");
@@ -49,10 +55,12 @@ public sealed class PeerDiscoveryService(
         var self = identity.NodeId;
         var selfEndpoint = NodeEndpoint.Normalize(o.AdvertisedEndpoint);
 
+        var started = System.Diagnostics.Stopwatch.StartNew();
         IReadOnlyList<RegisteredNode> members;
         try
         {
             members = await registry.ListNodesAsync(ct);
+            logger.LogDebug("Discovery cycle: registry lists {Count} node(s).", members.Count);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -73,6 +81,12 @@ public sealed class PeerDiscoveryService(
             }
         }
 
+        if (candidates.Count == 0)
+        {
+            logger.LogDebug("Discovery cycle: no other nodes to verify (registry has only this node, or none, and no seed peers).");
+        }
+
+        var previous = table.Snapshot().ToDictionary(p => p.Endpoint, p => p);
         var results = new System.Collections.Concurrent.ConcurrentBag<PeerEntry>();
         await Parallel.ForEachAsync(
             candidates,
@@ -81,9 +95,10 @@ public sealed class PeerDiscoveryService(
             {
                 try
                 {
+                    logger.LogTrace("Handshaking with {Endpoint} (expected {Expected}).", candidate.Endpoint, candidate.Expected ?? "any");
                     var entry = await verifier.VerifyAsync(candidate.Endpoint, candidate.Expected, token);
                     results.Add(entry);
-                    Log(entry);
+                    Log(entry, previous.GetValueOrDefault(entry.Endpoint));
                 }
                 catch (Exception ex) when (!token.IsCancellationRequested)
                 {
@@ -91,18 +106,27 @@ public sealed class PeerDiscoveryService(
                 }
             });
 
+        foreach (var gone in previous.Keys.Except(results.Select(r => r.Endpoint)))
+        {
+            logger.LogInformation("Peer at {Endpoint} is no longer a discovery candidate.", gone);
+        }
+
         table.Replace(results);
+        logger.LogDebug("Discovery cycle finished in {ElapsedMs} ms: {Recognized} recognized, {Unrecognized} not recognized.",
+            started.ElapsedMilliseconds, results.Count(r => r.Status == PeerStatus.Recognized), results.Count(r => r.Status != PeerStatus.Recognized));
     }
 
-    private void Log(PeerEntry entry)
+    /// <summary>Changes in a peer's state are logged at Information/Warning; repeats each cycle only at Debug.</summary>
+    private void Log(PeerEntry entry, PeerEntry? before)
     {
+        var changed = before is null || before.Status != entry.Status || before.Reason != entry.Reason || before.Address != entry.Address;
         if (entry.Status == PeerStatus.Recognized)
         {
-            logger.LogInformation("Recognized peer {Address} at {Endpoint}.", entry.Address, entry.Endpoint);
+            logger.Log(changed ? LogLevel.Information : LogLevel.Debug, "Recognized peer {Address} at {Endpoint}.", entry.Address, entry.Endpoint);
         }
         else
         {
-            logger.LogWarning("Peer at {Endpoint} not recognized: {Reason} (address {Address}).", entry.Endpoint, entry.Reason, entry.Address);
+            logger.Log(changed ? LogLevel.Warning : LogLevel.Debug, "Peer at {Endpoint} not recognized: {Reason} (address {Address}).", entry.Endpoint, entry.Reason, entry.Address);
         }
     }
 }

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Nethereum.Util;
 
@@ -91,18 +92,23 @@ public static class NodeNetworkExtensions
     /// <summary>Maps the peer handshake (#129 FR-D1) and peer status (FR-D4) endpoints.</summary>
     public static IEndpointRouteBuilder MapNodeNetworkEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/v1/peer/handshake", (HandshakeRequest? req, NodeIdentity identity) =>
+        app.MapPost("/v1/peer/handshake", (HandshakeRequest? req, NodeIdentity identity, HttpContext http, ILoggerFactory loggers) =>
         {
+            var logger = loggers.CreateLogger("Symposia.Network.Node.PeerHandshake");
             if (req is null || string.IsNullOrEmpty(req.Dialer) || !AddressUtil.Current.IsValidEthereumAddressHexFormat(req.Dialer))
             {
+                logger.LogDebug("Rejected handshake from {Remote}: missing or invalid dialer address.", http.Connection.RemoteIpAddress);
                 return Results.BadRequest(new { error = "dialer must be a 0x-prefixed address" });
             }
 
             var nonce = TryParseNonce(req.Nonce);
             if (nonce is null)
             {
+                logger.LogDebug("Rejected handshake from {Remote} (dialer {Dialer}): malformed nonce.", http.Connection.RemoteIpAddress, req.Dialer);
                 return Results.BadRequest(new { error = $"nonce must be {PeerHandshake.NonceLength} bytes of 0x-prefixed hex" });
             }
+
+            logger.LogTrace("Answering handshake from {Dialer} at {Remote}.", req.Dialer, http.Connection.RemoteIpAddress);
 
             return Results.Ok(new HandshakeResponse(identity.NodeId, identity.SignHandshake(req.Dialer, nonce)));
         }).RequireRateLimiting(HandshakeRateLimitPolicy);

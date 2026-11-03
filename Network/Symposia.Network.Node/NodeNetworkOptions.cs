@@ -17,6 +17,16 @@ public sealed class NodeNetworkOptions
     /// </summary>
     public bool ResetIdentity { get; set; }
 
+    /// <summary>
+    /// Whether this host registers its endpoint on-chain. The single Node Host
+    /// (issue #133) turns this off in each role and registers one primary
+    /// endpoint itself, so only one writer ever uses the registry nonce.
+    /// </summary>
+    public bool EnableRegistration { get; set; } = true;
+
+    /// <summary>Whether this host runs peer discovery (turned off in Node Host roles; the host discovers once).</summary>
+    public bool EnableDiscovery { get; set; } = true;
+
     /// <summary>Base URL of the Bootstrap Chain Gateway (issue #110). Empty disables registration and discovery.</summary>
     public string BlockchainGatewayUrl { get; set; } = "";
 

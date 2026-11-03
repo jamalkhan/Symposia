@@ -45,6 +45,25 @@ public static class NodeEndpoints
             }
         });
 
+        // Network descriptor (issue #133): lets a node join this network
+        // knowing only the gateway URL.
+        app.MapGet("/v1/network", async (BootstrapChainClient chain) =>
+        {
+            try
+            {
+                return Results.Ok(new
+                {
+                    chainId = await chain.GetChainIdAsync(),
+                    nodeRegistryAddress = chain.NodeRegistryAddress,
+                    epochRootRegistryAddress = chain.EpochRootRegistryAddress,
+                });
+            }
+            catch (Exception ex) when (ex is HttpRequestException or RpcClientUnknownException or RpcResponseException)
+            {
+                return Results.Problem("The gateway cannot reach its chain RPC.", statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+        });
+
         // Membership listing for peer discovery (issue #129 FR-B5/FR-C1).
         app.MapGet("/v1/nodes", async (BootstrapChainClient chain) =>
         {

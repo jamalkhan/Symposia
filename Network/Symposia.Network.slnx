@@ -1,4 +1,6 @@
 <Solution>
   <Project Path="Symposia.Network.Node/Symposia.Network.Node.csproj" />
   <Project Path="Symposia.Network.Node.Tests/Symposia.Network.Node.Tests.csproj" />
+  <Project Path="Symposia.NodeHost/Symposia.NodeHost.csproj" />
+  <Project Path="Symposia.NodeHost.Tests/Symposia.NodeHost.Tests.csproj" />
 </Solution>
