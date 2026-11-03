@@ -17,12 +17,22 @@ public static class StorageNodeApp
         var builder = WebApplication.CreateBuilder(options);
         configure?.Invoke(builder);
 
-        // h2c (cleartext HTTP/2) so gRPC and the plain HTTP health endpoints share one Kestrel endpoint in dev.
         // Production deployments terminate TLS 1.3 in front of this (Requirements/Platform/security.md#encryption-in-transit).
+        // With GrpcPort set, plain HTTP (handshake, health, services) and gRPC get separate listeners,
+        // because cleartext HTTP/2 isn't negotiated on a mixed HTTP/1.1+2 listener (issue #135).
         var listenPort = builder.Configuration.GetValue("StorageNode:ListenPort", 5180);
+        var grpcPort = builder.Configuration.GetValue("StorageNode:GrpcPort", 0);
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
-            kestrel.ListenAnyIP(listenPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http1AndHttp2);
+            if (grpcPort > 0)
+            {
+                kestrel.ListenAnyIP(listenPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
+                kestrel.ListenAnyIP(grpcPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
+            }
+            else
+            {
+                kestrel.ListenAnyIP(listenPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http1AndHttp2);
+            }
         });
 
         builder.Services.Configure<StorageNodeOptions>(builder.Configuration.GetSection("StorageNode"));
@@ -41,7 +51,17 @@ public static class StorageNodeApp
         app.Services.GetRequiredService<ManifestStore>().Initialize();
         app.UseNodeNetwork();
 
-        app.MapGrpcService<StorageNodeGrpcService>();
+        var grpc = app.MapGrpcService<StorageNodeGrpcService>();
+        if (grpcPort > 0)
+        {
+            grpc.RequireHost($"*:{grpcPort}");
+        }
+
+        // Where this node's services live, so a gateway that found it in the registry can reach
+        // its gRPC API (issue #135). A hint only: callers check identity via Probe's NodeId.
+        app.MapGet(NodeServices.Path, (NodeIdentity identity, Microsoft.Extensions.Options.IOptions<NodeNetworkOptions> network) =>
+            Results.Ok(new NodeServices(identity.NodeId, new NodeServices.StorageService(
+                NodeServices.GrpcUrl(network.Value.AdvertisedEndpoint, listenPort, grpcPort)))));
 
         app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));
 
