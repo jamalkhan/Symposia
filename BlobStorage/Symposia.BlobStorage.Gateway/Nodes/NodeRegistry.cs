@@ -53,7 +53,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         }
 
         // Probe immediately so the first request has health data.
-        _probeTimer = new Timer(_ => ProbeAll(), null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
+        _probeTimer = new Timer(_ => ProbeAll(), null, TimeSpan.Zero,
+            TimeSpan.FromSeconds(Math.Max(1, _options.Value.ProbeIntervalSeconds)));
         return Task.CompletedTask;
     }
 
@@ -136,6 +137,54 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         }
     }
 
+    /// <summary>
+    /// Adds storage nodes discovered in the on-chain registry (issue #135), keyed by gRPC URL,
+    /// and keeps each one's expected node address current. Nodes are not persisted (the registry
+    /// is the source of truth) and are never removed here: one that disappears simply fails its
+    /// probes and is treated as offline, so its replicas aren't written off early.
+    /// </summary>
+    public void SyncFromRegistry(IReadOnlyDictionary<string, string> grpcUrlToNodeId)
+    {
+        lock (_lock)
+        {
+            foreach (var (url, nodeId) in grpcUrlToNodeId)
+            {
+                // Same node, new address (DHCP change, LAN endpoint set later): move its replicas to the
+                // new URL instead of leaving a dead entry that still "holds" them (issue #135 review).
+                var moved = _nodes.FirstOrDefault(n => string.Equals(n.ExpectedNodeId, nodeId, StringComparison.OrdinalIgnoreCase)
+                    && !n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+                if (moved is not null)
+                {
+                    var renamed = _store.RenameReplicaUrl(moved.Url, url);
+                    _logger.LogInformation("Storage node {Node} moved from {Old} to {New}; re-pointed {Count} object(s).",
+                        nodeId, moved.Url, url, renamed);
+                    _nodes.Remove(moved);
+                    moved.Dispose();
+                }
+
+                var existing = _nodes.FirstOrDefault(n => n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+                if (existing is not null)
+                {
+                    if (!string.Equals(existing.ExpectedNodeId, nodeId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation("Storage node at {Url} is now registered to {Node}.", url, nodeId);
+                        existing.ExpectedNodeId = nodeId;
+                    }
+
+                    continue;
+                }
+
+                var conn = new NodeConnection(url, nodeId);
+                _nodes.Add(conn);
+                _logger.LogInformation("Added storage node {Node} at {Url} from the registry.", nodeId, url);
+                _ = ProbeAsync(conn);
+            }
+        }
+    }
+
+    /// <summary>Raised when a node becomes healthy (new or back online); used to start a repair sweep at once.</summary>
+    public event Action<NodeConnection>? NodeBecameHealthy;
+
     // ── Health probing ────────────────────────────────────────────────────────
 
     private void ProbeAll()
@@ -153,13 +202,24 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         {
             var response = await node.Client.ProbeAsync(new ProbeRequest(),
                 deadline: DateTime.UtcNow.AddSeconds(5));
+            if (node.ExpectedNodeId is { } expected && !string.Equals(response.NodeId, expected, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("Node at {Url} answered as {Actual} but the registry lists {Expected}; not using it.",
+                    node.Url, response.NodeId, expected);
+                node.MarkUnhealthy();
+                return;
+            }
+
             node.LastProbe = response;
             node.LastProbeTime = DateTimeOffset.UtcNow;
+            _logger.LogDebug("Node {Url} probe ok: {Used} bytes used, {Available} available, {Blobs} blobs.",
+                node.Url, response.UsedStorageBytes, response.AvailableStorageBytes, response.BlobCount);
 
             if (!wasHealthy && node.IsHealthy)
             {
                 _logger.LogInformation("Node {Url} came back online; flagging for reconciliation.", node.Url);
                 node.JustReconnected = true;
+                NodeBecameHealthy?.Invoke(node);
             }
         }
         catch (Exception ex)

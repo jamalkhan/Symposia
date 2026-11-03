@@ -139,6 +139,18 @@ public sealed class SettingsTests : IDisposable
 
         Assert.Empty(supervisor.Affected(before, HostSettings.Defaults(0)));
 
+        // Blob gateway (issue #135): its own settings restart only it; with it on, so does Discovery.
+        var gateway = HostSettings.Defaults(0);
+        gateway.BlobGateway.Enabled = true;
+        Assert.Equal([supervisor.BlobGateway], supervisor.Affected(before, gateway));
+
+        var gatewayDiscovery = HostSettings.Defaults(0);
+        gatewayDiscovery.BlobGateway.Enabled = true;
+        var gatewayDiscoveryNext = HostSettings.Defaults(0);
+        gatewayDiscoveryNext.BlobGateway.Enabled = true;
+        gatewayDiscoveryNext.Discovery.IntervalSeconds = 30;
+        Assert.Equal([supervisor.Network, supervisor.BlobGateway], supervisor.Affected(gatewayDiscovery, gatewayDiscoveryNext));
+
         // Review (Carl 5): a change that doesn't move the primary endpoint leaves the network alone.
         var capacity = HostSettings.Defaults(0);
         capacity.Storage.Enabled = true;
@@ -186,6 +198,36 @@ public sealed class SettingsTests : IDisposable
         File.WriteAllText(Paths.Settings, "{ not json");
 
         Assert.Throws<CorruptFileException>(() => new SettingsStore(Paths, 0, Env()));
+    }
+
+    // Issue #135: ports added after a settings file was written get this host's offset defaults.
+    [Fact]
+    public void OlderSettingsFile_GetsOffsetDefaultsForNewPorts()
+    {
+        Directory.CreateDirectory(Paths.DataDir);
+        File.WriteAllText(Paths.Settings, """{ "storage": { "enabled": true, "port": 5181 } }""");
+
+        var settings = new SettingsStore(Paths, 1, Env()).Effective;
+
+        Assert.Equal(6181, settings.Storage.GrpcPort);
+        Assert.Equal(9001, settings.BlobGateway.Port);
+    }
+
+    [Fact]
+    public void Validate_RejectsGatewayQuorumAboveMinCopies_AndPortClashes()
+    {
+        var s = HostSettings.Defaults(0);
+        s.Network.Mode = NetworkMode.LocalDev;
+        s.Storage.Enabled = true;
+        s.BlobGateway.Enabled = true;
+        s.BlobGateway.WriteQuorum = 3;
+        s.BlobGateway.MinCopies = 2;
+        s.BlobGateway.Port = s.Storage.GrpcPort;
+
+        var errors = UiApp.Validate(s);
+
+        Assert.Contains(errors, e => e.Contains("write quorum"));
+        Assert.Contains(errors, e => e.Contains("storage gRPC") && e.Contains("blob gateway"));
     }
 
     public void Dispose() => _dir.Dispose();

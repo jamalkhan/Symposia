@@ -10,7 +10,7 @@ namespace Symposia.NodeHost.Diagnostics;
 /// cached for 5s so any number of open browser tabs polling every 5s cause at
 /// most one round of RPC/gateway calls per 5s (QA traffic-shape budget).
 /// </summary>
-public sealed class StatusService(ComponentSupervisor supervisor, string nodeAddress, IMemoryCache cache)
+public sealed class StatusService(ComponentSupervisor supervisor, string nodeAddress, IMemoryCache cache, NodeHealth health)
 {
     private static readonly TimeSpan CacheFor = TimeSpan.FromSeconds(5);
 
@@ -51,6 +51,7 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
                 reason = p.Reason.ToString(),
                 lastAttempt = p.LastAttempt,
             }),
+            blobGateway = health.Local().Gateway,
             logs = context.Logs.Tail(200),
         };
     }

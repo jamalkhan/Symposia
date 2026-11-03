@@ -94,6 +94,14 @@ async function refresh() {
     `<tr><td class="mono">${esc(p.endpoint)}</td><td class="mono">${esc(p.address || p.expectedAddress)}</td><td class="status ${esc(p.status)}">${esc(p.status)}</td><td>${p.reason === 'None' ? '' : esc(p.reason)}</td><td>${esc(new Date(p.lastAttempt).toLocaleTimeString())}</td></tr>`));
   $('#members').innerHTML = table(['Address', 'Endpoint'], (r.members || []).map((m) =>
     `<tr><td class="mono">${esc(m.node)}${m.self ? ' <b>(this node)</b>' : ''}</td><td class="mono">${esc(m.endpoint)}</td></tr>`));
+  const g = s.blobGateway;
+  $('#blobgateway-card').hidden = !g || !g.configured;
+  if (g && g.configured) {
+    const url = g.port ? `http://${location.hostname}:${g.port}` : '';
+    $('#blobgateway').innerHTML = dl([['Status', g.level === 'Ok' ? 'Healthy' : g.level], ['Detail', g.detail], ['S3 endpoint (LAN)', url],
+      ['Storage nodes', g.storageNodes != null ? `${g.healthyStorageNodes} reachable of ${g.storageNodes}` : ''],
+      ['Waiting for another copy', g.underReplicated]]);
+  }
   const logs = $('#logs'), atBottom = logs.scrollTop + logs.clientHeight >= logs.scrollHeight - 4;
   logs.textContent = s.logs.map((l) => `${new Date(l.time).toLocaleTimeString()} [${l.component}] ${l.level}: ${l.message}`).join('\n');
   if (atBottom) logs.scrollTop = logs.scrollHeight;
@@ -106,6 +114,7 @@ function light(h, describe) {
   return `<span class="light ${esc(h.level)}" title="${esc(tip)}"></span> <span class="hint">${esc(tip)}</span>`;
 }
 const storageTip = (h) => (h.freeBytes != null ? `${fmtGb(h.freeBytes)} free of ${fmtGb(h.capacityBytes)}` : h.level);
+const gatewayTip = (h) => (h.healthyStorageNodes != null ? `${h.healthyStorageNodes} storage node(s) reachable` : h.level);
 const computeTip = (h) => (h.cpuPercent != null ? `${h.cpuPercent}% CPU` : h.level);
 
 async function refreshNetwork() {
@@ -114,10 +123,11 @@ async function refreshNetwork() {
   catch (ex) { $('#network-error').hidden = false; $('#network-error').textContent = `Network unavailable (${ex.message}) — showing last known data.`; return; }
   $('#network-error').hidden = !s.error;
   $('#network-error').textContent = s.error || '';
-  $('#network-nodes').innerHTML = table(['Public IP address', 'Node hash', 'Storage', 'Compute'], s.nodes.map((n) =>
+  $('#network-nodes').innerHTML = table(['Public IP address', 'Node hash', 'Storage', 'Compute', 'Gateway'], s.nodes.map((n) =>
     `<tr><td class="mono">${esc(n.host)}</td><td class="mono" title="${esc(n.endpoint)}">${esc(n.node)}${n.self ? ' <b>(this node)</b>' : ''}` +
     `${n.registered ? '' : `<br><span class="hint">${esc(n.notRegisteredReason)}</span>`}</td>` +
-    `<td>${light(n.storage, storageTip)}</td><td>${light(n.compute, computeTip)}</td></tr>`));
+    `<td>${light(n.storage, storageTip)}</td><td>${light(n.compute, computeTip)}</td>` +
+    `<td>${light(n.gateway || { level: 'Off', detail: 'Not reported' }, gatewayTip)}</td></tr>`));
 }
 
 // ---------- settings ----------
@@ -131,6 +141,24 @@ const set = (obj, path, value) => {
 const LOG_LEVELS = ['Trace', 'Debug', 'Information', 'Warning', 'Error', 'Critical'];
 $$('[data-loglevel]').forEach((s) => (s.innerHTML = LOG_LEVELS.map((l) => `<option>${l}</option>`).join('')));
 
+let lanAddress = null;
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-use-lan]');
+  if (!b || !lanAddress) return;
+  const role = b.dataset.useLan, port = $(`[name="${role}.Port"]`).value;
+  $(`[name="${role}.AdvertisedEndpoint"]`).value = `http://${lanAddress}:${port}`;
+});
+// Keys are generated in the browser and only sent when the operator saves.
+const randomString = (alphabet, n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => alphabet[b % alphabet.length]).join('');
+$('#generate-keys').addEventListener('click', () => {
+  const id = 'SYM' + randomString('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567', 17);
+  const secret = randomString('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', 40);
+  $('[name="BlobGateway.AccessKeyId"]').value = id;
+  const field = $('[name="blobGatewaySecret"]');
+  field.type = 'text'; field.value = secret;
+  $('#generated-hint').textContent = 'Copy the secret now; after saving it is never shown again.';
+});
+
 async function loadSettings() {
   let data;
   try { data = await api('GET', '/settings'); }
@@ -141,6 +169,7 @@ async function loadSettings() {
   const locked = new Set(data.lockedKeys.map((k) => k.toLowerCase().replaceAll(':', '.')));
   $$('[name]', form).forEach((el) => {
     const name = el.name;
+    if (name === 'blobGatewaySecret') { el.value = ''; el.placeholder = data.blobGatewaySecretSet ? '•••••••• (set — enter a new secret to replace)' : 'not set'; return; }
     if (name === 'relayerKey') { el.value = ''; el.placeholder = data.relayerKeySet ? '•••••••• (set — enter a new key to replace)' : 'not set'; return; }
     let value = name === 'Storage.MaxCapacityGb' ? Math.round(get(current, 'Storage.MaxCapacityBytes') / GB) : get(current, name);
     if (el.type === 'radio') el.checked = el.value === value;
@@ -152,6 +181,9 @@ async function loadSettings() {
     if (el.disabled) el.title = 'Set by environment variable';
   });
   $('#join-suggestion').hidden = !data.localGatewayFound;
+  lanAddress = data.lanAddress;
+  $$('[data-lan]').forEach((p) => (p.hidden = !lanAddress));
+  $$('[data-use-lan]').forEach((b) => (b.textContent = `Use ${lanAddress}`));
   syncModes();
 }
 
@@ -169,10 +201,11 @@ $('#use-join').addEventListener('click', () => {
 $('#settings-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target, next = structuredClone(current), result = $('#save-result');
-  let relayerKey = null;
+  let relayerKey = null, blobGatewaySecret = null;
   $$('[name]', form).forEach((el) => {
     if (el.disabled || el.hasAttribute('data-dup') && el.closest('[hidden]')) return;
     if (el.name === 'relayerKey') { if (el.value) relayerKey = el.value; return; }
+    if (el.name === 'blobGatewaySecret') { if (el.value) blobGatewaySecret = el.value; return; }
     if (el.type === 'radio') { if (el.checked) set(next, el.name, el.value); return; }
     if (el.closest('[data-mode][hidden]')) return;
     let v = el.type === 'checkbox' ? el.checked : el.value;
@@ -185,7 +218,7 @@ $('#settings-form').addEventListener('submit', async (e) => {
   });
   result.textContent = 'Applying…';
   try {
-    await api('PUT', '/settings', { settings: next, relayerKey });
+    await api('PUT', '/settings', { settings: next, relayerKey, blobGatewaySecret });
     result.textContent = 'Saved. Components restarted as needed.';
     await loadSettings();
   } catch (ex) { result.textContent = ex.message; }

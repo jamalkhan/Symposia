@@ -29,6 +29,8 @@ public sealed class HostSettings
 
     public LoggingSettings Logging { get; set; } = new();
 
+    public BlobGatewaySettings BlobGateway { get; set; } = new();
+
     public static HostSettings Defaults(int portOffset) => new()
     {
         Network = new NetworkSettings
@@ -37,9 +39,30 @@ public sealed class HostSettings
             GatewayPort = 8080 + portOffset,
             GatewayUrl = "http://127.0.0.1:8080",
         },
-        Storage = new StorageSettings { Port = 5180 + portOffset },
+        Storage = new StorageSettings { Port = 5180 + portOffset, GrpcPort = 6180 + portOffset },
         Compute = new ComputeSettings { Port = 5190 + portOffset },
+        BlobGateway = new BlobGatewaySettings { Port = 9000 + portOffset },
     };
+
+    /// <summary>
+    /// Fills ports added after a settings file was first written (0 = never set) with this
+    /// host's offset defaults, so two hosts upgraded in place don't both pick the same port.
+    /// </summary>
+    public HostSettings WithNewDefaults(int portOffset)
+    {
+        var defaults = Defaults(portOffset);
+        if (Storage.GrpcPort == 0)
+        {
+            Storage.GrpcPort = defaults.Storage.GrpcPort;
+        }
+
+        if (BlobGateway.Port == 0)
+        {
+            BlobGateway.Port = defaults.BlobGateway.Port;
+        }
+
+        return this;
+    }
 }
 
 public sealed class NetworkSettings
@@ -78,6 +101,31 @@ public sealed class StorageSettings
     public string AdvertisedEndpoint { get; set; } = "";
 
     public long MaxCapacityBytes { get; set; } = 10L * 1024 * 1024 * 1024;
+
+    /// <summary>HTTP/2-only port for the storage gRPC API the blob gateway uses (issue #135).</summary>
+    public int GrpcPort { get; set; }
+}
+
+/// <summary>
+/// The S3-compatible blob gateway role (issue #135): accepts uploads with AWS-style keys and
+/// stores them on the network's storage nodes, found through the on-chain registry. One
+/// operator-set key for now; the secret lives in the secret store, not here (#3 adds real tenants).
+/// </summary>
+public sealed class BlobGatewaySettings
+{
+    public bool Enabled { get; set; }
+
+    public int Port { get; set; }
+
+    public string Region { get; set; } = "us-east-1";
+
+    public string AccessKeyId { get; set; } = "";
+
+    /// <summary>Uploads succeed once this many storage nodes have the object.</summary>
+    public int WriteQuorum { get; set; } = 1;
+
+    /// <summary>Copies every object should end up with; missing ones are repaired in the background.</summary>
+    public int MinCopies { get; set; } = 2;
 }
 
 public sealed class ComputeSettings

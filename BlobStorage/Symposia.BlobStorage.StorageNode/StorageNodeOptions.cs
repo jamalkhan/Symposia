@@ -9,6 +9,13 @@ public sealed class StorageNodeOptions
     /// <summary>Port the node's HTTP/gRPC listener binds on all interfaces.</summary>
     public int ListenPort { get; set; } = 5180;
 
+    /// <summary>
+    /// Dedicated HTTP/2-only (h2c) port for the gRPC storage API (issue #135). Kestrel won't
+    /// negotiate HTTP/2 on a cleartext HTTP/1.1+2 listener, so gRPC clients can't reach the
+    /// shared port without TLS. 0 = legacy single listener on <see cref="ListenPort"/>.
+    /// </summary>
+    public int GrpcPort { get; set; }
+
     /// <summary>Total bytes this node offers to the network (operator-configured).</summary>
     public long MaxCapacityBytes { get; set; } = 10L * 1024 * 1024 * 1024;
 

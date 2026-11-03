@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Symposia.NodeHost.Settings;
 
 namespace Symposia.NodeHost.Components;
@@ -21,9 +22,11 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
 
     public ComputeRoleComponent Compute { get; } = new();
 
+    public BlobGatewayRoleComponent BlobGateway { get; } = new();
+
     public HostContext Context => context;
 
-    public IReadOnlyList<HostComponent> All => [Chain, Gateway, Network, Storage, Compute];
+    public IReadOnlyList<HostComponent> All => [Chain, Gateway, Network, Storage, Compute, BlobGateway];
 
     public async Task StartAllAsync(CancellationToken ct)
     {
@@ -57,7 +60,8 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
     /// Read-previous, save, and apply happen under one lock so concurrent saves
     /// can't skip a restart.
     /// </summary>
-    public async Task SaveAndApplyAsync(HostSettings updated, CancellationToken ct)
+    /// <returns>The components that were restarted.</returns>
+    public async Task<IReadOnlyList<HostComponent>> SaveAndApplyAsync(HostSettings updated, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
         try
@@ -69,12 +73,40 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
             context.Settings = next;
             await StopAsync(affected);
             await StartAsync(affected, ct);
+            return affected;
         }
         finally
         {
             _gate.Release();
         }
     }
+
+    /// <summary>
+    /// Keeps retrying when the network can't be reached: a Join or remote-chain host that starts
+    /// before its gateway or RPC is up (both machines rebooting, say) would otherwise sit with every
+    /// role "waiting for the network" until someone saves settings. Backs off 5 s → 60 s; runs until shutdown.
+    /// </summary>
+    public async Task RecoverNetworkAsync(CancellationToken ct)
+    {
+        var delay = TimeSpan.FromSeconds(5);
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(delay, ct);
+            var mode = context.Settings.Network.Mode;
+            if (Chain.Status != ComponentStatus.Faulted || mode is not (NetworkMode.Join or NetworkMode.RemoteRpc))
+            {
+                delay = TimeSpan.FromSeconds(5);
+                continue;
+            }
+
+            context.Logger.LogInformation("Network unreachable ({Reason}); retrying.", Chain.Reason);
+            await RestartAsync(Chain.Name, ct);
+            delay = Chain.Status == ComponentStatus.Faulted ? TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 2)) : TimeSpan.FromSeconds(5);
+        }
+    }
+
+    /// <summary>Restarts the blob gateway so a replaced secret takes effect (no settings change involved).</summary>
+    public Task RestartBlobGatewayAsync(CancellationToken ct) => RestartAsync(BlobGateway.Name, ct);
 
     public async Task RestartAsync(string name, CancellationToken ct)
     {
@@ -120,6 +152,12 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         if (computeChanged)
         {
             affected.Add(Compute);
+        }
+
+        // A running gateway also takes its registry refresh interval from Discovery.
+        if (Changed(previous.BlobGateway, next.BlobGateway) || (next.BlobGateway.Enabled && Changed(previous.Discovery, next.Discovery)))
+        {
+            affected.Add(BlobGateway);
         }
 
         return affected;

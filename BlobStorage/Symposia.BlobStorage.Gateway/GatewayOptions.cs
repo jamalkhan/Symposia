@@ -45,4 +45,29 @@ public sealed class GatewayOptions
     /// Requirements/BlobStorage/redundancy-and-data-integrity.md#grace-period-for-transient-outages
     /// </summary>
     public int NodeGracePeriodSeconds { get; set; } = 900;
+
+    /// <summary>Port the S3 listener binds on all interfaces.</summary>
+    public int ListenPort { get; set; } = 5181;
+
+    /// <summary>How often every storage node is probed for health (seconds).</summary>
+    public int ProbeIntervalSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Where storage nodes come from: <c>Static</c> (the <see cref="Nodes"/> list plus nodes added
+    /// through /admin/nodes) or <c>Registry</c> (the on-chain NodeRegistry, read through the
+    /// Blockchain Gateway at <see cref="BlockchainGatewayUrl"/>; issue #135).
+    /// </summary>
+    public NodeSourceKind NodeSource { get; set; } = NodeSourceKind.Static;
+
+    /// <summary>Blockchain Gateway base URL; required when <see cref="NodeSource"/> is Registry.</summary>
+    public string BlockchainGatewayUrl { get; set; } = "";
+
+    /// <summary>How often the registry is re-read for storage nodes (seconds).</summary>
+    public int RegistryRefreshSeconds { get; set; } = 10;
+}
+
+public enum NodeSourceKind
+{
+    Static,
+    Registry,
 }

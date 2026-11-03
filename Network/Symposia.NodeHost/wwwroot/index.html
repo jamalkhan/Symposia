@@ -49,6 +49,7 @@
         <div class="card"><h2>Components</h2><table id="components"></table></div>
         <div class="card"><h2>Network</h2><dl id="network"></dl></div>
         <div class="card"><h2>On-chain registration</h2><dl id="registration"></dl></div>
+        <div class="card" id="blobgateway-card" hidden><h2>Blob gateway (S3)</h2><dl id="blobgateway"></dl></div>
       </div>
       <div class="card"><h2>Peers <small>(handshake results)</small></h2><table id="peers"></table></div>
       <div class="card"><h2>Registry members</h2><table id="members"></table></div>
@@ -61,7 +62,7 @@
         <h2>Nodes on this network</h2>
         <table id="network-nodes"></table>
         <p class="hint">Storage: green healthy, yellow under 40% free, red 20% free or less. Compute: green healthy, yellow over 20% CPU, red over 50%.
-          Grey means the role isn't configured or the node couldn't be reached. Hover a light for details.</p>
+          Gateway: green when it reaches enough storage nodes for every object to have its copies, yellow while short or repairing, red when down. Grey means the role isn't configured or the node couldn't be reached. Hover a light for details.</p>
       </div>
     </section>
 
@@ -99,6 +100,8 @@
           <h2><label><input type="checkbox" name="Storage.Enabled"> Storage role</label></h2>
           <label>Port <input type="number" name="Storage.Port"></label>
           <label>Advertised endpoint <input name="Storage.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt; (set your LAN/public address for other machines)"></label>
+          <p class="hint" data-lan hidden>Other machines can't reach 127.0.0.1. <button type="button" data-use-lan="Storage">Use this machine's LAN address</button></p>
+          <label>gRPC port <small>(the blob gateway stores data through this; keep it LAN-only)</small> <input type="number" name="Storage.GrpcPort"></label>
           <label>Capacity (GB) <input type="number" name="Storage.MaxCapacityGb" min="1"></label>
         </div>
 
@@ -110,6 +113,18 @@
           <label>pageserver <input name="Compute.PageserverPath"></label>
           <label>safekeeper <input name="Compute.SafekeeperPath"></label>
           <label>postgres <input name="Compute.PostgresPath"></label>
+        </div>
+
+        <div class="card">
+          <h2><label><input type="checkbox" name="BlobGateway.Enabled"> Blob gateway <small>(S3-compatible)</small></label></h2>
+          <p class="hint">Accepts uploads with AWS-style access keys and stores them on this network's storage nodes.</p>
+          <label>Port <input type="number" name="BlobGateway.Port"></label>
+          <label>Region <input name="BlobGateway.Region"></label>
+          <label>Access key ID <input name="BlobGateway.AccessKeyId" autocomplete="off"></label>
+          <label>Secret access key <input type="password" name="blobGatewaySecret" autocomplete="off" placeholder="not set"></label>
+          <p><button type="button" id="generate-keys">Generate a new key pair</button> <span class="hint" id="generated-hint"></span></p>
+          <label>Write quorum <small>(copies needed before an upload succeeds)</small> <input type="number" name="BlobGateway.WriteQuorum" min="1"></label>
+          <label>Minimum copies <small>(missing copies are repaired in the background)</small> <input type="number" name="BlobGateway.MinCopies" min="1"></label>
         </div>
 
         <div class="card">

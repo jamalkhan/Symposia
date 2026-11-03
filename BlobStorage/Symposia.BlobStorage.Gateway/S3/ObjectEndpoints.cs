@@ -99,9 +99,68 @@ internal static class ObjectEndpoints
             isRange = TryParseRange(rangeHeader, record.SizeBytes, out offset, out length);
         }
 
-        var node = nodes.SelectForRead(record.NodeIds);
-        if (node is null) return S3Xml.ServiceUnavailable();
+        var request = new ReadBlobRequest
+        {
+            Cid = record.Cid,
+            Offset = offset,
+            Length = isRange ? length : 0,
+        };
 
+        // Try each replica (healthy ones first) until one starts streaming. Nothing is sent to the
+        // client until the first chunk arrives, so a replica on a node that just went down (and
+        // isn't yet marked unhealthy by a probe) costs a retry, not a failed GET (issue #135 AC3).
+        var replicas = nodes.All
+            .Where(n => record.NodeIds.Contains(n.Url, StringComparer.OrdinalIgnoreCase))
+            .OrderByDescending(n => n.IsHealthy)
+            .ThenByDescending(n => n.LastProbeTime)
+            .ToList();
+
+        NodeConnection? node = null;
+        AsyncServerStreamingCall<ReadBlobChunk>? call = null;
+        var hasFirst = false;
+        foreach (var candidate in replicas)
+        {
+            var attempt = candidate.Client.ReadBlob(request, deadline: DateTime.UtcNow.AddMinutes(30), cancellationToken: ctx.RequestAborted);
+            // A hung node must not stall the GET before a healthy replica is tried.
+            using var firstChunk = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+            firstChunk.CancelAfter(TimeSpan.FromSeconds(10));
+            try
+            {
+                hasFirst = await attempt.ResponseStream.MoveNext(firstChunk.Token);
+                node = candidate;
+                call = attempt;
+                break;
+            }
+            catch (RpcException ex) when (!ctx.RequestAborted.IsCancellationRequested)
+            {
+                attempt.Dispose();
+                if (ex.StatusCode == StatusCode.NotFound)
+                {
+                    logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair and trying another replica.", candidate.Url, record.Cid);
+                    repairQueue.EnqueueMissingReplica(record, candidate.Url, store, nodes);
+                }
+                else
+                {
+                    // Treat it as down until its next successful probe so other requests skip it.
+                    logger.LogWarning("Read of CID {Cid} from {Url} failed ({Status}); trying another replica.", record.Cid, candidate.Url, ex.StatusCode);
+                    candidate.MarkUnhealthy();
+                }
+            }
+            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
+            {
+                attempt.Dispose();
+                logger.LogWarning("Read of CID {Cid} from {Url} sent nothing for 10 s; trying another replica.", record.Cid, candidate.Url);
+                candidate.MarkUnhealthy();
+            }
+        }
+
+        if (node is null || call is null)
+        {
+            logger.LogWarning("No replica of {Bucket}/{Key} (CID {Cid}) could be read.", bucket, key, record.Cid);
+            return S3Xml.ServiceUnavailable();
+        }
+
+        using var activeCall = call;
         ctx.Response.ContentType = record.ContentType;
         ctx.Response.Headers.ETag = $"\"{record.Cid}\"";
         ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
@@ -118,14 +177,6 @@ internal static class ObjectEndpoints
             ctx.Response.ContentLength = record.SizeBytes;
         }
 
-        var request = new ReadBlobRequest
-        {
-            Cid = record.Cid,
-            Offset = offset,
-            Length = isRange ? length : 0,
-        };
-
-        var call = node.Client.ReadBlob(request, cancellationToken: ctx.RequestAborted);
 
         // Stream to client while computing SHA-256 for CID verification.
         // Per Requirements/BlobStorage/redundancy-and-data-integrity.md: a read returning data
@@ -137,11 +188,22 @@ internal static class ObjectEndpoints
 
         try
         {
-            await foreach (var chunk in call.ResponseStream.ReadAllAsync(ctx.RequestAborted))
+            var more = hasFirst;
+            while (more)
             {
+                var chunk = call.ResponseStream.Current;
                 hasher?.AppendData(chunk.Data.Span);
                 await ctx.Response.Body.WriteAsync(chunk.Data.Memory, ctx.RequestAborted);
+                more = await call.ResponseStream.MoveNext(ctx.RequestAborted);
             }
+        }
+        catch (RpcException ex) when (ex.StatusCode != StatusCode.NotFound && !ctx.RequestAborted.IsCancellationRequested)
+        {
+            // Headers are already sent: the client gets a broken transfer and retries.
+            logger.LogWarning("Read of CID {Cid} from {Url} failed mid-stream ({Status}); aborting.", record.Cid, node.Url, ex.StatusCode);
+            node.MarkUnhealthy();
+            ctx.Abort();
+            return Results.Empty;
         }
         catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
         {

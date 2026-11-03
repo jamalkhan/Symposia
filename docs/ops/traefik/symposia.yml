@@ -1,0 +1,31 @@
+# Traefik dynamic config: public S3 endpoint for the Symposia dev cluster (issue #135).
+#
+# Install on ds1522: copy to /volume1/docker/traefik/dynamic/symposia.yml. The file provider
+# watches that directory, so the route goes live without restarting Traefik, and removing the
+# file takes it down again. It is its own router and service, so it can't affect other sites.
+#
+# Requirements:
+#   - the Node Host on 10.0.0.213 runs the Blob gateway role on port 9000 (Settings -> Blob gateway);
+#   - macOS allows incoming connections to it (System Settings -> Network -> Firewall);
+#   - symposia.chateaukhan.com resolves to the house (the *.chateaukhan.com DynDNS record covers it).
+#
+# No middlewares on purpose: SigV4 signs the Host header, which Traefik passes through unchanged
+# (passHostHeader defaults to true), and request bodies must stream rather than be buffered.
+# Note: Traefik v3's default entrypoint readTimeout is 60s, so a single PUT has to finish within a
+# minute over the home uplink. Raise --entrypoints.websecure.transport.respondingTimeouts.readTimeout
+# in docker-compose.yml if large uploads from slow links time out.
+http:
+  routers:
+    symposia:
+      rule: "Host(`symposia.chateaukhan.com`)"
+      entryPoints:
+        - websecure
+      service: symposia
+      tls:
+        certResolver: letsencrypt
+  services:
+    symposia:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: "http://10.0.0.213:9000"

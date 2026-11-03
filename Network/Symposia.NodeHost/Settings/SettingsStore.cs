@@ -22,7 +22,7 @@ public sealed class SettingsStore
         _paths = paths;
         _portOffset = portOffset;
         _environment = environment ?? new ConfigurationBuilder().AddEnvironmentVariables(EnvironmentPrefix).Build();
-        _file = SecureFile.Read<HostSettings>(paths.Settings) ?? HostSettings.Defaults(portOffset);
+        _file = (SecureFile.Read<HostSettings>(paths.Settings) ?? HostSettings.Defaults(portOffset)).WithNewDefaults(portOffset);
         LockedKeys = _environment.AsEnumerable()
             .Where(kv => kv.Value is not null)
             .Select(kv => kv.Key)
