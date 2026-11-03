@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -40,7 +41,9 @@ public sealed class NetworkComponent : HostComponent
             builder.Configuration[$"Node:SeedPeers:{i}"] = context.Settings.Discovery.SeedPeers[i];
         }
 
-        builder.Logging.AddProvider(new ComponentLoggerProvider(Name, context.Logs));
+        builder.Logging.AddProvider(context.LoggerProvider(Name));
+        // Per-service levels are applied by the provider (live); let everything through to it.
+        builder.Logging.SetMinimumLevel(LogLevel.Trace);
         builder.Services.AddNodeNetwork(builder.Configuration.GetSection("Node"));
 
         _host = builder.Build();

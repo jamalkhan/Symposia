@@ -17,6 +17,8 @@ public sealed record HostPaths(string DataDir)
 
     public string Component(string name) => Path.Combine(DataDir, name);
 
+    public string Logs(string service) => Path.Combine(DataDir, "logs", service);
+
     public static string DefaultDataDir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".symposia", "node");
 }

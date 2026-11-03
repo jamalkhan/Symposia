@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace Symposia.NodeHost.Components;
 
 public enum ComponentStatus
@@ -17,6 +20,7 @@ public enum ComponentStatus
 public abstract class HostComponent
 {
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
+    private ILogger _logger = NullLogger.Instance;
 
     public abstract string Name { get; }
 
@@ -29,8 +33,10 @@ public abstract class HostComponent
         await _lifecycle.WaitAsync(ct);
         try
         {
+            _logger = context.CreateLogger(Name, $"Symposia.NodeHost.Components.{GetType().Name}");
             if (Status is ComponentStatus.Running or ComponentStatus.Starting)
             {
+                _logger.LogDebug("Start requested but component is already {Status}", Status);
                 return;
             }
 
@@ -38,18 +44,23 @@ public abstract class HostComponent
             if (skip is not null)
             {
                 Set(ComponentStatus.Disabled, skip);
+                _logger.LogInformation("Not starting: {Reason}", skip);
                 return;
             }
 
             Set(ComponentStatus.Starting, null);
+            _logger.LogInformation("Starting");
+            var started = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 await OnStartAsync(context, ct);
                 Set(ComponentStatus.Running, null);
+                _logger.LogInformation("Running (started in {ElapsedMs} ms)", started.ElapsedMilliseconds);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 // Host shutting down mid-start: release anything half-started (e.g. anvil).
+                _logger.LogWarning("Start cancelled because the host is shutting down");
                 await SafeStopAsync();
                 Set(ComponentStatus.Stopped, "Start cancelled");
                 throw;
@@ -57,6 +68,15 @@ public abstract class HostComponent
             catch (Exception ex)
             {
                 Set(ComponentStatus.Faulted, ex is ComponentFaultException ? ex.Message : $"{ex.GetType().Name}: {ex.Message}");
+                if (ex is ComponentFaultException)
+                {
+                    _logger.LogError("Faulted: {Reason}", ex.Message);
+                }
+                else
+                {
+                    _logger.LogError(ex, "Faulted while starting");
+                }
+
                 await SafeStopAsync();
             }
         }
@@ -71,6 +91,11 @@ public abstract class HostComponent
         await _lifecycle.WaitAsync();
         try
         {
+            if (Status is ComponentStatus.Running or ComponentStatus.Starting)
+            {
+                _logger.LogInformation("Stopping");
+            }
+
             await SafeStopAsync();
             if (Status != ComponentStatus.Faulted)
             {
@@ -96,9 +121,10 @@ public abstract class HostComponent
         {
             await OnStopAsync();
         }
-        catch
+        catch (Exception ex)
         {
             // Stopping is best effort; the status already says why it went down.
+            _logger.LogWarning(ex, "Error while stopping (ignored)");
         }
     }
 

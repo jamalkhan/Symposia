@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Symposia.NodeHost.Diagnostics;
 using Symposia.NodeHost.Settings;
 
@@ -12,18 +13,43 @@ public sealed record NetworkInfo(
     string? RpcUrl);
 
 /// <summary>Shared state components read while starting.</summary>
-public sealed class HostContext(HostPaths paths, SecretStore secrets, LogBuffer logs)
+public sealed class HostContext
 {
-    public HostPaths Paths { get; } = paths;
+    private readonly ILogger _hostLogger;
 
-    public SecretStore Secrets { get; } = secrets;
+    public HostContext(HostPaths paths, SecretStore secrets, LogBuffer logs)
+    {
+        Paths = paths;
+        Secrets = secrets;
+        Logs = logs;
+        Logging = new HostLogging(paths, () => Settings.Logging);
+        _hostLogger = CreateLogger("host", "Symposia.NodeHost.Host");
+    }
 
-    public LogBuffer Logs { get; } = logs;
+    public HostPaths Paths { get; }
+
+    public SecretStore Secrets { get; }
+
+    public LogBuffer Logs { get; }
+
+    /// <summary>Per-service log levels and files (node / storage / compute).</summary>
+    public HostLogging Logging { get; }
+
+    /// <summary>Logger provider for one component; its service is chosen from the component name.</summary>
+    public ILoggerProvider LoggerProvider(string component) => new ComponentLoggerProvider(component, Logs, Logging);
+
+    public ILogger CreateLogger(string component, string category) => LoggerProvider(component).CreateLogger(category);
+
+    /// <summary>Logger for host-level events (node log).</summary>
+    public ILogger Logger => _hostLogger;
 
     public HostSettings Settings { get; set; } = new();
 
     /// <summary>Set by the chain component once the network is known; null until then.</summary>
     public NetworkInfo? Network { get; set; }
+
+    /// <summary>Health summary served to peers by the role apps; set once the supervisor exists.</summary>
+    public NodeHealth? Health { get; set; }
 
     public static string EndpointFor(string advertised, int port) =>
         string.IsNullOrWhiteSpace(advertised) ? $"http://127.0.0.1:{port}" : advertised;
@@ -46,12 +72,5 @@ public sealed class HostContext(HostPaths paths, SecretStore secrets, LogBuffer 
         var network = Network ?? throw new InvalidOperationException("Network not resolved yet.");
         var registry = network.NodeRegistryAddress.Length >= 10 ? network.NodeRegistryAddress[2..10].ToLowerInvariant() : "unknown";
         return Path.Combine(Paths.Component(role), $"{network.ChainId}-{registry}");
-    }
-
-    /// <summary>Writes a host-level line to the diagnostics log and console.</summary>
-    public void Log(string level, string message)
-    {
-        Logs.Add(new LogLine(DateTimeOffset.UtcNow, "host", level, message));
-        Console.WriteLine($"[host] {level}: {message}");
     }
 }

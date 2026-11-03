@@ -27,6 +27,7 @@ function show(view) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === view));
   clearInterval(pollTimer);
   if (view === 'diagnostics') { refresh(); pollTimer = setInterval(refresh, 5000); }
+  if (view === 'network') { refreshNetwork(); pollTimer = setInterval(refreshNetwork, 5000); }
   if (view === 'settings') loadSettings();
 }
 
@@ -62,6 +63,17 @@ document.addEventListener('click', (e) => { const g = e.target.closest('[data-go
 const dl = (pairs) => pairs.map(([k, v]) => `<dt>${esc(k)}</dt><dd class="mono">${v === undefined || v === null || v === '' ? '—' : esc(v)}</dd>`).join('');
 const table = (head, rows) => `<tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>` + (rows.length ? rows.join('') : `<tr><td colspan="${head.length}" class="hint">none</td></tr>`);
 
+// Environment comes from the chain ID: 31337 is Anvil; Base Sepolia and Base are fixed.
+// Symposia L3 chain IDs get added here once #48 assigns them.
+const ENVIRONMENTS = { 31337: 'Dev', 84532: 'Testnet', 8453: 'Mainnet' };
+const shortAddress = (a) => (a && a.length > 10 ? `${a.slice(0, 5)}...${a.slice(-3)}` : a || '');
+function setTitle(node, chainId) {
+  const env = chainId ? ENVIRONMENTS[chainId] || `Chain ${chainId}` : '';
+  const title = ['Symposia', shortAddress(node), env].filter(Boolean).join(' ');
+  document.title = title;
+  $('header h1').textContent = title;
+}
+
 async function refresh() {
   let s;
   try { s = await api('GET', '/status'); $('#stale').hidden = true; }
@@ -71,6 +83,7 @@ async function refresh() {
   $('#components').innerHTML = table(['Component', 'Status', 'Detail'], s.components.map((c) =>
     `<tr><td>${esc(c.name)}</td><td class="status ${esc(c.status)}">${esc(c.status)}</td><td>${esc(c.reason)}</td></tr>`));
   const n = s.network || {};
+  setTitle(s.node, n.chainId);
   $('#network').innerHTML = dl([['Mode', s.mode], ['Gateway', n.gatewayUrl], ['Chain ID', n.chainId], ['RPC', n.rpcUrl],
     ['Latest block', s.chain?.latestBlock], ['NodeRegistry', n.nodeRegistryAddress], ['EpochRootRegistry', n.epochRootRegistryAddress], ['Data dir', s.dataDir]]);
   if (s.chain?.error) $('#network').innerHTML += dl([['Chain', s.chain.error]]);
@@ -86,6 +99,27 @@ async function refresh() {
   if (atBottom) logs.scrollTop = logs.scrollHeight;
 }
 
+// ---------- network ----------
+const fmtGb = (b) => `${(b / GB).toFixed(1)} GB`;
+function light(h, describe) {
+  const tip = h.detail || (h.level === 'Off' ? 'Not configured' : describe(h));
+  return `<span class="light ${esc(h.level)}" title="${esc(tip)}"></span> <span class="hint">${esc(tip)}</span>`;
+}
+const storageTip = (h) => (h.freeBytes != null ? `${fmtGb(h.freeBytes)} free of ${fmtGb(h.capacityBytes)}` : h.level);
+const computeTip = (h) => (h.cpuPercent != null ? `${h.cpuPercent}% CPU` : h.level);
+
+async function refreshNetwork() {
+  let s;
+  try { s = await api('GET', '/network'); }
+  catch (ex) { $('#network-error').hidden = false; $('#network-error').textContent = `Network unavailable (${ex.message}) — showing last known data.`; return; }
+  $('#network-error').hidden = !s.error;
+  $('#network-error').textContent = s.error || '';
+  $('#network-nodes').innerHTML = table(['Public IP address', 'Node hash', 'Storage', 'Compute'], s.nodes.map((n) =>
+    `<tr><td class="mono">${esc(n.host)}</td><td class="mono" title="${esc(n.endpoint)}">${esc(n.node)}${n.self ? ' <b>(this node)</b>' : ''}` +
+    `${n.registered ? '' : `<br><span class="hint">${esc(n.notRegisteredReason)}</span>`}</td>` +
+    `<td>${light(n.storage, storageTip)}</td><td>${light(n.compute, computeTip)}</td></tr>`));
+}
+
 // ---------- settings ----------
 let current = null;
 const get = (obj, path) => path.split('.').reduce((o, k) => o?.[k[0].toLowerCase() + k.slice(1)], obj);
@@ -93,6 +127,9 @@ const set = (obj, path, value) => {
   const keys = path.split('.').map((k) => k[0].toLowerCase() + k.slice(1));
   keys.slice(0, -1).reduce((o, k) => (o[k] ??= {}), obj)[keys.at(-1)] = value;
 };
+
+const LOG_LEVELS = ['Trace', 'Debug', 'Information', 'Warning', 'Error', 'Critical'];
+$$('[data-loglevel]').forEach((s) => (s.innerHTML = LOG_LEVELS.map((l) => `<option>${l}</option>`).join('')));
 
 async function loadSettings() {
   let data;

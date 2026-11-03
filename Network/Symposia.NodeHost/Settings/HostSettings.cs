@@ -27,6 +27,8 @@ public sealed class HostSettings
 
     public DiscoverySettings Discovery { get; set; } = new();
 
+    public LoggingSettings Logging { get; set; } = new();
+
     public static HostSettings Defaults(int portOffset) => new()
     {
         Network = new NetworkSettings
@@ -101,4 +103,19 @@ public sealed class DiscoverySettings
     public int IntervalSeconds { get; set; } = 10;
 
     public string[] SeedPeers { get; set; } = [];
+}
+
+/// <summary>
+/// Minimum log level per service. Each service writes its own rolling files under
+/// &lt;data-dir&gt;/logs/&lt;service&gt;/. "Node" covers everything that isn't the storage
+/// or compute role: chain, gateway, network (registration/discovery), the UI and the host.
+/// Applied live; no restart needed.
+/// </summary>
+public sealed class LoggingSettings
+{
+    public Microsoft.Extensions.Logging.LogLevel Node { get; set; } = Microsoft.Extensions.Logging.LogLevel.Information;
+
+    public Microsoft.Extensions.Logging.LogLevel Storage { get; set; } = Microsoft.Extensions.Logging.LogLevel.Information;
+
+    public Microsoft.Extensions.Logging.LogLevel Compute { get; set; } = Microsoft.Extensions.Logging.LogLevel.Information;
 }

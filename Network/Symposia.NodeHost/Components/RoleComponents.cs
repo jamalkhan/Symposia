@@ -1,5 +1,6 @@
 using Symposia.BlobStorage.StorageNode;
 using Symposia.Database.ComputeNode;
+using Symposia.NodeHost.Diagnostics;
 
 namespace Symposia.NodeHost.Components;
 
@@ -83,7 +84,7 @@ public sealed class ComputeRoleComponent : WebAppComponent
         app.Use(async (http, next) =>
         {
             var remote = http.Connection.RemoteIpAddress;
-            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && http.Request.Path != "/v1/peer/handshake")
+            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && http.Request.Path != "/v1/peer/handshake" && http.Request.Path != NodeHealth.Path)
             {
                 http.Response.StatusCode = StatusCodes.Status404NotFound;
                 return;

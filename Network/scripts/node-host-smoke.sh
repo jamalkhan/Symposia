@@ -54,5 +54,15 @@ for c in s['components']: print('  %-8s %-9s %s' % (c['name'], c['status'], c['r
 for p in s['peers']: print('  peer', p['endpoint'], p['status'], p['reason'])"
 done
 
+# Network tab: host A sees both nodes, with B's health fetched from B (storage + compute lit, not grey).
+if [ $status -eq 0 ]; then
+  curl -sf -b "$WORK/a.jar" http://127.0.0.1:$UI_A/api/network | python3 -c "
+import json,sys; s=json.load(sys.stdin)
+for n in s['nodes']: print('  network', n['host'], n['node'], 'storage', n['storage']['level'], 'compute', n['compute']['level'], '(self)' if n['self'] else '')
+other=[n for n in s['nodes'] if not n['self']]
+ok = len(s['nodes'])==2 and other and other[0]['storage']['level'] not in ('Off','Unknown') and other[0]['compute']['level'] not in ('Off','Unknown')
+sys.exit(0 if ok else 1)" || { echo "FAIL: network tab did not report peer health"; status=1; }
+fi
+
 [ $status -eq 0 ] && echo "PASS: both hosts recognize each other" || echo "FAIL: hosts did not recognize each other (logs in $WORK)"
 exit $status

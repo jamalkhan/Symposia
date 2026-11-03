@@ -43,6 +43,7 @@ catch (CorruptFileException ex)
 }
 
 var supervisor = new ComponentSupervisor(new HostContext(paths, secrets, logs), settings);
+supervisor.Context.Health = new NodeHealth(supervisor, identity.NodeId);
 var uiPort = cli.UiPort ?? 5170 + cli.PortOffset;
 
 var setupToken = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(6)).ToLowerInvariant();

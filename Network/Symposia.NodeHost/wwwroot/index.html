@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Symposia Node</title>
+  <title>Symposia</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header>
-    <h1>Symposia Node</h1>
+    <h1>Symposia</h1>
     <span id="node-address" class="mono"></span>
     <nav id="nav" hidden>
       <button data-view="diagnostics" class="tab active">Diagnostics</button>
+      <button data-view="network" class="tab">Network</button>
       <button data-view="settings" class="tab">Settings</button>
       <button id="logout" class="link">Log out</button>
     </nav>
@@ -52,6 +53,16 @@
       <div class="card"><h2>Peers <small>(handshake results)</small></h2><table id="peers"></table></div>
       <div class="card"><h2>Registry members</h2><table id="members"></table></div>
       <div class="card"><h2>Recent log</h2><pre id="logs" class="logs"></pre></div>
+    </section>
+
+    <section id="view-network" hidden>
+      <div id="network-error" class="card notice" hidden></div>
+      <div class="card">
+        <h2>Nodes on this network</h2>
+        <table id="network-nodes"></table>
+        <p class="hint">Storage: green healthy, yellow under 40% free, red 20% free or less. Compute: green healthy, yellow over 20% CPU, red over 50%.
+          Grey means the role isn't configured or the node couldn't be reached. Hover a light for details.</p>
+      </div>
     </section>
 
     <section id="view-settings" hidden>
@@ -105,6 +116,14 @@
           <h2>Discovery</h2>
           <label>Interval (seconds) <input type="number" name="Discovery.IntervalSeconds" min="1"></label>
           <label>Seed peers (comma separated) <input name="Discovery.SeedPeers"></label>
+        </div>
+
+        <div class="card">
+          <h2>Logging</h2>
+          <p class="hint">Each service writes its own daily log files under <code>&lt;data dir&gt;/logs/&lt;service&gt;/</code> (10 MB per file, newest 14 kept). Changes apply immediately.</p>
+          <label>Node <small>(chain, gateway, registration, discovery, this UI)</small> <select name="Logging.Node" data-loglevel></select></label>
+          <label>Storage <select name="Logging.Storage" data-loglevel></select></label>
+          <label>Compute <select name="Logging.Compute" data-loglevel></select></label>
         </div>
 
         <div class="actions">

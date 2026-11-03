@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using Symposia.NodeHost.Settings;
 
 namespace Symposia.NodeHost.Components;
@@ -99,7 +100,7 @@ public sealed partial class ChainComponent : HostComponent
         {
             if (deployment is not null)
             {
-                context.Log("Warning",
+                context.Logger.LogWarning(
                     "The local chain no longer has the previously deployed contracts (chain state was reset or the anvil port changed). " +
                     "Redeploying: all earlier on-chain registrations on this local network are gone, and joined hosts must restart to pick up the new addresses.");
             }

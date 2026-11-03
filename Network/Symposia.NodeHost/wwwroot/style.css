@@ -31,3 +31,5 @@ button.link { background:none; border:none; color:var(--muted); }
 .error { color:var(--bad); min-height:1em; }
 .actions { display:flex; gap:12px; align-items:center; }
 .hint { color:var(--muted); }
+.light { display:inline-block; width:.8em; height:.8em; border-radius:50%; vertical-align:middle; background:var(--muted); }
+.light.Ok { background:#2e9d4f; } .light.Warn { background:#e0b020; } .light.Bad { background:#d23c3c; } .light.Off, .light.Unknown { background:#9aa0a6; }

@@ -43,7 +43,9 @@ public static class UiApp
         builder.Configuration.Sources.Clear();
         builder.Configuration.AddInMemoryCollection();
         builder.Logging.ClearProviders();
-        builder.Logging.AddProvider(new ComponentLoggerProvider("ui", context.Logs));
+        builder.Logging.AddProvider(context.LoggerProvider("ui"));
+        // Per-service levels are applied by the provider (live); let everything through to it.
+        builder.Logging.SetMinimumLevel(LogLevel.Trace);
         // Keys are protected by the owner-only directory, not an XML encryptor; don't warn about it on every start.
         builder.Logging.AddFilter("Microsoft.AspNetCore.DataProtection", LogLevel.Error);
         builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
@@ -52,6 +54,8 @@ public static class UiApp
             json.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
         builder.Services.AddSingleton(supervisor);
         builder.Services.AddMemoryCache();
+        builder.Services.AddSingleton(supervisor.Context.Health ?? new NodeHealth(supervisor, nodeAddress));
+        builder.Services.AddSingleton<NetworkOverview>();
         builder.Services.AddSingleton(sp => new StatusService(supervisor, nodeAddress, sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>()));
 
         // Session cookies survive host restarts: data-protection keys live in an
@@ -73,7 +77,9 @@ public static class UiApp
         builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
             .AddCookie(cookie =>
             {
-                cookie.Cookie.Name = "symposia_node";
+                // Browsers scope cookies by host, not port: two hosts on one machine would overwrite each
+                // other's session, so the name includes the UI port.
+                cookie.Cookie.Name = $"symposia_node_{port}";
                 cookie.Cookie.HttpOnly = true;
                 cookie.Cookie.SameSite = SameSiteMode.Strict;
                 cookie.ExpireTimeSpan = TimeSpan.FromHours(12);
@@ -95,7 +101,12 @@ public static class UiApp
 
         var webRoot = new ManifestEmbeddedFileProvider(typeof(UiApp).Assembly, "wwwroot");
         app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webRoot });
-        app.UseStaticFiles(new StaticFileOptions { FileProvider = webRoot });
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = webRoot,
+            // The UI changes with every host build; make browsers revalidate so a stale app.js never pairs with new HTML.
+            OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache",
+        });
         app.UseRateLimiter();
         app.UseAuthentication();
         app.UseAuthorization();
@@ -184,6 +195,8 @@ public static class UiApp
         });
 
         api.MapGet("/status", async (StatusService status, CancellationToken ct) => Results.Ok(await status.SnapshotAsync(ct)));
+
+        api.MapGet("/network", async (NetworkOverview overview) => Results.Ok(await overview.SnapshotAsync()));
 
         api.MapPost("/components/{name}/restart", async (string name) =>
         {
