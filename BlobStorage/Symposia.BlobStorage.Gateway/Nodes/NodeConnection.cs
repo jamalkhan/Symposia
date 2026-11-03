@@ -10,14 +10,16 @@ public sealed class NodeConnection : IDisposable
 {
     private readonly GrpcChannel _channel;
 
-    public NodeConnection(string url)
+    public NodeConnection(string url, string? expectedNodeId = null)
     {
         Url = url;
+        ExpectedNodeId = expectedNodeId;
         // Allow unencrypted HTTP/2 (h2c) for node communication in dev.
         // Production: set TLS on the channel or terminate TLS at a sidecar.
+        // A short connect timeout keeps a powered-off node from stalling writes and probes.
         _channel = GrpcChannel.ForAddress(url, new GrpcChannelOptions
         {
-            HttpHandler = new HttpClientHandler(),
+            HttpHandler = new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5), EnableMultipleHttp2Connections = true },
         });
         Client = new Protocol.StorageNode.StorageNodeClient(_channel);
     }
@@ -34,6 +36,12 @@ public sealed class NodeConnection : IDisposable
     }
 
     public string Url { get; }
+
+    /// <summary>
+    /// The node address the registry lists for this URL (issue #135). When set, a probe whose
+    /// NodeId differs marks the node unhealthy, so an endpoint can't pose as another node.
+    /// </summary>
+    public string? ExpectedNodeId { get; set; }
 
     public Protocol.StorageNode.StorageNodeClient Client { get; }
 

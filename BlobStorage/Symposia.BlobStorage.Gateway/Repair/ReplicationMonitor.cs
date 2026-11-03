@@ -24,6 +24,15 @@ namespace Symposia.BlobStorage.Gateway.Repair;
 public sealed class ReplicationMonitor : BackgroundService
 {
     private const int PageSize = 200;
+    private const int UnderReplicatedBatch = 500;
+
+    // Coalescing wake-up signal: a node coming online or a short write asks for a prompt
+    // under-replication sweep instead of waiting for the next full scan (issue #135).
+    private readonly System.Threading.Channels.Channel<bool> _sweepRequests =
+        System.Threading.Channels.Channel.CreateBounded<bool>(new System.Threading.Channels.BoundedChannelOptions(1)
+        {
+            FullMode = System.Threading.Channels.BoundedChannelFullMode.DropWrite,
+        });
 
     private readonly GatewayMetadataStore _store;
     private readonly INodeRegistry _nodes;
@@ -45,16 +54,31 @@ public sealed class ReplicationMonitor : BackgroundService
         _logger = logger;
     }
 
+    /// <summary>Asks for a prompt under-replication sweep; repeated requests coalesce.</summary>
+    public void RequestSweep() => _sweepRequests.Writer.TryWrite(true);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Delay initial scan to let nodes come online after startup.
-        await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
+        // Short settle so the first probes land, then catch anything left short before a restart.
+        // Kept brief: sweep requests (a node coming online) wait behind it.
+        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        RequestSweep();
 
+        var interval = TimeSpan.FromSeconds(_options.Value.ReplicationCheckIntervalSeconds);
+        var nextFullScan = DateTimeOffset.UtcNow + interval;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ScanAsync(stoppingToken);
+                if (DateTimeOffset.UtcNow >= nextFullScan)
+                {
+                    await ScanAsync(stoppingToken);
+                    nextFullScan = DateTimeOffset.UtcNow + interval;
+                }
+                else
+                {
+                    SweepUnderReplicated();
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -65,9 +89,48 @@ public sealed class ReplicationMonitor : BackgroundService
                 _logger.LogError(ex, "ReplicationMonitor scan encountered an unexpected error.");
             }
 
-            await Task.Delay(
-                TimeSpan.FromSeconds(_options.Value.ReplicationCheckIntervalSeconds), stoppingToken);
+            // Sleep until the next full scan or an early sweep request, whichever is first.
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            wait.CancelAfter(nextFullScan - DateTimeOffset.UtcNow is var left && left > TimeSpan.Zero ? left : TimeSpan.Zero);
+            try
+            {
+                await _sweepRequests.Reader.ReadAsync(wait.Token);
+            }
+            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+            {
+                // Full-scan time reached.
+            }
         }
+    }
+
+    /// <summary>
+    /// Queues a repair for every object recorded on fewer than MinCopiesPerObject nodes. Index-backed
+    /// (replica_count), so it's cheap enough to run whenever a node comes online or a write lands short.
+    /// </summary>
+    private void SweepUnderReplicated()
+    {
+        var minCopies = _options.Value.MinCopiesPerObject;
+        var shortObjects = _store.ListUnderReplicated(minCopies, UnderReplicatedBatch);
+        if (shortObjects.Count == 0)
+        {
+            _logger.LogDebug("ReplicationMonitor: no under-replicated objects.");
+            return;
+        }
+
+        if (_nodes.Healthy.Count <= 1)
+        {
+            _logger.LogDebug("ReplicationMonitor: {Count} under-replicated object(s), but no second healthy node to copy to yet.",
+                shortObjects.Count);
+            return;
+        }
+
+        foreach (var record in shortObjects)
+        {
+            _repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.UnderReplicated));
+        }
+
+        _logger.LogInformation("ReplicationMonitor: queued repair for {Count} under-replicated object(s) (need {Need} copies).",
+            shortObjects.Count, minCopies);
     }
 
     private async Task ScanAsync(CancellationToken ct)

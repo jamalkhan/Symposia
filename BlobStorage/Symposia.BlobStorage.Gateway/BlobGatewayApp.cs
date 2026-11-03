@@ -1,0 +1,151 @@
+using Symposia.BlobStorage.Gateway;
+using Symposia.BlobStorage.Gateway.Admin;
+using Symposia.BlobStorage.Gateway.Auth;
+using Symposia.BlobStorage.Gateway.GC;
+using Symposia.BlobStorage.Gateway.Metadata;
+using Symposia.BlobStorage.Gateway.Nodes;
+using Symposia.BlobStorage.Gateway.Quorum;
+using Symposia.BlobStorage.Gateway.Repair;
+using Symposia.BlobStorage.Gateway.S3;
+using Symposia.Network.Node;
+
+namespace Symposia.BlobStorage.Gateway;
+
+/// <summary>
+/// Composition root for the S3 gateway, shared by the standalone executable and the
+/// Node Host's blob-gateway role (issue #135), which supplies configuration through
+/// <paramref name="configure"/>.
+/// </summary>
+public static class BlobGatewayApp
+{
+    public static WebApplication Create(WebApplicationOptions options, Action<WebApplicationBuilder>? configure = null)
+    {
+        var builder = WebApplication.CreateBuilder(options);
+        configure?.Invoke(builder);
+
+        // ── Configuration ────────────────────────────────────────────────────────────
+
+        builder.Services.Configure<GatewayOptions>(
+            builder.Configuration.GetSection("Gateway"));
+
+        // ── Services ─────────────────────────────────────────────────────────────────
+
+        builder.Services.AddSingleton<CredentialStore>();
+        builder.Services.AddSingleton<SigV4Verifier>();
+        builder.Services.AddSingleton<GatewayMetadataStore>();
+
+        // NodeRegistry: INodeRegistry + IHostedService (background health probing).
+        // The IHostedService delegate resolves NodeRegistry, so NodeRegistry must stay registered.
+        // INodeRegistry is separately registered so QuorumWriter, endpoints, and background services
+        // can inject it without knowing the concrete type (and tests can replace it).
+        builder.Services.AddSingleton<NodeRegistry>();
+        builder.Services.AddSingleton<INodeRegistry>(sp => sp.GetRequiredService<NodeRegistry>());
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<NodeRegistry>());
+
+        builder.Services.AddScoped<QuorumWriter>();
+
+        // Repair / resilience services.
+        builder.Services.AddSingleton<RepairQueue>();
+        builder.Services.AddSingleton<NodeReconciler>();
+        builder.Services.AddHostedService<GcWorker>();
+        builder.Services.AddHostedService<RepairWorker>();
+        builder.Services.AddSingleton<ReplicationMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<ReplicationMonitor>());
+        builder.Services.AddHostedService<ReconcilePollerService>();
+
+        // Storage nodes from the on-chain registry instead of a static list (issue #135).
+        if (builder.Configuration.GetValue("Gateway:NodeSource", NodeSourceKind.Static) == NodeSourceKind.Registry)
+        {
+            var chainGateway = builder.Configuration["Gateway:BlockchainGatewayUrl"];
+            if (string.IsNullOrWhiteSpace(chainGateway))
+            {
+                throw new InvalidOperationException("Gateway:BlockchainGatewayUrl is required when Gateway:NodeSource is Registry.");
+            }
+
+            builder.Services.AddHttpClient<INodeRegistryClient, NodeRegistryClient>(http =>
+            {
+                http.BaseAddress = new Uri(chainGateway);
+                http.Timeout = TimeSpan.FromSeconds(10);
+            });
+            builder.Services.AddHttpClient(RegistryNodeSync.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
+            builder.Services.AddHostedService<RegistryNodeSync>();
+        }
+
+        // ── Kestrel: HTTP/1.1 for S3 clients ─────────────────────────────────────────
+        // Production terminates TLS externally (load-balancer or sidecar). Cleartext HTTP/2 isn't
+        // negotiated on a mixed listener anyway, and S3 SDKs speak HTTP/1.1 (issue #135).
+        var listenPort = builder.Configuration.GetValue("Gateway:ListenPort", 5181);
+        builder.WebHost.ConfigureKestrel(kestrel =>
+        {
+            // S3 PUTs are streamed chunk by chunk to the nodes, so whole-object bodies (100 MB+, issue #135)
+            // never sit in memory; Kestrel's 30 MB default would reject them.
+            kestrel.Limits.MaxRequestBodySize = null;
+            kestrel.ListenAnyIP(listenPort, lo =>
+                lo.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1);
+        });
+
+        var app = builder.Build();
+
+        // ── Init ──────────────────────────────────────────────────────────────────────
+
+        app.Services.GetRequiredService<GatewayMetadataStore>().Initialize();
+
+        // A node coming online (new, or back from an outage) gets missing copies straight away (issue #135).
+        var replicationMonitor = app.Services.GetRequiredService<ReplicationMonitor>();
+        app.Services.GetRequiredService<NodeRegistry>().NodeBecameHealthy += _ => replicationMonitor.RequestSweep();
+
+        // ── SigV4 middleware ──────────────────────────────────────────────────────────
+
+        // Runs before routing. Exempt health and admin endpoints.
+        app.Use(async (ctx, next) =>
+        {
+            var path = ctx.Request.Path.Value ?? "";
+            if (path.StartsWith("/healthz/", StringComparison.Ordinal) ||
+                path.StartsWith("/admin/", StringComparison.Ordinal))
+            {
+                await next();
+                return;
+            }
+
+            var verifier = ctx.RequestServices.GetRequiredService<SigV4Verifier>();
+            var tenantId = verifier.Verify(ctx.Request);
+            if (tenantId is null)
+            {
+                ctx.Response.StatusCode = 403;
+                ctx.Response.ContentType = "application/xml";
+                await ctx.Response.WriteAsync(
+                    "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>");
+                return;
+            }
+
+            ctx.Items["TenantId"] = tenantId;
+            await next();
+        });
+
+        // ── Health endpoints ──────────────────────────────────────────────────────────
+
+        app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));
+
+        app.MapGet("/healthz/ready", (INodeRegistry nodes) =>
+        {
+            var healthy = nodes.Healthy;
+            return healthy.Count > 0
+                ? Results.Ok(new { status = "ready", nodes = healthy.Count })
+                : Results.StatusCode(503);
+        });
+
+        // ── Admin endpoints ───────────────────────────────────────────────────────────
+
+        AdminEndpoints.Map(app);
+
+        // ── S3 routes ─────────────────────────────────────────────────────────────────
+
+        // Object routes must be registered before bucket routes so /{bucket}/{**key}
+        // takes priority over /{bucket} when a key is present.
+        ObjectEndpoints.Map(app);
+        BucketEndpoints.Map(app);
+        return app;
+    }
+
+    public static WebApplication Create(string[] args) => Create(new WebApplicationOptions { Args = args });
+}

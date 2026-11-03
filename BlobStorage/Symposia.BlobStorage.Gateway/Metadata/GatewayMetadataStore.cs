@@ -64,6 +64,27 @@ public sealed class GatewayMetadataStore
                 source     TEXT NOT NULL   -- 'config' | 'admin'
             );
             """);
+
+        // replica_count mirrors the number of entries in node_ids so "which objects have too few
+        // copies" is an index lookup instead of a full scan (issue #135). Added in place for
+        // existing databases, then backfilled once from node_ids (comma separated).
+        var hasReplicaCount = false;
+        using (var pragma = Query(conn, "SELECT 1 FROM pragma_table_info('objects') WHERE name = 'replica_count'"))
+        {
+            hasReplicaCount = pragma.ExecuteScalar() is not null;
+        }
+
+        if (!hasReplicaCount)
+        {
+            Execute(conn, """
+                ALTER TABLE objects ADD COLUMN replica_count INTEGER NOT NULL DEFAULT 0;
+                UPDATE objects SET replica_count =
+                    CASE WHEN node_ids = '' THEN 0
+                         ELSE length(node_ids) - length(replace(node_ids, ',', '')) + 1 END;
+                """);
+        }
+
+        Execute(conn, "CREATE INDEX IF NOT EXISTS idx_objects_replica_count ON objects (replica_count);");
     }
 
     public bool BucketExists(string name)
@@ -112,19 +133,21 @@ public sealed class GatewayMetadataStore
         using var conn = Open();
         Execute(Query(conn,
             """
-            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids)
-            VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni)
+            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count)
+            VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc)
             ON CONFLICT(bucket, key) DO UPDATE SET
                 cid = excluded.cid,
                 size_bytes = excluded.size_bytes,
                 content_type = excluded.content_type,
                 last_modified = excluded.last_modified,
-                node_ids = excluded.node_ids;
+                node_ids = excluded.node_ids,
+                replica_count = excluded.replica_count;
             """,
             ("$b", record.Bucket), ("$k", record.Key), ("$cid", record.Cid),
             ("$sz", record.SizeBytes), ("$ct", record.ContentType),
             ("$lm", record.LastModified.ToString("O")),
-            ("$ni", string.Join(',', record.NodeIds))));
+            ("$ni", string.Join(',', record.NodeIds)),
+            ("$rc", record.NodeIds.Count)));
     }
 
     /// <summary>Returns false if the object did not exist (externally delete is always idempotent).</summary>
@@ -173,8 +196,8 @@ public sealed class GatewayMetadataStore
     {
         using var conn = Open();
         Execute(Query(conn,
-            "UPDATE objects SET node_ids = $ni WHERE bucket = $b AND key = $k",
-            ("$ni", string.Join(',', nodeIds)), ("$b", bucket), ("$k", key)));
+            "UPDATE objects SET node_ids = $ni, replica_count = $rc WHERE bucket = $b AND key = $k",
+            ("$ni", string.Join(',', nodeIds)), ("$rc", nodeIds.Count), ("$b", bucket), ("$k", key)));
     }
 
     /// <summary>
@@ -188,10 +211,39 @@ public sealed class GatewayMetadataStore
             ? Query(conn,
                 "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects ORDER BY bucket, key LIMIT $limit",
                 ("$limit", limit))
+            // Row-value comparison so the cursor seeks via idx_objects_bucket_key; the old
+            // (bucket || '/' || key) expression forced a full scan per page (issue #135).
+            // Bucket names never contain '/', so the cursor splits unambiguously.
             : Query(conn,
-                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE (bucket || '/' || key) > $after ORDER BY bucket, key LIMIT $limit",
-                ("$after", afterKey), ("$limit", limit));
+                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE (bucket, key) > ($ab, $ak) ORDER BY bucket, key LIMIT $limit",
+                ("$ab", afterKey[..Math.Max(0, afterKey.IndexOf('/'))]), ("$ak", afterKey[(afterKey.IndexOf('/') + 1)..]), ("$limit", limit));
 
+        return ReadRecords(cmd);
+    }
+
+    /// <summary>
+    /// Up to <paramref name="limit"/> objects recorded on fewer than <paramref name="minCopies"/>
+    /// nodes, fewest copies first. Backed by idx_objects_replica_count (issue #135).
+    /// </summary>
+    public IReadOnlyList<ObjectRecord> ListUnderReplicated(int minCopies, int limit)
+    {
+        using var conn = Open();
+        using var cmd = Query(conn,
+            "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE replica_count < $min ORDER BY replica_count LIMIT $limit",
+            ("$min", minCopies), ("$limit", limit));
+        return ReadRecords(cmd);
+    }
+
+    /// <summary>How many objects are recorded on fewer than <paramref name="minCopies"/> nodes (idx_objects_replica_count).</summary>
+    public long CountUnderReplicated(int minCopies)
+    {
+        using var conn = Open();
+        using var cmd = Query(conn, "SELECT COUNT(*) FROM objects WHERE replica_count < $min", ("$min", minCopies));
+        return (long)cmd.ExecuteScalar()!;
+    }
+
+    private static IReadOnlyList<ObjectRecord> ReadRecords(SqliteCommand cmd)
+    {
         using var r = cmd.ExecuteReader();
         var results = new List<ObjectRecord>();
         while (r.Read())

@@ -18,12 +18,17 @@ public sealed class QuorumWriter
     private readonly INodeRegistry _nodes;
     private readonly GatewayMetadataStore _metadata;
     private readonly int _quorumCount;
+    private readonly int _minCopies;
+    private readonly Repair.RepairQueue? _repairQueue;
 
-    public QuorumWriter(INodeRegistry nodes, GatewayMetadataStore metadata, IOptions<GatewayOptions> options)
+    public QuorumWriter(INodeRegistry nodes, GatewayMetadataStore metadata, IOptions<GatewayOptions> options,
+        Repair.RepairQueue? repairQueue = null)
     {
         _nodes = nodes;
         _metadata = metadata;
         _quorumCount = options.Value.WriteQuorumCount;
+        _minCopies = options.Value.MinCopiesPerObject;
+        _repairQueue = repairQueue;
     }
 
     /// <summary>
@@ -69,6 +74,14 @@ public sealed class QuorumWriter
             DateTimeOffset.UtcNow, nodeIds);
 
         _metadata.PutObject(record);
+
+        // Quorum can be below the copy target (issue #135: write succeeds on one node); queue the
+        // missing copies now rather than waiting for the next replication scan.
+        if (nodeIds.Count < _minCopies)
+        {
+            _repairQueue?.Enqueue(new Repair.RepairTask(cid, null, Repair.RepairReason.UnderReplicated));
+        }
+
         return record;
     }
 
