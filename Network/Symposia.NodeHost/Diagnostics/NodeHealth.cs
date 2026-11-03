@@ -22,7 +22,11 @@ public sealed record StorageHealth(bool Configured, HealthLevel Level, long? Cap
 public sealed record ComputeHealth(bool Configured, HealthLevel Level, double? CpuPercent, string? Detail);
 
 /// <summary>What one node reports about itself at <see cref="NodeHealth.Path"/>.</summary>
-public sealed record NodeHealthReport(string Node, StorageHealth Storage, ComputeHealth Compute);
+public sealed record GatewayHealth(
+    bool Configured, HealthLevel Level, int? StorageNodes, int? HealthyStorageNodes, long? UnderReplicated, int? Port, string? Detail);
+
+/// <summary>What one node reports about itself at <see cref="NodeHealth.Path"/>. Gateway is null from nodes predating #135.</summary>
+public sealed record NodeHealthReport(string Node, StorageHealth Storage, ComputeHealth Compute, GatewayHealth? Gateway = null);
 
 /// <summary>
 /// This host's storage and compute health, served publicly by the role apps so
@@ -38,7 +42,49 @@ public sealed class NodeHealth(ComponentSupervisor supervisor, string nodeAddres
     public const double ComputeWarnCpuPercent = 20;
     public const double ComputeBadCpuPercent = 50;
 
-    public NodeHealthReport Local() => new(nodeAddress, Storage(), Compute());
+    public NodeHealthReport Local() => new(nodeAddress, Storage(), Compute(), Gateway());
+
+    /// <summary>
+    /// Blob gateway: green when it can reach enough storage nodes to keep every object at its copy
+    /// target, yellow when it's short of nodes or still repairing, red when it isn't running or has none.
+    /// </summary>
+    private GatewayHealth Gateway()
+    {
+        var settings = supervisor.Context.Settings.BlobGateway;
+        if (!settings.Enabled)
+        {
+            return new GatewayHealth(false, HealthLevel.Off, null, null, null, null, null);
+        }
+
+        var component = supervisor.BlobGateway;
+        var nodes = component.Services?.GetService<Symposia.BlobStorage.Gateway.Nodes.INodeRegistry>();
+        var store = component.Services?.GetService<Symposia.BlobStorage.Gateway.Metadata.GatewayMetadataStore>();
+        if (component.Status != ComponentStatus.Running || nodes is null || store is null)
+        {
+            return new GatewayHealth(true, HealthLevel.Bad, null, null, null, settings.Port, component.Reason ?? $"Blob gateway is {component.Status}");
+        }
+
+        var all = nodes.All.Count;
+        var healthy = nodes.All.Count(n => n.IsHealthy);
+        long? shortCopies = null;
+        try
+        {
+            shortCopies = store.CountUnderReplicated(settings.MinCopies);
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException)
+        {
+            // Diagnostics only; leave the count unknown.
+        }
+
+        var level = healthy == 0 ? HealthLevel.Bad
+            : healthy < settings.MinCopies || shortCopies > 0 ? HealthLevel.Warn
+            : HealthLevel.Ok;
+        var detail = healthy == 0 ? "No reachable storage nodes"
+            : healthy < settings.MinCopies ? $"Only {healthy} storage node(s) reachable; objects can't reach {settings.MinCopies} copies"
+            : shortCopies > 0 ? $"{shortCopies} object(s) waiting for another copy"
+            : null;
+        return new GatewayHealth(true, level, all, healthy, shortCopies, settings.Port, detail);
+    }
 
     private StorageHealth Storage()
     {

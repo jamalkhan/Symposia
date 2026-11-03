@@ -17,6 +17,8 @@ public sealed class SecretStore(HostPaths paths)
         public string? PasswordHash { get; set; }
 
         public string? RelayerPrivateKey { get; set; }
+
+        public string? BlobGatewaySecret { get; set; }
     }
 
     public bool HasPassword => Load().PasswordHash is not null;
@@ -49,6 +51,14 @@ public sealed class SecretStore(HostPaths paths)
         var hash = Load().PasswordHash;
         return hash is not null && Hasher.VerifyHashedPassword(User, hash, password) != PasswordVerificationResult.Failed;
     }
+
+    public bool HasBlobGatewaySecret => !string.IsNullOrEmpty(Load().BlobGatewaySecret);
+
+    /// <summary>Secret half of the blob gateway's access key (issue #135).</summary>
+    public string? BlobGatewaySecret => Load().BlobGatewaySecret;
+
+    public void SetBlobGatewaySecret(string? secret) =>
+        Update(s => s.BlobGatewaySecret = string.IsNullOrWhiteSpace(secret) ? null : secret.Trim());
 
     public void SetRelayerKey(string? key) => Update(s => s.RelayerPrivateKey = string.IsNullOrWhiteSpace(key) ? null : key.Trim());
 

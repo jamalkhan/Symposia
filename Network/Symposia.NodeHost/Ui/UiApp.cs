@@ -15,7 +15,7 @@ namespace Symposia.NodeHost.Ui;
 
 public sealed record PasswordRequest(string? Password, string? SetupToken = null);
 
-public sealed record SettingsUpdate(HostSettings? Settings, string? RelayerKey);
+public sealed record SettingsUpdate(HostSettings? Settings, string? RelayerKey, string? BlobGatewaySecret = null);
 
 /// <summary>
 /// Password-protected configuration and diagnostics UI (issue #133 FR-E).
@@ -56,7 +56,7 @@ public static class UiApp
         builder.Services.AddMemoryCache();
         builder.Services.AddSingleton(supervisor.Context.Health ?? new NodeHealth(supervisor, nodeAddress));
         builder.Services.AddSingleton<NetworkOverview>();
-        builder.Services.AddSingleton(sp => new StatusService(supervisor, nodeAddress, sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>()));
+        builder.Services.AddSingleton(sp => new StatusService(supervisor, nodeAddress, sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(), sp.GetRequiredService<NodeHealth>()));
 
         // Session cookies survive host restarts: data-protection keys live in an
         // owner-only directory under the data dir (anyone who can read them can forge a session).
@@ -167,6 +167,8 @@ public static class UiApp
             settings = settings.Effective,
             lockedKeys = settings.LockedKeys,
             relayerKeySet = secrets.HasRelayerKey,
+            blobGatewaySecretSet = secrets.HasBlobGatewaySecret,
+            lanAddress = LanAddress.Detect(),
             presets = ChainPresets.All.Select(p => new { name = p.Key, p.Value.Description, deployed = p.Value.IsDeployed }),
             localGatewayFound = settings.Effective.Network.Mode == NetworkMode.Unconfigured
                 && await ChainComponent.GatewayRespondsAsync("http://127.0.0.1:8080", ct),
@@ -190,7 +192,18 @@ public static class UiApp
                 secrets.SetRelayerKey(update.RelayerKey);
             }
 
-            await supervisor.SaveAndApplyAsync(update.Settings, hostLifetime);
+            var secretChanged = !string.IsNullOrWhiteSpace(update.BlobGatewaySecret);
+            if (secretChanged)
+            {
+                secrets.SetBlobGatewaySecret(update.BlobGatewaySecret);
+            }
+
+            var restarted = await supervisor.SaveAndApplyAsync(update.Settings, hostLifetime);
+            if (secretChanged && !restarted.Contains(supervisor.BlobGateway))
+            {
+                await supervisor.RestartBlobGatewayAsync(hostLifetime);
+            }
+
             return Results.Ok();
         });
 
@@ -244,6 +257,20 @@ public static class UiApp
         {
             ports.Add(("compute", s.Compute.Port));
             CheckEndpoint("Compute", s.Compute.AdvertisedEndpoint, errors);
+        }
+
+        if (s.Storage.Enabled)
+        {
+            ports.Add(("storage gRPC", s.Storage.GrpcPort));
+        }
+
+        if (s.BlobGateway.Enabled)
+        {
+            ports.Add(("blob gateway", s.BlobGateway.Port));
+            if (s.BlobGateway.WriteQuorum < 1 || s.BlobGateway.MinCopies < s.BlobGateway.WriteQuorum)
+            {
+                errors.Add("Blob gateway: write quorum must be at least 1 and no more than the minimum copies.");
+            }
         }
 
         errors.AddRange(ports.Where(p => p.Port is < 1 or > 65535).Select(p => $"{p.Name} port {p.Port} is out of range."));

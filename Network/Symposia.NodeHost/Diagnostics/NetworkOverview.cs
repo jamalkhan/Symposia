@@ -12,6 +12,9 @@ namespace Symposia.NodeHost.Diagnostics;
 public sealed record NetworkNodeRow(string Node, string? Endpoint, string? Host, bool Self, bool Registered, StorageHealth Storage, ComputeHealth Compute)
 {
     public string? NotRegisteredReason { get; init; }
+
+    /// <summary>Null when the node didn't report one (older nodes, or unreachable).</summary>
+    public GatewayHealth? Gateway { get; init; }
 }
 
 /// <summary>
@@ -98,7 +101,7 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
                 : "Not registered on-chain yet (see Diagnostics → On-chain registration).";
             logger.LogDebug("Network overview: this node is not in the registry ({Reason})", reason);
             rows.Insert(0, new NetworkNodeRow(self.Node, supervisor.Context.PrimaryEndpoint, null, true, false,
-                self.Storage, self.Compute) { NotRegisteredReason = reason });
+                self.Storage, self.Compute) { NotRegisteredReason = reason, Gateway = self.Gateway });
         }
 
         return new { error, nodes = rows };
@@ -109,7 +112,7 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
         var host = Uri.TryCreate(member.Endpoint, UriKind.Absolute, out var uri) ? uri.Host : null;
         if (string.Equals(member.Node, self.Node, StringComparison.OrdinalIgnoreCase))
         {
-            return new NetworkNodeRow(member.Node, member.Endpoint, host, true, true, self.Storage, self.Compute);
+            return new NetworkNodeRow(member.Node, member.Endpoint, host, true, true, self.Storage, self.Compute) { Gateway = self.Gateway };
         }
 
         if (uri is null || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
@@ -133,7 +136,7 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
 
             logger.LogDebug("Node {Node} at {Url}: storage {Storage}, compute {Compute} ({ElapsedMs} ms)",
                 member.Node, url, report.Storage.Level, report.Compute.Level, started.ElapsedMilliseconds);
-            return new NetworkNodeRow(member.Node, member.Endpoint, host, false, true, report.Storage, report.Compute);
+            return new NetworkNodeRow(member.Node, member.Endpoint, host, false, true, report.Storage, report.Compute) { Gateway = report.Gateway };
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or NotSupportedException)
         {

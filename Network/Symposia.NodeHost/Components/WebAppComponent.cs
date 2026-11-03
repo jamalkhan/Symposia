@@ -36,7 +36,7 @@ public abstract class WebAppComponent : HostComponent
     {
         var dir = context.Paths.Component(Name);
         Directory.CreateDirectory(dir);
-        if (Name is "storage" or "compute")
+        if (Name is "storage" or "compute" or "blobgateway")
         {
             Directory.CreateDirectory(context.RoleDataDir(Name));
         }

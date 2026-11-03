@@ -1,3 +1,4 @@
+using Symposia.BlobStorage.Gateway;
 using Symposia.BlobStorage.StorageNode;
 using Symposia.Database.ComputeNode;
 using Symposia.NodeHost.Diagnostics;
@@ -42,6 +43,7 @@ public sealed class StorageRoleComponent : WebAppComponent
         var config = new Dictionary<string, string?>
         {
             ["StorageNode:ListenPort"] = storage.Port.ToString(),
+            ["StorageNode:GrpcPort"] = storage.GrpcPort.ToString(),
             ["StorageNode:StorageRoot"] = Path.Combine(dir, "blobs"),
             ["StorageNode:ManifestDbPath"] = Path.Combine(dir, "manifest.db"),
             ["StorageNode:MaxCapacityBytes"] = storage.MaxCapacityBytes.ToString(),
@@ -126,5 +128,60 @@ public sealed class ComputeRoleComponent : WebAppComponent
         }
 
         return path;
+    }
+}
+
+/// <summary>
+/// The S3-compatible blob gateway role (issue #135). Storage nodes come from the on-chain
+/// registry; writes succeed at <see cref="Settings.BlobGatewaySettings.WriteQuorum"/> copies and
+/// missing copies up to <see cref="Settings.BlobGatewaySettings.MinCopies"/> are repaired promptly.
+/// </summary>
+public sealed class BlobGatewayRoleComponent : WebAppComponent
+{
+    public override string Name => "blobgateway";
+
+    protected override bool BindsOwnPort => true;
+
+    protected override string? SkipReason(HostContext context)
+    {
+        var gateway = context.Settings.BlobGateway;
+        if (!gateway.Enabled)
+        {
+            return "Blob gateway role is turned off";
+        }
+
+        if (string.IsNullOrWhiteSpace(gateway.AccessKeyId) || !context.Secrets.HasBlobGatewaySecret)
+        {
+            return "Set an access key ID and secret in Settings to start the blob gateway";
+        }
+
+        return base.SkipReason(context);
+    }
+
+    protected override WebApplication Build(WebApplicationOptions options, Action<WebApplicationBuilder> configure, HostContext context) =>
+        BlobGatewayApp.Create(options, configure);
+
+    protected override int Port(HostContext context) => context.Settings.BlobGateway.Port;
+
+    protected override IDictionary<string, string?> Configuration(HostContext context)
+    {
+        var gateway = context.Settings.BlobGateway;
+        var network = context.Network!;
+        return new Dictionary<string, string?>
+        {
+            ["Gateway:ListenPort"] = gateway.Port.ToString(),
+            ["Gateway:Region"] = gateway.Region,
+            ["Gateway:MetadataDbPath"] = Path.Combine(context.RoleDataDir(Name), "gateway-metadata.db"),
+            ["Gateway:WriteQuorumCount"] = gateway.WriteQuorum.ToString(),
+            ["Gateway:MinCopiesPerObject"] = gateway.MinCopies.ToString(),
+            ["Gateway:ProbeIntervalSeconds"] = "10",
+            ["Gateway:ReplicationCheckIntervalSeconds"] = "60",
+            ["Gateway:NodeSource"] = "Registry",
+            ["Gateway:BlockchainGatewayUrl"] = network.GatewayUrl,
+            ["Gateway:RegistryRefreshSeconds"] = context.Settings.Discovery.IntervalSeconds.ToString(),
+            ["Gateway:Credentials:0:AccessKeyId"] = gateway.AccessKeyId,
+            ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
+            ["Gateway:Credentials:0:TenantId"] = "dev",
+        };
     }
 }

@@ -43,12 +43,38 @@ dotnet run --project Network/Symposia.NodeHost -- --data-dir /tmp/node-b --port-
 
 To do the whole thing automatically: `Network/scripts/node-host-smoke.sh`.
 
+## Two machines on a LAN
+
+Each storage node registers the address other nodes use to reach it. The default is `127.0.0.1`, which only works on one machine. On each host, open **Settings → Storage role** and click **Use <your LAN IP>** next to *Advertised endpoint*, which fills in something like `http://10.0.0.213:5180`. Then save.
+
+The second machine joins with **Join a network** and the first machine's gateway, for example `http://10.0.0.213:8080`. If it starts before that gateway is reachable, it keeps retrying every 5 to 60 seconds; you don't need to restart it.
+
+## Storing files (S3)
+
+Turn on **Settings → Blob gateway** on one host, click **Generate a new key pair**, copy the secret, and save. The gateway finds every storage node on the network through the on-chain registry. An upload succeeds once **one** node has it (*write quorum*), and the gateway copies it to a second node in the background (*minimum copies*). That second copy normally happens during the upload itself, or within seconds of a missing node coming back.
+
+```bash
+export AWS_ACCESS_KEY_ID=<key id> AWS_SECRET_ACCESS_KEY=<secret> AWS_DEFAULT_REGION=us-east-1
+S3="aws --endpoint-url http://localhost:9000"        # or https://symposia.chateaukhan.com
+$S3 s3 mb s3://proof
+$S3 s3api put-object --bucket proof --key file.bin --body ./file.bin
+$S3 s3 cp s3://proof/file.bin ./back.bin
+```
+
+**Multipart upload isn't supported yet (#5).** `aws s3 cp` switches to multipart above 8 MB and fails with `405`. For bigger files, use `s3api put-object`, or raise the threshold once with `aws configure set default.s3.multipart_threshold 5GB`.
+
+Diagnostics shows how many storage nodes the gateway can reach and how many objects are waiting for their second copy. The Network tab shows a Gateway light for each node.
+
+**Public endpoint:** [`docs/ops/traefik/symposia.yml`](../../docs/ops/traefik/symposia.yml) is the Traefik route for `https://symposia.chateaukhan.com`. Only the gateway port (9000) needs to be reachable from Traefik. Keep the storage ports, including the gRPC ports `6180+`, LAN-only.
+
+To run a two-node S3 check automatically: `Network/scripts/s3-cluster-smoke.sh`.
+
 ## Options
 
 | Option | Default | |
 |---|---|---|
 | `--data-dir DIR` | `~/.symposia/node` | Holds the identity key, settings, secrets, chain state and role data |
-| `--port-offset N` | `0` | Adds N to every default port (UI 5170, gateway 8080, anvil 8545, storage 5180, compute 5190) |
+| `--port-offset N` | `0` | Adds N to every default port (UI 5170, gateway 8080, anvil 8545, storage 5180, storage gRPC 6180, compute 5190, blob gateway 9000) |
 | `--ui-port P` | `5170 + offset` | |
 
 Any setting can be fixed with an environment variable, for example `SYMPOSIA__Storage__Enabled=true` or `SYMPOSIA__Network__Mode=Join`. Settings fixed this way are shown as locked in the UI.
@@ -59,6 +85,6 @@ Any setting can be fixed with an environment variable, for example `SYMPOSIA__St
 |---|---|
 | `node.key` (+ `.initialized`) | Node identity. **Back this up.** A host that loses it after initialization refuses to start rather than silently becoming a new node |
 | `settings.json` | Everything set in the UI |
-| `secrets.json` (0600) | Admin password hash and relayer key |
+| `secrets.json` (0600) | Admin password hash, relayer key and the blob gateway's secret key |
 | `anvil-state.json`, `network.json` | Local dev chain state and deployed contract addresses |
-| `storage/`, `compute/` | Role data, kept in a separate folder per network (`<chainId>-<registry>`) |
+| `storage/`, `compute/`, `blobgateway/` | Role data, kept in a separate folder per network (`<chainId>-<registry>`) |

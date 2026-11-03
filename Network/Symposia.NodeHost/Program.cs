@@ -59,7 +59,11 @@ Console.WriteLine($"""
 
 """);
 
-var startup = Task.Run(() => supervisor.StartAllAsync(ui.Lifetime.ApplicationStopping));
+var startup = Task.Run(async () =>
+{
+    await supervisor.StartAllAsync(ui.Lifetime.ApplicationStopping);
+    await supervisor.RecoverNetworkAsync(ui.Lifetime.ApplicationStopping);
+});
 await ui.WaitForShutdownAsync();
 
 try
