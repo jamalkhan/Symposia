@@ -8,6 +8,7 @@
 #   AC4     upload with node B down succeeds, then reaches node B within 60 s of its return
 #   AC5     wrong secret -> 403
 #   AC6     no storage nodes -> 503-class error within 30 s
+#   #140    an unsigned gRPC call straight to a storage node is refused (Unauthenticated)
 #
 # Usage: Network/scripts/s3-cluster-smoke.sh [work-dir]   (OFFSET_A / OFFSET_B env to change ports)
 set -euo pipefail
@@ -68,6 +69,14 @@ aws --endpoint-url http://127.0.0.1:$S3_A s3 ls s3://proof >/dev/null 2>&1 \
   && [ "$(AWS_SECRET_ACCESS_KEY=wrong aws --endpoint-url http://127.0.0.1:$S3_A s3 ls s3://proof 2>&1 | grep -c -E '403|AccessDenied|SignatureDoesNotMatch')" -ge 1 ] \
   || fail "AC5: wrong secret was not rejected with 403"
 echo "PASS AC5: wrong secret rejected"
+
+# #140: storage gRPC only answers registered, signed callers. An empty Probe frame without a token:
+GRPC_B=$((6180 + B))
+status=$(printf '\x00\x00\x00\x00\x00' | curl -s --http2-prior-knowledge -o /dev/null -D - -X POST \
+  -H 'content-type: application/grpc' -H 'te: trailers' --data-binary @- \
+  http://127.0.0.1:$GRPC_B/symposia.blobstorage.v1.StorageNode/Probe | tr -d '\r' | awk -F': ' 'tolower($1)=="grpc-status"{print $2}')
+[ "$status" = "16" ] || fail "#140: unsigned gRPC call to storage node returned grpc-status '$status', expected 16 (Unauthenticated)"
+echo "PASS #140: unsigned storage gRPC call refused"
 
 kill -TERM $PID_B; wait $PID_B 2>/dev/null || true; PID_B=""
 $S3 cp "s3://proof/dir one/ünï/medium.bin" "$WORK/medium.back2" >/dev/null || fail "AC3: download failed with node B down"

@@ -62,6 +62,17 @@ public sealed class GatewayOptions
     /// <summary>Blockchain Gateway base URL; required when <see cref="NodeSource"/> is Registry.</summary>
     public string BlockchainGatewayUrl { get; set; } = "";
 
+    /// <summary>
+    /// The gateway host's node identity key (issue #140). When set (registry mode), every storage RPC
+    /// is signed with it; storage nodes requiring caller auth only accept registered callers, so the
+    /// host must be registered on <see cref="ChainId"/> / <see cref="NodeRegistryAddress"/>.
+    /// </summary>
+    public string NodeIdentityKeyPath { get; set; } = "";
+
+    public ulong ChainId { get; set; }
+
+    public string NodeRegistryAddress { get; set; } = "";
+
     /// <summary>How often the registry is re-read for storage nodes (seconds).</summary>
     public int RegistryRefreshSeconds { get; set; } = 10;
 }

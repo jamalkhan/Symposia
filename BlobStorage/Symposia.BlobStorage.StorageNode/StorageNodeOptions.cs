@@ -16,6 +16,12 @@ public sealed class StorageNodeOptions
     /// </summary>
     public int GrpcPort { get; set; }
 
+    /// <summary>
+    /// Require a node-identity token from a registered network member on every gRPC call (issue #140).
+    /// Off for standalone/dev use; the Node Host turns it on.
+    /// </summary>
+    public bool RequireCallerAuth { get; set; }
+
     /// <summary>Total bytes this node offers to the network (operator-configured).</summary>
     public long MaxCapacityBytes { get; set; } = 10L * 1024 * 1024 * 1024;
 

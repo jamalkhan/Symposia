@@ -48,6 +48,8 @@ public sealed class StorageRoleComponent : WebAppComponent
         {
             ["StorageNode:ListenPort"] = storage.Port.ToString(),
             ["StorageNode:GrpcPort"] = storage.GrpcPort.ToString(),
+            // Only registered members of this network may call the storage API (issue #140).
+            ["StorageNode:RequireCallerAuth"] = "true",
             ["StorageNode:StorageRoot"] = Path.Combine(dir, "blobs"),
             ["StorageNode:ManifestDbPath"] = Path.Combine(dir, "manifest.db"),
             ["StorageNode:MaxCapacityBytes"] = storage.MaxCapacityBytes.ToString(),
@@ -190,6 +192,10 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:BlockchainGatewayUrl"] = network.GatewayUrl,
             // Same cadence as peer discovery: both read the same registry, so one knob for both.
             ["Gateway:RegistryRefreshSeconds"] = context.Settings.Discovery.IntervalSeconds.ToString(),
+            // Storage RPCs are signed with this host's node key (issue #140).
+            ["Gateway:NodeIdentityKeyPath"] = context.Paths.NodeKey,
+            ["Gateway:ChainId"] = network.ChainId.ToString(),
+            ["Gateway:NodeRegistryAddress"] = network.NodeRegistryAddress,
             ["Gateway:Credentials:0:AccessKeyId"] = gateway.AccessKeyId,
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
             ["Gateway:Credentials:0:TenantId"] = "dev",

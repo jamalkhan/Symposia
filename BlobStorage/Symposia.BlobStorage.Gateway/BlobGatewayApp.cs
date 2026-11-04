@@ -69,6 +69,29 @@ public static class BlobGatewayApp
             });
             builder.Services.AddHttpClient(RegistryNodeSource.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
             builder.Services.AddSingleton<IStorageNodeSource, RegistryNodeSource>();
+
+            // Sign storage RPCs with the host's node key (issue #140). The host's key already exists;
+            // never generate one here, or the gateway would sign as an unregistered stranger.
+            var keyPath = builder.Configuration["Gateway:NodeIdentityKeyPath"];
+            if (!string.IsNullOrWhiteSpace(keyPath))
+            {
+                if (!File.Exists(keyPath))
+                {
+                    throw new InvalidOperationException($"Gateway:NodeIdentityKeyPath '{keyPath}' does not exist.");
+                }
+
+                builder.Services.AddSingleton<IStorageRpcSigner>(sp =>
+                {
+                    var identity = new NodeIdentity(Microsoft.Extensions.Options.Options.Create(new NodeNetworkOptions
+                    {
+                        NodeIdentityKeyPath = keyPath,
+                        ChainId = builder.Configuration.GetValue<ulong>("Gateway:ChainId"),
+                        NodeRegistryAddress = builder.Configuration["Gateway:NodeRegistryAddress"] ?? "",
+                    }));
+                    identity.EnsureLoadedOrGenerated();
+                    return new NodeIdentityRpcSigner(identity);
+                });
+            }
         }
         else
         {

@@ -1,3 +1,4 @@
+using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
 
 namespace Symposia.BlobStorage.Gateway.Nodes;
@@ -10,7 +11,7 @@ public sealed class NodeConnection : IDisposable
 {
     private readonly GrpcChannel _channel;
 
-    public NodeConnection(string url, string? expectedNodeId = null)
+    public NodeConnection(string url, string? expectedNodeId = null, IStorageRpcSigner? signer = null)
     {
         Url = url;
         ExpectedNodeId = expectedNodeId;
@@ -22,7 +23,10 @@ public sealed class NodeConnection : IDisposable
         {
             HttpHandler = new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5), EnableMultipleHttp2Connections = true },
         });
-        Client = new Protocol.StorageNode.StorageNodeClient(_channel);
+        // Registry nodes authenticate callers (issue #140): sign every call for this node's address.
+        Client = signer is not null && expectedNodeId is not null
+            ? new Protocol.StorageNode.StorageNodeClient(_channel.Intercept(new StorageRpcSigningInterceptor(signer, expectedNodeId)))
+            : new Protocol.StorageNode.StorageNodeClient(_channel);
     }
 
     // For integration tests: inject a pre-built client backed by an in-process TestServer.
@@ -51,6 +55,9 @@ public sealed class NodeConnection : IDisposable
     /// NodeId differs marks the node unhealthy, so an endpoint can't pose as another node.
     /// </summary>
     public string? ExpectedNodeId { get; }
+
+    /// <summary>Why the last probe failed (e.g. "Unauthenticated: caller is not registered"), or null after a success.</summary>
+    public string? LastProbeError { get; set; }
 
     /// <summary>When this connection was created (start of the gateway's knowledge of the node).</summary>
     public DateTimeOffset KnownSince { get; } = DateTimeOffset.UtcNow;

@@ -102,6 +102,10 @@ public sealed class NodeIdentity
     public string SignHandshake(string dialer, byte[] nonce) =>
         PeerHandshake.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, dialer, nonce);
 
+    /// <summary>Signs a storage-node RPC call for <paramref name="audience"/> (#140), using this node's network.</summary>
+    public StorageRpcToken SignStorageRpc(string audience, string method, long unixSeconds) =>
+        StorageRpcAuth.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, audience, method, unixSeconds);
+
     /// <summary>
     /// Signs an arbitrary digest with this node's key, in the packed r||s||v
     /// layout the chain contracts expect (issue #109, AC7).

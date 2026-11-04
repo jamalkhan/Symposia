@@ -43,7 +43,17 @@ public static class StorageNodeApp
         // Node identity, on-chain registration, peer discovery, and handshake (issue #129),
         // configured from this node's own "StorageNode" section.
         builder.Services.AddNodeNetwork(builder.Configuration.GetSection("StorageNode"));
-        builder.Services.AddGrpc();
+        // Storage RPCs only from registered members of this node's network (issue #140).
+        if (builder.Configuration.GetValue("StorageNode:RequireCallerAuth", false))
+        {
+            builder.Services.AddSingleton<StorageRpcCallerRegistry>();
+            builder.Services.AddSingleton<StorageRpcAuthInterceptor>();
+            builder.Services.AddGrpc(grpc => grpc.Interceptors.Add<StorageRpcAuthInterceptor>());
+        }
+        else
+        {
+            builder.Services.AddGrpc();
+        }
 
         var app = builder.Build();
 

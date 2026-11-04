@@ -26,11 +26,15 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private readonly List<NodeConnection> _nodes = [];
     private Timer? _probeTimer;
 
+    private readonly IStorageRpcSigner? _signer;
+
     public NodeRegistry(
         IOptions<GatewayOptions> options,
         GatewayMetadataStore store,
-        ILogger<NodeRegistry> logger)
+        ILogger<NodeRegistry> logger,
+        IStorageRpcSigner? signer = null)
     {
+        _signer = signer;
         _options = options;
         _store = store;
         _logger = logger;
@@ -158,7 +162,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                     squatter.Dispose();
                 }
 
-                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id) { LastSeenInSource = now };
+                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer) { LastSeenInSource = now };
                 if (existing is not null)
                 {
                     _logger.LogInformation("Storage node {Node} moved from {Old} to {New}.", d.Id, existing.Url, d.Url);
@@ -229,6 +233,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
             node.LastProbe = response;
             node.LastProbeTime = DateTimeOffset.UtcNow;
+            node.LastProbeError = null;
             _logger.LogDebug("Node {Url} probe ok: {Used} bytes used, {Available} available, {Blobs} blobs.",
                 node.Url, response.UsedStorageBytes, response.AvailableStorageBytes, response.BlobCount);
 
@@ -241,7 +246,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Node {Url} probe failed: {Message}", node.Url, ex.Message);
+            node.LastProbeError = ex is Grpc.Core.RpcException rpc ? $"{rpc.StatusCode}: {rpc.Status.Detail}" : ex.Message;
+            _logger.LogWarning("Node {Url} probe failed: {Message}", node.Url, node.LastProbeError);
             if (node.IsHealthy || node.LastUnhealthyAt == DateTimeOffset.MinValue)
                 node.LastUnhealthyAt = DateTimeOffset.UtcNow;
             node.LastProbe = null;
