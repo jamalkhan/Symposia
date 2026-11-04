@@ -43,8 +43,22 @@ internal static class ObjectEndpoints
             return S3Xml.NoSuchBucket(bucket);
 
         var contentType = ctx.Request.ContentType ?? "application/octet-stream";
-        var record = await writer.WriteAsync(tenantId, bucket, key, contentType,
-            ctx.Request.Body, ctx.RequestAborted);
+
+        // Streaming uploads (AWS CLI/SDK default over HTTPS) wrap the bytes in aws-chunked framing
+        // with trailing checksums; store the object's bytes, not the wire format (issue #135).
+        var body = AwsChunkedStream.Applies(ctx.Request)
+            ? new AwsChunkedStream(ctx.Request.Body, AwsChunkedStream.DecodedLength(ctx.Request))
+            : ctx.Request.Body;
+
+        ObjectRecord? record;
+        try
+        {
+            record = await writer.WriteAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted);
+        }
+        catch (InvalidDataException ex)
+        {
+            return S3Xml.IncompleteBody(ex.Message);
+        }
 
         if (record is null)
             return S3Xml.ServiceUnavailable();

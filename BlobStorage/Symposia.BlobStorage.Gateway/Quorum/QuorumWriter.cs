@@ -52,10 +52,23 @@ public sealed class QuorumWriter
         // Fan-out: read one chunk from the HTTP body, write it to all active node streams in parallel.
         var buffer = new byte[ChunkSizeBytes];
         int read;
-        while ((read = await body.ReadAsync(buffer, cancellationToken)) > 0)
+        try
         {
-            var chunk = new WriteBlobChunk { Data = ByteString.CopyFrom(buffer, 0, read) };
-            await Task.WhenAll(sessions.Select(s => s.SendChunkAsync(chunk, cancellationToken)));
+            while ((read = await body.ReadAsync(buffer, cancellationToken)) > 0)
+            {
+                var chunk = new WriteBlobChunk { Data = ByteString.CopyFrom(buffer, 0, read) };
+                await Task.WhenAll(sessions.Select(s => s.SendChunkAsync(chunk, cancellationToken)));
+            }
+        }
+        catch
+        {
+            // A bad or truncated request body: cancel the node streams so nothing is committed.
+            foreach (var session in sessions)
+            {
+                session.Abort();
+            }
+
+            throw;
         }
 
         // Complete all streams and collect results.
@@ -115,6 +128,12 @@ public sealed class QuorumWriter
             if (!_active) return;
             try { await _call.RequestStream.WriteAsync(chunk, ct); }
             catch { _active = false; }
+        }
+
+        public void Abort()
+        {
+            _active = false;
+            _call.Dispose();
         }
 
         public async Task CompleteAsync()
