@@ -33,6 +33,7 @@ internal static class ObjectEndpoints
         GatewayMetadataStore store, QuorumWriter writer)
     {
         if (!TenantId(ctx, out var tenantId)) return S3Xml.AccessDenied();
+        if (MultipartEndpoints.IsPartUpload(ctx.Request)) return await MultipartEndpoints.UploadPartAsync(bucket, key, ctx);
 
         // x-amz-copy-source header triggers CopyObject semantics.
         var copySource = ctx.Request.Headers["x-amz-copy-source"].FirstOrDefault();
@@ -99,7 +100,7 @@ internal static class ObjectEndpoints
         var dest = src with { Bucket = destBucket, Key = destKey, LastModified = DateTimeOffset.UtcNow };
         store.PutObject(dest);
 
-        return S3Xml.CopyObjectResponse(dest.Cid, dest.LastModified);
+        return S3Xml.CopyObjectResponse(dest.ETag, dest.LastModified);
     }
 
     // ── GetObject ─────────────────────────────────────────────────────────────
@@ -111,6 +112,7 @@ internal static class ObjectEndpoints
         RepairQueue repairQueue)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
+        if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.ListParts(bucket, key, ctx);
 
         var record = store.GetObject(bucket, key);
         if (record is null) return S3Xml.NoSuchKey(key);
@@ -187,7 +189,7 @@ internal static class ObjectEndpoints
 
         using var activeCall = call;
         ctx.Response.ContentType = record.ContentType;
-        ctx.Response.Headers.ETag = $"\"{record.Cid}\"";
+        ctx.Response.Headers.ETag = $"\"{record.ETag}\"";
         ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
 
         if (isRange)
@@ -270,7 +272,7 @@ internal static class ObjectEndpoints
         var record = store.GetObject(bucket, key);
         if (record is null) return S3Xml.NoSuchKey(key);
 
-        ctx.Response.Headers.ETag = $"\"{record.Cid}\"";
+        ctx.Response.Headers.ETag = $"\"{record.ETag}\"";
         ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
         ctx.Response.ContentType = record.ContentType;
         ctx.Response.ContentLength = record.SizeBytes;
@@ -284,6 +286,7 @@ internal static class ObjectEndpoints
         GatewayMetadataStore store, INodeRegistry nodes, ILogger<Program> logger)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
+        if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.Abort(bucket, key, ctx);
 
         var record = store.GetObject(bucket, key);
 

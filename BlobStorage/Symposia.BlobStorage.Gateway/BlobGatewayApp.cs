@@ -173,6 +173,7 @@ public static class BlobGatewayApp
 
         // Object routes must be registered before bucket routes so /{bucket}/{**key}
         // takes priority over /{bucket} when a key is present.
+        MultipartEndpoints.Map(app);
         ObjectEndpoints.Map(app);
         BucketEndpoints.Map(app);
         return app;

@@ -46,6 +46,9 @@ public sealed class GatewayOptions
     /// </summary>
     public int NodeGracePeriodSeconds { get; set; } = 900;
 
+    /// <summary>Smallest allowed multipart part except the last (S3: 5 MiB).</summary>
+    public long MultipartMinPartSizeBytes { get; set; } = 5L * 1024 * 1024;
+
     /// <summary>Port the S3 listener binds on all interfaces.</summary>
     public int ListenPort { get; set; } = 5181;
 

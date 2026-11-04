@@ -57,11 +57,15 @@ Turn on **Settings → Blob gateway** on one host, click **Generate a new key pa
 export AWS_ACCESS_KEY_ID=<key id> AWS_SECRET_ACCESS_KEY=<secret> AWS_DEFAULT_REGION=us-east-1
 S3="aws --endpoint-url http://localhost:9000"        # or https://symposia.chateaukhan.com
 $S3 s3 mb s3://proof
-$S3 s3api put-object --bucket proof --key file.bin --body ./file.bin
+$S3 s3 cp ./file.bin s3://proof/file.bin          # multipart above 8 MB, handled (#5)
 $S3 s3 cp s3://proof/file.bin ./back.bin
 ```
 
-**Multipart upload isn't supported yet (#5).** `aws s3 cp` switches to multipart above 8 MB and fails with `405`. For bigger files, use `s3api put-object`, or raise the threshold once with `aws configure set default.s3.multipart_threshold 5GB`.
+**What the gateway checks on every upload:**
+- the chunk signatures and checksums the AWS CLI and SDKs send (#139);
+- for multipart uploads, each part as it arrives, and the assembled object against its full-object checksum when the client sends one.
+
+**Gateway to storage nodes:** the gateway signs every storage call with this host's node key, and storage nodes accept calls only from registered members of the network (#140). The host running the gateway must therefore be registered, which means Storage or Compute is on.
 
 Diagnostics shows how many storage nodes the gateway can reach and how many objects are waiting for their second copy. The Network tab shows a Gateway light for each node.
 

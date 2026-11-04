@@ -9,7 +9,7 @@ namespace Symposia.BlobStorage.Gateway.Metadata;
 /// index for LIST, HEAD, and CopyObject operations.
 /// See Requirements/BlobStorage/metadata-architecture.md#metadata-search-index.
 /// </summary>
-public sealed class GatewayMetadataStore
+public sealed partial class GatewayMetadataStore
 {
     private readonly string _connectionString;
 
@@ -79,6 +79,21 @@ public sealed class GatewayMetadataStore
                 hasReplicaCount = pragma.ExecuteScalar() is not null;
             }
 
+            // etag_override (#5): the S3 multipart ETag for objects assembled from parts; NULL otherwise.
+            bool hasEtagOverride;
+            using (var pragma = Query(conn, "SELECT 1 FROM pragma_table_info('objects') WHERE name = 'etag_override'"))
+            {
+                pragma.Transaction = tx;
+                hasEtagOverride = pragma.ExecuteScalar() is not null;
+            }
+
+            if (!hasEtagOverride)
+            {
+                using var add = Query(conn, "ALTER TABLE objects ADD COLUMN etag_override TEXT NULL;");
+                add.Transaction = tx;
+                add.ExecuteNonQuery();
+            }
+
             if (!hasReplicaCount)
             {
                 using var migrate = Query(conn, """
@@ -95,9 +110,41 @@ public sealed class GatewayMetadataStore
         }
 
         // (replica_count, bucket, key) lets the under-replication sweep range-scan and page in key order.
+        // Multipart uploads (#5): parts are ordinary blobs tracked here, never rows in objects, so they
+        // can't leak into GET/LIST; the upload row outlives completion for idempotent Complete retries.
         Execute(conn, """
             DROP INDEX IF EXISTS idx_objects_replica_count;
             CREATE INDEX IF NOT EXISTS idx_objects_replicas ON objects (replica_count, bucket, key);
+
+            CREATE TABLE IF NOT EXISTS multipart_uploads (
+                upload_id            TEXT PRIMARY KEY,
+                tenant_id            TEXT NOT NULL,
+                bucket               TEXT NOT NULL,
+                key                  TEXT NOT NULL,
+                content_type         TEXT NOT NULL,
+                checksum_algorithm   TEXT NULL,
+                checksum_type        TEXT NULL,
+                initiated_at         TEXT NOT NULL,
+                expires_at           TEXT NOT NULL,
+                status               TEXT NOT NULL,   -- InProgress | Completing | Completed | Aborted
+                completed_at         TEXT NULL,
+                final_cid            TEXT NULL,
+                final_etag           TEXT NULL,
+                committed_parts_json TEXT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_multipart_uploads_bucket_key ON multipart_uploads (bucket, key, upload_id);
+
+            CREATE TABLE IF NOT EXISTS multipart_parts (
+                upload_id    TEXT NOT NULL,
+                part_number  INTEGER NOT NULL,
+                cid          TEXT NOT NULL,
+                size_bytes   INTEGER NOT NULL,
+                node_ids     TEXT NOT NULL,
+                checksum     TEXT NULL,
+                uploaded_at  TEXT NOT NULL,
+                PRIMARY KEY (upload_id, part_number)
+            );
+            CREATE INDEX IF NOT EXISTS idx_multipart_parts_cid ON multipart_parts (cid);
             """);
     }
 
@@ -129,7 +176,7 @@ public sealed class GatewayMetadataStore
     {
         using var conn = Open();
         using var cmd = Query(conn,
-            "SELECT cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE bucket = $b AND key = $k",
+            "SELECT cid, size_bytes, content_type, last_modified, node_ids, etag_override FROM objects WHERE bucket = $b AND key = $k",
             ("$b", bucket), ("$k", key));
         using var r = cmd.ExecuteReader();
         if (!r.Read()) return null;
@@ -139,7 +186,8 @@ public sealed class GatewayMetadataStore
             SizeBytes: r.GetInt64(1),
             ContentType: r.GetString(2),
             LastModified: DateTimeOffset.Parse(r.GetString(3)),
-            NodeIds: SplitNodeIds(r.GetString(4)));
+            NodeIds: SplitNodeIds(r.GetString(4)),
+            EtagOverride: r.IsDBNull(5) ? null : r.GetString(5));
     }
 
     public void PutObject(ObjectRecord record)
@@ -147,21 +195,23 @@ public sealed class GatewayMetadataStore
         using var conn = Open();
         Execute(Query(conn,
             """
-            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count)
-            VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc)
+            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, etag_override)
+            VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc, $eo)
             ON CONFLICT(bucket, key) DO UPDATE SET
                 cid = excluded.cid,
                 size_bytes = excluded.size_bytes,
                 content_type = excluded.content_type,
                 last_modified = excluded.last_modified,
                 node_ids = excluded.node_ids,
-                replica_count = excluded.replica_count;
+                replica_count = excluded.replica_count,
+                etag_override = excluded.etag_override;
             """,
             ("$b", record.Bucket), ("$k", record.Key), ("$cid", record.Cid),
             ("$sz", record.SizeBytes), ("$ct", record.ContentType),
             ("$lm", record.LastModified.ToString("O")),
             ("$ni", string.Join(',', record.NodeIds)),
-            ("$rc", record.NodeIds.Count)));
+            ("$rc", record.NodeIds.Count),
+            ("$eo", (object?)record.EtagOverride ?? DBNull.Value)));
     }
 
     /// <summary>Returns false if the object did not exist (externally delete is always idempotent).</summary>
@@ -182,7 +232,9 @@ public sealed class GatewayMetadataStore
     public bool IsCidReferenced(string cid)
     {
         using var conn = Open();
-        return Query(conn, "SELECT 1 FROM objects WHERE cid = $cid LIMIT 1",
+        // A part of an in-progress multipart upload is referenced too (#5), so GC must not delete it.
+        return Query(conn,
+            "SELECT 1 FROM objects WHERE cid = $cid UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid LIMIT 1",
             ("$cid", cid)).ExecuteScalar() is not null;
     }
 
@@ -410,7 +462,7 @@ public sealed class GatewayMetadataStore
         using var cmd = conn.CreateCommand();
 
         var sql = new System.Text.StringBuilder(
-            "SELECT key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE bucket = $b");
+            "SELECT key, cid, size_bytes, content_type, last_modified, node_ids, etag_override FROM objects WHERE bucket = $b");
 
         cmd.Parameters.AddWithValue("$b", bucket);
 
@@ -442,7 +494,8 @@ public sealed class GatewayMetadataStore
                 SizeBytes: r.GetInt64(2),
                 ContentType: r.GetString(3),
                 LastModified: DateTimeOffset.Parse(r.GetString(4)),
-                NodeIds: SplitNodeIds(r.GetString(5))));
+                NodeIds: SplitNodeIds(r.GetString(5)),
+                EtagOverride: r.IsDBNull(6) ? null : r.GetString(6)));
         }
 
         var truncated = results.Count > maxKeys;

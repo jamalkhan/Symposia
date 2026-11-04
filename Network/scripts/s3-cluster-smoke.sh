@@ -11,6 +11,8 @@
 #   #140    an unsigned gRPC call straight to a storage node is refused (Unauthenticated)
 #   #139    over HTTPS (local TLS proxy, as Traefik) the CLI's chunked uploads with CRC64NVME
 #           trailing checksums round-trip byte for byte
+#   #5      multipart: the default aws s3 cp of a 20 MB file (multipart above 8 MB) over HTTP and
+#           HTTPS round-trips, lands on both nodes, and leaves no open uploads
 #
 # Usage: Network/scripts/s3-cluster-smoke.sh [work-dir]   (OFFSET_A / OFFSET_B env to change ports)
 set -euo pipefail
@@ -79,6 +81,26 @@ echo "PASS #139: HTTPS chunked upload with trailing checksum round-trips"
 sleep 2
 [ "$(blobs a)" -ge 2 ] && [ "$(blobs a)" = "$(blobs b)" ] || fail "AC1: blob counts differ (a=$(blobs a) b=$(blobs b))"
 echo "PASS AC1: both storage nodes hold every object ($(blobs a) blobs each)"
+
+# #5: multipart upload through the stock CLI (8 MB parts), plain and over TLS.
+head -c $((20*1024*1024)) /dev/urandom >"$WORK/big.bin"
+$S3 cp "$WORK/big.bin" s3://proof/big-http.bin >/dev/null || fail "#5: multipart upload over HTTP failed"
+$S3 cp s3://proof/big-http.bin "$WORK/big-http.back" >/dev/null && cmp -s "$WORK/big.bin" "$WORK/big-http.back" || fail "#5: HTTP multipart round trip differs"
+python3 "$ROOT/Network/scripts/tls-proxy.py" $TLS_PORT $S3_A "$WORK/tls.pem" "$WORK/tls.key" & PID_TLS=$!
+sleep 1
+head -c $((20*1024*1024)) /dev/urandom >"$WORK/big2.bin"
+$S3S cp "$WORK/big2.bin" s3://proof/big-https.bin >/dev/null || fail "#5: multipart upload over HTTPS failed"
+$S3S cp s3://proof/big-https.bin "$WORK/big-https.back" >/dev/null && cmp -s "$WORK/big2.bin" "$WORK/big-https.back" || fail "#5: HTTPS multipart round trip differs"
+kill $PID_TLS 2>/dev/null; wait $PID_TLS 2>/dev/null || true; PID_TLS=""
+for f in big big2; do
+  cid=$(shasum -a 256 "$WORK/$f.bin" | cut -c1-64)
+  has_blob a "$cid" && has_blob b "$cid" || fail "#5: assembled object $f.bin is not on both nodes"
+done
+open=$(aws --endpoint-url http://127.0.0.1:$S3_A s3api list-multipart-uploads --bucket proof --query 'length(Uploads || `[]`)' --output text)
+[ "$open" = "0" ] || fail "#5: $open multipart upload(s) left open"
+etag=$(aws --endpoint-url http://127.0.0.1:$S3_A s3api head-object --bucket proof --key big-http.bin --query ETag --output text)
+case "$etag" in *-3\"|*-3) ;; *) fail "#5: multipart object ETag '$etag' is not the S3 multipart form (md5-of-parts-3)";; esac
+echo "PASS #5: 20 MB multipart uploads (HTTP and HTTPS) round-trip and are on both nodes"
 
 aws --endpoint-url http://127.0.0.1:$S3_A s3 ls s3://proof >/dev/null 2>&1 \
   && [ "$(AWS_SECRET_ACCESS_KEY=wrong aws --endpoint-url http://127.0.0.1:$S3_A s3 ls s3://proof 2>&1 | grep -c -E '403|AccessDenied|SignatureDoesNotMatch')" -ge 1 ] \

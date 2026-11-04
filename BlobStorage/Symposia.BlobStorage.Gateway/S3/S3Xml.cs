@@ -76,7 +76,7 @@ internal static class S3Xml
             root.Add(new XElement(Ns + "Contents",
                 new XElement(Ns + "Key", obj.Key),
                 new XElement(Ns + "LastModified", obj.LastModified.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")),
-                new XElement(Ns + "ETag", $"\"{obj.Cid}\""),
+                new XElement(Ns + "ETag", $"\"{obj.ETag}\""),
                 new XElement(Ns + "Size", obj.SizeBytes),
                 new XElement(Ns + "StorageClass", "STANDARD")));
         }
