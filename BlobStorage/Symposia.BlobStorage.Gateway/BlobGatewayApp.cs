@@ -137,7 +137,8 @@ public static class BlobGatewayApp
             }
 
             var verifier = ctx.RequestServices.GetRequiredService<SigV4Verifier>();
-            var tenantId = verifier.Verify(ctx.Request);
+            var sigv4 = verifier.Authenticate(ctx.Request);
+            var tenantId = sigv4?.TenantId;
             if (tenantId is null)
             {
                 ctx.Response.StatusCode = 403;
@@ -148,6 +149,7 @@ public static class BlobGatewayApp
             }
 
             ctx.Items["TenantId"] = tenantId;
+            ctx.Items[nameof(SigV4Context)] = sigv4;
             await next();
         });
 

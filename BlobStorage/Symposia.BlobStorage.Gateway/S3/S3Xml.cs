@@ -28,6 +28,8 @@ internal static class S3Xml
 
     internal static IResult IncompleteBody(string message) => ErrorXml(400, "IncompleteBody", message);
 
+    internal static IResult Error(int status, string code, string message) => ErrorXml(status, code, message);
+
     internal static IResult ServiceUnavailable() =>
         ErrorXml(503, "ServiceUnavailable",
             "Write quorum was not reached. Not enough storage nodes confirmed the write.");

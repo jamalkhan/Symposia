@@ -44,20 +44,31 @@ internal static class ObjectEndpoints
 
         var contentType = ctx.Request.ContentType ?? "application/octet-stream";
 
-        // Streaming uploads (AWS CLI/SDK default over HTTPS) wrap the bytes in aws-chunked framing
-        // with trailing checksums; store the object's bytes, not the wire format (issue #135).
-        var body = AwsChunkedStream.Applies(ctx.Request)
-            ? new AwsChunkedStream(ctx.Request.Body, AwsChunkedStream.DecodedLength(ctx.Request))
-            : ctx.Request.Body;
-
+        // Object bytes from the wire format (aws-chunked, #135), with chunk signatures and every
+        // declared checksum verified as they stream (#139). A failed check throws before the body
+        // ends, so the node writes are cancelled and nothing is committed.
         ObjectRecord? record;
+        ChecksumVerifyingStream body;
         try
         {
+            body = UploadBody.Open(ctx);
             record = await writer.WriteAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted);
         }
         catch (InvalidDataException ex)
         {
             return S3Xml.IncompleteBody(ex.Message);
+        }
+        catch (S3RequestRejectedException ex)
+        {
+            ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Symposia.BlobStorage.Gateway.S3.Upload")
+                .LogWarning("Rejected PUT {Bucket}/{Key} from {AccessKey}: {Code} {Message}", bucket, key,
+                    (ctx.Items[nameof(Auth.SigV4Context)] as Auth.SigV4Context)?.AccessKeyId, ex.Code, ex.Message);
+            return S3Xml.Error(ex.Status, ex.Code, ex.Message);
+        }
+
+        foreach (var (algorithm, value) in body.Computed.Where(c => c.Key != "md5"))
+        {
+            ctx.Response.Headers[$"x-amz-checksum-{algorithm}"] = value;
         }
 
         if (record is null)

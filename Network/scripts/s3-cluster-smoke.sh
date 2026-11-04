@@ -9,6 +9,8 @@
 #   AC5     wrong secret -> 403
 #   AC6     no storage nodes -> 503-class error within 30 s
 #   #140    an unsigned gRPC call straight to a storage node is refused (Unauthenticated)
+#   #139    over HTTPS (local TLS proxy, as Traefik) the CLI's chunked uploads with CRC64NVME
+#           trailing checksums round-trip byte for byte
 #
 # Usage: Network/scripts/s3-cluster-smoke.sh [work-dir]   (OFFSET_A / OFFSET_B env to change ports)
 set -euo pipefail
@@ -19,8 +21,8 @@ A=${OFFSET_A:-30} B=${OFFSET_B:-31}
 UI_A=$((5170 + A)) UI_B=$((5170 + B)) GW_A=$((8080 + A)) S3_A=$((9000 + A))
 PASSWORD="smoke-test-password"
 ACCESS_KEY="SYMSMOKETESTKEY00001" SECRET_KEY="smoke-secret-0123456789abcdefghijklmnopqrstuv"
-PID_A="" PID_B=""
-cleanup() { for p in $PID_A $PID_B; do kill -TERM "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
+PID_A="" PID_B="" PID_TLS=""
+cleanup() { for p in $PID_A $PID_B $PID_TLS; do kill -TERM "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
 trap cleanup EXIT
 fail() { echo "FAIL: $*"; echo "logs in $WORK"; exit 1; }
 
@@ -60,6 +62,19 @@ for f in small medium empty; do
   cmp -s "$WORK/$f.bin" "$WORK/$f.back" || fail "AC2: $f.bin differs after round trip"
 done
 echo "PASS AC1/AC2: uploads round-trip byte for byte"
+
+# #139: AWS CLI v2 only sends aws-chunked bodies with trailing checksums over HTTPS.
+TLS_PORT=$((9400 + A))
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/tls.key" -out "$WORK/tls.pem" -days 1 -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost" >/dev/null 2>&1
+python3 "$ROOT/Network/scripts/tls-proxy.py" $TLS_PORT $S3_A "$WORK/tls.pem" "$WORK/tls.key" & PID_TLS=$!
+sleep 1
+S3S="aws --endpoint-url https://localhost:$TLS_PORT --ca-bundle $WORK/tls.pem s3"
+$S3S cp "$WORK/medium.bin" s3://proof/https-medium.bin >/dev/null || fail "#139: HTTPS chunked upload failed"
+$S3S cp s3://proof/https-medium.bin "$WORK/https-medium.back" >/dev/null || fail "#139: HTTPS download failed"
+cmp -s "$WORK/medium.bin" "$WORK/https-medium.back" || fail "#139: HTTPS round trip differs"
+kill $PID_TLS 2>/dev/null; wait $PID_TLS 2>/dev/null || true; PID_TLS=""
+echo "PASS #139: HTTPS chunked upload with trailing checksum round-trips"
 
 sleep 2
 [ "$(blobs a)" -ge 2 ] && [ "$(blobs a)" = "$(blobs b)" ] || fail "AC1: blob counts differ (a=$(blobs a) b=$(blobs b))"
