@@ -26,6 +26,8 @@ internal static class S3Xml
     internal static IResult BucketNotEmpty() =>
         ErrorXml(409, "BucketNotEmpty", "The bucket you tried to delete is not empty.");
 
+    internal static IResult IncompleteBody(string message) => ErrorXml(400, "IncompleteBody", message);
+
     internal static IResult ServiceUnavailable() =>
         ErrorXml(503, "ServiceUnavailable",
             "Write quorum was not reached. Not enough storage nodes confirmed the write.");
