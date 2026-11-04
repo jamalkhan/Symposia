@@ -15,30 +15,44 @@ public sealed class StorageTlsProofTests : IDisposable
         _node = TestSupport.NewIdentity(_dir);
     }
 
+    private readonly long _notAfter = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds();
+
     private string Hex => Convert.ToHexStringLower(_fingerprint);
 
+    private string Proof() => _node.SignStorageTls(_fingerprint, _notAfter);
+
+    private string? Check(string node, string hex, string? proof, ulong chain = TestSupport.ChainId, string registry = TestSupport.Registry, long? notAfter = null) =>
+        StorageTlsProof.Validate(chain, registry, node, hex, notAfter ?? _notAfter, proof, DateTimeOffset.UtcNow);
+
     [Fact]
-    public void Proof_VerifiesForTheNodeOnItsNetwork() =>
-        Assert.True(StorageTlsProof.Verify(TestSupport.ChainId, TestSupport.Registry, _node.NodeId, Hex, _node.SignStorageTls(_fingerprint)));
+    public void Proof_VerifiesForTheNodeOnItsNetwork() => Assert.Null(Check(_node.NodeId, Hex, Proof()));
 
     [Fact]
     public void Proof_FailsForAnotherNodeAnotherNetworkOrAnotherCertificate()
     {
-        var proof = _node.SignStorageTls(_fingerprint);
+        var proof = Proof();
         var other = TestSupport.NewIdentity(_dir);
-        Assert.False(StorageTlsProof.Verify(TestSupport.ChainId, TestSupport.Registry, other.NodeId, Hex, proof));
-        Assert.False(StorageTlsProof.Verify(1, TestSupport.Registry, _node.NodeId, Hex, proof));
-        Assert.False(StorageTlsProof.Verify(TestSupport.ChainId, "0x0000000000000000000000000000000000000001", _node.NodeId, Hex, proof));
-        Assert.False(StorageTlsProof.Verify(TestSupport.ChainId, TestSupport.Registry, _node.NodeId,
-            Convert.ToHexStringLower(SHA256.HashData("other"u8)), proof));
+        Assert.NotNull(Check(other.NodeId, Hex, proof));
+        Assert.NotNull(Check(_node.NodeId, Hex, proof, chain: 1));
+        Assert.NotNull(Check(_node.NodeId, Hex, proof, registry: "0x0000000000000000000000000000000000000001"));
+        Assert.NotNull(Check(_node.NodeId, Convert.ToHexStringLower(SHA256.HashData("other"u8)), proof));
+        Assert.NotNull(Check(_node.NodeId, Hex, proof, notAfter: _notAfter + 1)); // expiry is covered by the signature
     }
 
     [Fact]
     public void MissingOrMalformedProof_Fails()
     {
-        Assert.False(StorageTlsProof.Verify(TestSupport.ChainId, TestSupport.Registry, _node.NodeId, Hex, null));
-        Assert.False(StorageTlsProof.Verify(TestSupport.ChainId, TestSupport.Registry, _node.NodeId, Hex, "0x1234"));
-        Assert.False(StorageTlsProof.Verify(TestSupport.ChainId, TestSupport.Registry, _node.NodeId, "abcd", _node.SignStorageTls(_fingerprint)));
+        Assert.Equal("no certificate proof", Check(_node.NodeId, Hex, null));
+        Assert.NotNull(Check(_node.NodeId, Hex, "0x1234"));
+        Assert.Equal("malformed certificate fingerprint", Check(_node.NodeId, "abcd", Proof()));
+    }
+
+    [Fact]
+    public void ExpiredProof_IsRejected()
+    {
+        var past = DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeSeconds();
+        var proof = _node.SignStorageTls(_fingerprint, past);
+        Assert.Contains("expired", Check(_node.NodeId, Hex, proof, notAfter: past));
     }
 
     public void Dispose()

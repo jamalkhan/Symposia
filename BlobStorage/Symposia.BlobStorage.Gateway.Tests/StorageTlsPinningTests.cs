@@ -31,10 +31,12 @@ public sealed class StorageTlsPinningTests : IDisposable
     {
         var der = RandomNumberGenerator.GetBytes(64);
         var pin = Convert.ToHexStringLower(SHA256.HashData(der));
-        Assert.True(NodeConnection.PinMatches(der, pin));
-        Assert.True(NodeConnection.PinMatches(der, pin.ToUpperInvariant()));
-        Assert.False(NodeConnection.PinMatches(RandomNumberGenerator.GetBytes(64), pin));
-        Assert.False(NodeConnection.PinMatches(null, pin));
+        var now = DateTimeOffset.UtcNow;
+        Assert.True(StorageTlsProof.PinMatches(der, now.AddDays(1), pin, now));
+        Assert.True(StorageTlsProof.PinMatches(der, now.AddDays(1), pin.ToUpperInvariant(), now));
+        Assert.False(StorageTlsProof.PinMatches(RandomNumberGenerator.GetBytes(64), now.AddDays(1), pin, now));
+        Assert.False(StorageTlsProof.PinMatches(null, now.AddDays(1), pin, now));
+        Assert.False(StorageTlsProof.PinMatches(der, now.AddSeconds(-1), pin, now)); // expired certificate
     }
 
     [Fact]
@@ -45,15 +47,21 @@ public sealed class StorageTlsPinningTests : IDisposable
         var plain = EthECKey.GenerateKey();
         var fp = SHA256.HashData("cert"u8);
         var fpHex = Convert.ToHexStringLower(fp);
+        var notAfter = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds();
+        var expired = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds();
+        var stale = EthECKey.GenerateKey();
         var registry = new FakeRegistry(
             new RegisteredNode(good.GetPublicAddress(), "http://10.0.0.1:5180"),
             new RegisteredNode(forger.GetPublicAddress(), "http://10.0.0.2:5180"),
-            new RegisteredNode(plain.GetPublicAddress(), "http://10.0.0.3:5180"));
+            new RegisteredNode(plain.GetPublicAddress(), "http://10.0.0.3:5180"),
+            new RegisteredNode(stale.GetPublicAddress(), "http://10.0.0.4:5180"));
         var docs = new Dictionary<string, NodeServices>
         {
-            ["http://10.0.0.1:5180"] = new(good.GetPublicAddress(), new("https://10.0.0.1:6180", fpHex, StorageTlsProof.Sign(good, Chain, Registry, fp))),
+            ["http://10.0.0.1:5180"] = new(good.GetPublicAddress(), new("https://10.0.0.1:6180", fpHex, StorageTlsProof.Sign(good, Chain, Registry, fp, notAfter), notAfter)),
             // Proof signed by a different key than the registered one.
-            ["http://10.0.0.2:5180"] = new(forger.GetPublicAddress(), new("https://10.0.0.2:6180", fpHex, StorageTlsProof.Sign(good, Chain, Registry, fp))),
+            ["http://10.0.0.2:5180"] = new(forger.GetPublicAddress(), new("https://10.0.0.2:6180", fpHex, StorageTlsProof.Sign(good, Chain, Registry, fp, notAfter), notAfter)),
+            // A replaced certificate whose proof has expired can't be replayed.
+            ["http://10.0.0.4:5180"] = new(stale.GetPublicAddress(), new("https://10.0.0.4:6180", fpHex, StorageTlsProof.Sign(stale, Chain, Registry, fp, expired), expired)),
             ["http://10.0.0.3:5180"] = new(plain.GetPublicAddress(), new("http://10.0.0.3:6180")),
         };
 
@@ -63,6 +71,30 @@ public sealed class StorageTlsPinningTests : IDisposable
 
         var optional = await new RegistryNodeSource(registry, new Docs(docs), Options(requireTls: false), NullLogger<RegistryNodeSource>.Instance).DiscoverAsync(CancellationToken.None);
         Assert.Equal(2, optional.Count);
+    }
+
+    [Fact]
+    public void Sync_RefusesCleartextWhenTlsIsRequired_FromAnySource()
+    {
+        var store = new GatewayMetadataStore(Options());
+        store.Initialize();
+        using var nodes = new NodeRegistry(Options(requireTls: true), store, NullLogger<NodeRegistry>.Instance);
+        nodes.Sync([new StorageNodeDescriptor("http://static:6180", "http://static:6180")]);
+        Assert.Empty(nodes.All);
+    }
+
+    [Fact]
+    public void Sync_NeverDowngradesANodeOnceSeenWithTls()
+    {
+        var store = new GatewayMetadataStore(Options(requireTls: false));
+        store.Initialize();
+        using var nodes = new NodeRegistry(Options(requireTls: false), store, NullLogger<NodeRegistry>.Instance);
+        nodes.Sync([new StorageNodeDescriptor("0xA", "https://10.0.0.1:6180", "aa")]);
+
+        nodes.Sync([new StorageNodeDescriptor("0xA", "http://10.0.0.1:6180")]); // e.g. a rewritten services document
+
+        var node = Assert.Single(nodes.All);
+        Assert.Equal("aa", node.TlsFingerprint);
     }
 
     [Fact]

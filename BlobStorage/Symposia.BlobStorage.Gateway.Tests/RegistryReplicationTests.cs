@@ -22,6 +22,7 @@ public sealed class RegistryReplicationTests : IDisposable
         MetadataDbPath = Path.Combine(_dir, "meta.db"),
         MinCopiesPerObject = minCopies,
         ProbeIntervalSeconds = 3600,
+        RequireStorageTls = false, // replica bookkeeping tests use cleartext test nodes; TLS policy is tested in StorageTlsPinningTests
     });
 
     private static ObjectRecord Record(string bucket, string key, params string[] nodes) =>

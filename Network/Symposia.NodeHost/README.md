@@ -67,6 +67,10 @@ $S3 s3 cp s3://proof/file.bin ./back.bin
 
 **Gateway to storage nodes:** the gateway signs every storage call with this host's node key, and storage nodes accept calls only from registered members of the network (#140). The host running the gateway must therefore be registered, which means Storage or Compute is on.
 
+**Encryption between gateway and storage nodes:** storage calls use TLS (#142). Each storage node creates its own certificate (`grpc-tls.pfx` in its storage data folder, owner-only, renewed automatically before it expires) and signs the certificate's fingerprint with its node key. The gateway accepts only a certificate vouched for by that node's on-chain address, and never sends data in cleartext.
+
+**Upgrading:** upgrade all hosts together. A gateway on this version won't use storage nodes that don't serve TLS, and older gateways can't use storage nodes that do.
+
 Diagnostics shows how many storage nodes the gateway can reach and how many objects are waiting for their second copy. The Network tab shows a Gateway light for each node.
 
 **Public endpoint:** [`docs/ops/traefik/symposia.yml`](../../docs/ops/traefik/symposia.yml) is the Traefik route for `https://symposia.chateaukhan.com`. Only the gateway port (9000) needs to be reachable from Traefik. Keep the storage ports, including the gRPC ports `6180+`, LAN-only.

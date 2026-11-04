@@ -19,6 +19,7 @@ public sealed class ReplicaConsistencyTests : IDisposable
         MetadataDbPath = Path.Combine(_dir, "meta.db"),
         MinCopiesPerObject = 2,
         ProbeIntervalSeconds = 3600,
+        RequireStorageTls = false, // replica bookkeeping tests use cleartext test nodes; TLS policy is tested in StorageTlsPinningTests
     });
 
     private GatewayMetadataStore Store()
@@ -130,6 +131,7 @@ public sealed class ReplicaConsistencyTests : IDisposable
         {
             MetadataDbPath = Path.Combine(_dir, "meta.db"),
             ProbeIntervalSeconds = 3600,
+        RequireStorageTls = false, // replica bookkeeping tests use cleartext test nodes; TLS policy is tested in StorageTlsPinningTests
             NodeGracePeriodSeconds = 1,
         });
         using var nodes = new NodeRegistry(options, store, NullLogger<NodeRegistry>.Instance);

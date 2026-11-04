@@ -83,18 +83,20 @@ public sealed class RegistryNodeSource(
             if (grpc.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
                 var fingerprint = services.Storage.TlsFingerprint;
-                if (fingerprint is null || !StorageTlsProof.Verify(o.ChainId, o.NodeRegistryAddress, member.Node, fingerprint, services.Storage.TlsProof))
+                var invalid = StorageTlsProof.Validate(o.ChainId, o.NodeRegistryAddress, member.Node, fingerprint,
+                    services.Storage.TlsNotAfter, services.Storage.TlsProof, DateTimeOffset.UtcNow);
+                if (invalid is not null)
                 {
-                    logger.LogWarning("Node {Node} offers TLS storage without a valid certificate proof; not using it.", member.Node);
+                    logger.LogWarning("Node {Node} offers TLS storage but {Reason}; not using it.", member.Node, invalid);
                     return null;
                 }
 
-                return new StorageNodeDescriptor(member.Node, grpc, fingerprint.ToLowerInvariant());
+                return new StorageNodeDescriptor(member.Node, grpc, fingerprint!.ToLowerInvariant());
             }
 
             if (o.RequireStorageTls)
             {
-                logger.LogWarning("Node {Node} offers only cleartext storage gRPC ({Grpc}) and TLS is required; not using it. Upgrade that host.",
+                logger.LogError("Node {Node} offers only cleartext storage gRPC ({Grpc}) and TLS is required; not using it. Upgrade that host.",
                     member.Node, grpc);
                 return null;
             }

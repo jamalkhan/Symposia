@@ -117,9 +117,9 @@ public sealed class NodeIdentity
     public string SignHandshake(string dialer, byte[] nonce) =>
         PeerHandshake.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, dialer, nonce);
 
-    /// <summary>Proves this node owns the TLS certificate with this SHA-256 fingerprint (#142).</summary>
-    public string SignStorageTls(byte[] fingerprint) =>
-        StorageTlsProof.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, fingerprint);
+    /// <summary>Proves this node owns the TLS certificate with this SHA-256 fingerprint, until its expiry (#142).</summary>
+    public string SignStorageTls(byte[] fingerprint, long notAfterUnixSeconds) =>
+        StorageTlsProof.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, fingerprint, notAfterUnixSeconds);
 
     /// <summary>Signs a storage-node RPC call for <paramref name="audience"/> (#140), using this node's network.</summary>
     public StorageRpcToken SignStorageRpc(string audience, string method, long unixSeconds) =>

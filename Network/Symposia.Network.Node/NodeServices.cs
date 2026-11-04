@@ -12,8 +12,9 @@ public sealed record NodeServices(string Node, NodeServices.StorageService? Stor
 
     /// <param name="Grpc">Base URL of the storage gRPC API (<c>https://</c> when TLS is on, #142).</param>
     /// <param name="TlsFingerprint">Hex SHA-256 of the node's TLS certificate; callers pin it.</param>
-    /// <param name="TlsProof">The node key's signature over the fingerprint (<see cref="StorageTlsProof"/>).</param>
-    public sealed record StorageService(string Grpc, string? TlsFingerprint = null, string? TlsProof = null);
+    /// <param name="TlsProof">The node key's signature over the fingerprint and expiry (<see cref="StorageTlsProof"/>).</param>
+    /// <param name="TlsNotAfter">The certificate's expiry (Unix seconds), covered by the proof.</param>
+    public sealed record StorageService(string Grpc, string? TlsFingerprint = null, string? TlsProof = null, long? TlsNotAfter = null);
 
     /// <summary>
     /// The gRPC base URL: the advertised endpoint's scheme and host with the gRPC port, so a

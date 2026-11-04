@@ -20,12 +20,19 @@ public static class StorageNodeApp
         // Production deployments terminate TLS 1.3 in front of this (Requirements/Platform/security.md#encryption-in-transit).
         // With GrpcPort set, plain HTTP (handshake, health, services) and gRPC get separate listeners,
         // because cleartext HTTP/2 isn't negotiated on a mixed HTTP/1.1+2 listener (issue #135).
-        var listenPort = builder.Configuration.GetValue("StorageNode:ListenPort", 5180);
-        var grpcPort = builder.Configuration.GetValue("StorageNode:GrpcPort", 0);
+        // Listener settings are needed before the container exists, so bind the options once here (#142 review).
+        var nodeOptions = builder.Configuration.GetSection("StorageNode").Get<StorageNodeOptions>() ?? new StorageNodeOptions();
+        var listenPort = nodeOptions.ListenPort;
+        var grpcPort = nodeOptions.GrpcPort;
         // TLS on the gRPC port (issue #142): a self-signed certificate bound to the node key by a proof
-        // in /v1/node/services, which gateways pin. Loaded after the identity, so Kestrel reads it lazily.
-        var grpcTls = grpcPort > 0 && builder.Configuration.GetValue("StorageNode:GrpcTls", false);
-        var tls = new StorageTlsState();
+        // in /v1/node/services, which gateways pin. It needs the node identity, so Kestrel reads it lazily.
+        var grpcTls = nodeOptions.GrpcTls;
+        if (grpcTls && grpcPort <= 0)
+        {
+            throw new InvalidOperationException("StorageNode:GrpcTls requires a dedicated StorageNode:GrpcPort; refusing to serve storage gRPC in cleartext.");
+        }
+
+        StorageTlsCertificateProvider? tls = null;
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
             if (grpcPort > 0)
@@ -36,7 +43,7 @@ public static class StorageNodeApp
                     listenOptions.Protocols = HttpProtocols.Http2;
                     if (grpcTls)
                     {
-                        listenOptions.UseHttps(https => https.ServerCertificateSelector = (_, _) => tls.Certificate);
+                        listenOptions.UseHttps(https => https.ServerCertificateSelector = (_, _) => tls!.Current.Certificate);
                     }
                 });
             }
@@ -48,6 +55,11 @@ public static class StorageNodeApp
 
         builder.Services.Configure<StorageNodeOptions>(builder.Configuration.GetSection("StorageNode"));
         builder.Services.AddSingleton<LocalBlobStore>();
+        if (grpcTls)
+        {
+            builder.Services.AddSingleton<StorageTlsCertificateProvider>();
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<StorageTlsCertificateProvider>());
+        }
         builder.Services.AddSingleton<ManifestStore>();
         builder.Services.AddHostedService<IntegritySelfCheckWorker>();
 
@@ -89,21 +101,17 @@ public static class StorageNodeApp
         // its gRPC API (issue #135). A hint only: callers check identity via Probe's NodeId.
         if (grpcTls)
         {
-            var identity = app.Services.GetRequiredService<NodeIdentity>();
-            identity.EnsureLoadedOrGenerated();
-            var storageOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<StorageNodeOptions>>().Value;
-            var path = string.IsNullOrWhiteSpace(storageOptions.TlsCertificatePath)
-                ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storageOptions.ManifestDbPath))!, "grpc-tls.pfx")
-                : storageOptions.TlsCertificatePath;
-            tls.Certificate = StorageTlsCertificate.LoadOrCreate(path, identity.NodeId,
-                app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Symposia.BlobStorage.StorageNode.Tls"));
-            tls.Fingerprint = StorageTlsCertificate.Fingerprint(tls.Certificate);
-            tls.Proof = identity.SignStorageTls(Convert.FromHexString(tls.Fingerprint));
+            tls = app.Services.GetRequiredService<StorageTlsCertificateProvider>();
+            tls.EnsureLoaded();
         }
 
         app.MapGet(NodeServices.Path, (NodeIdentity identity, Microsoft.Extensions.Options.IOptions<NodeNetworkOptions> network) =>
-            Results.Ok(new NodeServices(identity.NodeId, new NodeServices.StorageService(
-                NodeServices.GrpcUrl(network.Value.AdvertisedEndpoint, listenPort, grpcPort, grpcTls), tls.Fingerprint, tls.Proof))));
+        {
+            var current = tls?.Current;
+            return Results.Ok(new NodeServices(identity.NodeId, new NodeServices.StorageService(
+                NodeServices.GrpcUrl(network.Value.AdvertisedEndpoint, listenPort, grpcPort, grpcTls),
+                current?.Fingerprint, current?.Proof, current?.NotAfterUnixSeconds)));
+        });
 
         app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));
 
@@ -117,14 +125,4 @@ public static class StorageNodeApp
     }
 
     public static WebApplication Create(string[] args) => Create(new WebApplicationOptions { Args = args });
-}
-
-/// <summary>The gRPC port's certificate and its published identity binding (#142); empty when TLS is off.</summary>
-internal sealed class StorageTlsState
-{
-    public System.Security.Cryptography.X509Certificates.X509Certificate2? Certificate { get; set; }
-
-    public string? Fingerprint { get; set; }
-
-    public string? Proof { get; set; }
 }

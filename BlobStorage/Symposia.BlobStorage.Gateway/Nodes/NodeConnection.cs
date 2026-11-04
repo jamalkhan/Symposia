@@ -1,3 +1,4 @@
+using Symposia.Network.Node;
 using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
 
@@ -30,7 +31,10 @@ public sealed class NodeConnection : IDisposable
                 // Pinning replaces CA validation, so chain/name errors are expected and ignored.
                 SslOptions = tlsFingerprint is null ? new() : new System.Net.Security.SslClientAuthenticationOptions
                 {
-                    RemoteCertificateValidationCallback = (_, certificate, _, _) => PinMatches(certificate?.GetRawCertData(), tlsFingerprint),
+                    RemoteCertificateValidationCallback = (_, certificate, _, _) => StorageTlsProof.PinMatches(
+                        certificate?.GetRawCertData(),
+                        certificate is System.Security.Cryptography.X509Certificates.X509Certificate2 c2 ? new DateTimeOffset(c2.NotAfter.ToUniversalTime(), TimeSpan.Zero) : null,
+                        tlsFingerprint, DateTimeOffset.UtcNow),
                 },
             },
         });
@@ -56,11 +60,6 @@ public sealed class NodeConnection : IDisposable
 
     /// <summary>The pinned TLS certificate fingerprint, or null for a cleartext (h2c) node.</summary>
     public string? TlsFingerprint { get; }
-
-    /// <summary>True when the presented certificate (DER) hashes to the pinned fingerprint (#142).</summary>
-    public static bool PinMatches(byte[]? certificateDer, string pinnedFingerprint) =>
-        certificateDer is not null && string.Equals(
-            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(certificateDer)), pinnedFingerprint, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The node's identity in replica metadata (<c>node_ids</c>, GC queue, repair tasks; issue #137):

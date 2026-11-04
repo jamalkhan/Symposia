@@ -27,6 +27,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private Timer? _probeTimer;
 
     private readonly IStorageRpcSigner? _signer;
+    private readonly HashSet<string> _tlsSeen = new(StringComparer.OrdinalIgnoreCase);
 
     public NodeRegistry(
         IOptions<GatewayOptions> options,
@@ -142,10 +143,25 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         var now = DateTimeOffset.UtcNow;
         var added = new List<NodeConnection>();
         var migrations = new List<(string Url, string Id)>();
+        var requireTls = _options.Value.RequireStorageTls;
         lock (_lock)
         {
             foreach (var d in descriptors)
             {
+                // No downgrade (#142 review), whatever the source: never connect in cleartext when TLS is
+                // required, and never to a node in cleartext once it has been seen with a pinned certificate.
+                if (d.TlsFingerprint is null && (requireTls || _tlsSeen.Contains(d.Id)))
+                {
+                    _logger.LogError("Refusing cleartext storage connection to {Node} at {Url} ({Why}).", d.Id, d.Url,
+                        requireTls ? "TLS is required" : "it previously served pinned TLS");
+                    continue;
+                }
+
+                if (d.TlsFingerprint is not null)
+                {
+                    _tlsSeen.Add(d.Id);
+                }
+
                 var existing = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
                 if (existing is not null && existing.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(existing.TlsFingerprint, d.TlsFingerprint, StringComparison.OrdinalIgnoreCase))
