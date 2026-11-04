@@ -80,7 +80,7 @@ public sealed class QuorumWriter
 
         var cid = successes[0].Response!.Cid;
         var sizeBytes = successes[0].Response!.SizeBytes;
-        var nodeIds = successes.Select(s => s.Node.Url).ToList();
+        var nodeIds = successes.Select(s => s.Node.Id).ToList();
 
         var record = new ObjectRecord(
             bucket, key, cid, sizeBytes, contentType,

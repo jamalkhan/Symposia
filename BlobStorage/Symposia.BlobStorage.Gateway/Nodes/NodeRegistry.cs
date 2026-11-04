@@ -38,20 +38,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        // Merge config nodes + DB-persisted nodes (deduped by URL).
-        var configUrls = _options.Value.Nodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var dbUrls = _store.GetPersistedNodes().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var allUrls = configUrls.Union(dbUrls, StringComparer.OrdinalIgnoreCase);
-
-        lock (_lock)
-        {
-            foreach (var url in allUrls)
-            {
-                if (!_nodes.Any(n => n.Url.Equals(url, StringComparison.OrdinalIgnoreCase)))
-                    _nodes.Add(new NodeConnection(url));
-            }
-        }
-
+        // Nodes arrive through Sync, fed by the configured IStorageNodeSource (issue #137).
         // Probe immediately so the first request has health data.
         _probeTimer = new Timer(_ => ProbeAll(), null, TimeSpan.Zero,
             TimeSpan.FromSeconds(Math.Max(1, _options.Value.ProbeIntervalSeconds)));
@@ -95,8 +82,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         lock (_lock)
         {
             return nodeUrls
-                .Select(url => _nodes.FirstOrDefault(n =>
-                    n.Url.Equals(url, StringComparison.OrdinalIgnoreCase)))
+                .Select(id => _nodes.FirstOrDefault(n =>
+                    n.Id.Equals(id, StringComparison.OrdinalIgnoreCase)))
                 .OfType<NodeConnection>()
                 .OrderByDescending(n => n.IsHealthy)
                 .ThenByDescending(n => n.LastProbeTime)
@@ -138,47 +125,77 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Adds storage nodes discovered in the on-chain registry (issue #135), keyed by gRPC URL,
-    /// and keeps each one's expected node address current. Nodes are not persisted (the registry
-    /// is the source of truth) and are never removed here: one that disappears simply fails its
-    /// probes and is treated as offline, so its replicas aren't written off early.
+    /// Applies a source's current node list (issue #137):
+    /// <list type="bullet">
+    /// <item>a new ID is added (and, the first time, URL-keyed metadata for it is migrated to its ID);</item>
+    /// <item>a known ID at a new URL gets a fresh connection; metadata is keyed by ID, so nothing is rewritten;</item>
+    /// <item>an ID missing from the source longer than <see cref="GatewayOptions.NodeGracePeriodSeconds"/> is dropped.
+    /// Its replica references stay; the compliance scan stops counting them and repair adds copies elsewhere.</item>
+    /// </list>
     /// </summary>
-    public void SyncFromRegistry(IReadOnlyDictionary<string, string> grpcUrlToNodeId)
+    public void Sync(IReadOnlyList<StorageNodeDescriptor> descriptors)
     {
+        var now = DateTimeOffset.UtcNow;
+        var added = new List<NodeConnection>();
         lock (_lock)
         {
-            foreach (var (url, nodeId) in grpcUrlToNodeId)
+            foreach (var d in descriptors)
             {
-                // Same node, new address (DHCP change, LAN endpoint set later): move its replicas to the
-                // new URL instead of leaving a dead entry that still "holds" them (issue #135 review).
-                var moved = _nodes.FirstOrDefault(n => string.Equals(n.ExpectedNodeId, nodeId, StringComparison.OrdinalIgnoreCase)
-                    && !n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
-                if (moved is not null)
+                var existing = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                if (existing is not null && existing.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase))
                 {
-                    var renamed = _store.RenameReplicaUrl(moved.Url, url);
-                    _logger.LogInformation("Storage node {Node} moved from {Old} to {New}; re-pointed {Count} object(s).",
-                        nodeId, moved.Url, url, renamed);
-                    _nodes.Remove(moved);
-                    moved.Dispose();
-                }
-
-                var existing = _nodes.FirstOrDefault(n => n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
-                if (existing is not null)
-                {
-                    if (!string.Equals(existing.ExpectedNodeId, nodeId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        _logger.LogInformation("Storage node at {Url} is now registered to {Node}.", url, nodeId);
-                        existing.ExpectedNodeId = nodeId;
-                    }
-
+                    existing.LastSeenInSource = now;
                     continue;
                 }
 
-                var conn = new NodeConnection(url, nodeId);
+                // Another node previously reachable at this URL (address reuse) must not keep it.
+                var squatter = _nodes.FirstOrDefault(n => n.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase)
+                    && !n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                if (squatter is not null)
+                {
+                    _logger.LogInformation("URL {Url} now belongs to {Node}; dropping the connection for {Previous}.", d.Url, d.Id, squatter.Id);
+                    _nodes.Remove(squatter);
+                    squatter.Dispose();
+                }
+
+                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id) { LastSeenInSource = now };
+                if (existing is not null)
+                {
+                    _logger.LogInformation("Storage node {Node} moved from {Old} to {New}.", d.Id, existing.Url, d.Url);
+                    _nodes.Remove(existing);
+                    existing.Dispose();
+                }
+                else
+                {
+                    if (d.Id != d.Url)
+                    {
+                        var migrated = _store.RenameReplicaUrl(d.Url, d.Id);
+                        if (migrated > 0)
+                        {
+                            _logger.LogInformation("Migrated {Count} object(s) from URL {Url} to node ID {Node}.", migrated, d.Url, d.Id);
+                        }
+                    }
+
+                    _logger.LogInformation("Added storage node {Node} at {Url}.", d.Id, d.Url);
+                }
+
                 _nodes.Add(conn);
-                _logger.LogInformation("Added storage node {Node} at {Url} from the registry.", nodeId, url);
-                _ = ProbeAsync(conn);
+                added.Add(conn);
             }
+
+            var grace = TimeSpan.FromSeconds(_options.Value.NodeGracePeriodSeconds);
+            foreach (var gone in _nodes.Where(n => now - n.LastSeenInSource > grace).ToList())
+            {
+                _logger.LogInformation("Storage node {Node} ({Url}) has been missing from its source for over {Grace}; dropping it.",
+                    gone.Id, gone.Url, grace);
+                _nodes.Remove(gone);
+                gone.Dispose();
+            }
+        }
+
+        foreach (var conn in added)
+        {
+            _ = ProbeAsync(conn);
         }
     }
 

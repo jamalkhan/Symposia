@@ -5,39 +5,22 @@ using Symposia.Network.Node;
 namespace Symposia.BlobStorage.Gateway.Nodes;
 
 /// <summary>
-/// Keeps the gateway's storage nodes in step with the on-chain NodeRegistry (issue #135).
-/// Each cycle lists registered nodes through the Blockchain Gateway, asks each one where its
-/// storage gRPC API lives (<see cref="NodeServices.Path"/>), and hands the result to
-/// <see cref="NodeRegistry.SyncFromRegistry"/>. Nodes without a storage service (for example
-/// compute-only nodes) are skipped. Identity is verified later by the Probe NodeId check.
+/// Storage nodes from the on-chain NodeRegistry (issues #135, #137): lists registered nodes through
+/// the Blockchain Gateway and asks each where its storage gRPC API lives
+/// (<see cref="NodeServices.Path"/>). A node's identity is its registry address. Nodes without a
+/// storage service (compute-only) are skipped; identity is verified later by the Probe NodeId check.
 /// </summary>
-public sealed class RegistryNodeSync(
-    NodeRegistry nodes,
+public sealed class RegistryNodeSource(
     INodeRegistryClient registry,
     IHttpClientFactory httpFactory,
     IOptions<GatewayOptions> options,
-    ILogger<RegistryNodeSync> logger) : BackgroundService
+    ILogger<RegistryNodeSource> logger) : IStorageNodeSource
 {
     public const string HttpClientName = "node-services";
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(1, options.Value.RegistryRefreshSeconds)));
-        do
-        {
-            try
-            {
-                await SyncOnceAsync(stoppingToken);
-            }
-            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
-            {
-                logger.LogWarning(ex, "Could not refresh storage nodes from the registry; keeping the current list.");
-            }
-        }
-        while (await timer.WaitForNextTickAsync(stoppingToken));
-    }
+    public TimeSpan RefreshInterval => TimeSpan.FromSeconds(Math.Max(1, options.Value.RegistryRefreshSeconds));
 
-    public async Task SyncOnceAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<StorageNodeDescriptor>> DiscoverAsync(CancellationToken ct)
     {
         var members = await registry.ListNodesAsync(ct);
         logger.LogDebug("Registry lists {Count} node(s); resolving storage services.", members.Count);
@@ -55,29 +38,12 @@ public sealed class RegistryNodeSync(
             }
         });
 
-        nodes.SyncFromRegistry(found);
         logger.LogDebug("Registry sync: {Storage} storage node(s) of {Count} registered.", found.Count, members.Count);
+        return found.Select(kv => new StorageNodeDescriptor(kv.Value, kv.Key)).ToList();
     }
 
     // The services document was fetched from this endpoint, so loopback here means the node is local.
     private static bool IsLocal(string endpoint) => Uri.TryCreate(endpoint, UriKind.Absolute, out var u) && u.IsLoopback;
-
-    /// <summary>Loads the node list before the gateway starts serving, so the first requests after a restart aren't 503s.</summary>
-    public override async Task StartAsync(CancellationToken cancellationToken)
-    {
-        using var first = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        first.CancelAfter(TimeSpan.FromSeconds(5));
-        try
-        {
-            await SyncOnceAsync(first.Token);
-        }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            logger.LogWarning("Initial registry sync did not finish ({Error}); continuing in the background.", ex.Message);
-        }
-
-        await base.StartAsync(cancellationToken);
-    }
 
     private async Task<string?> StorageGrpcUrlAsync(RegisteredNode member, CancellationToken ct)
     {

@@ -87,20 +87,58 @@ public sealed class ReplicaConsistencyTests : IDisposable
     }
 
     [Fact]
-    public void NodeThatChangesAddress_KeepsItsReplicasAndPendingDeletions()
+    public void UrlKeyedMetadata_IsMigratedToNodeIds_AndAddressChangesTouchNoMetadata()
     {
         var store = Store();
         store.PutObject(Record("b", "k", "http://10.0.0.5:6180", "http://10.0.0.6:6180"));
         store.EnqueueNodeDeletion("cid-gone", "http://10.0.0.6:6180");
         using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
 
-        nodes.SyncFromRegistry(new Dictionary<string, string> { ["http://10.0.0.6:6180"] = "0xB" });
-        nodes.SyncFromRegistry(new Dictionary<string, string> { ["http://10.0.0.7:6180"] = "0xB" });
+        // First sight of each registry node migrates #135-era URL references to its address.
+        nodes.Sync([new("0xA", "http://10.0.0.5:6180"), new("0xB", "http://10.0.0.6:6180")]);
+        Assert.Equal(["0xA", "0xB"], store.GetObject("b", "k")!.NodeIds);
+        Assert.Equal("0xB", Assert.Single(store.GetPendingDeletions(10)).NodeUrl);
 
-        Assert.Equal(["http://10.0.0.7:6180"], nodes.All.Select(n => n.Url));
-        Assert.Equal(["http://10.0.0.5:6180", "http://10.0.0.7:6180"], store.GetObject("b", "k")!.NodeIds);
+        // B moves: only the connection changes.
+        nodes.Sync([new("0xA", "http://10.0.0.5:6180"), new("0xB", "http://10.0.0.7:6180")]);
+        Assert.Equal(["http://10.0.0.5:6180", "http://10.0.0.7:6180"], nodes.All.Select(n => n.Url).Order());
+        Assert.Equal("0xB", nodes.All.Single(n => n.Url.EndsWith(".7:6180")).Id);
+        Assert.Equal(["0xA", "0xB"], store.GetObject("b", "k")!.NodeIds);
         Assert.Equal(0, store.CountUnderReplicated(2));
-        Assert.Equal("http://10.0.0.7:6180", Assert.Single(store.GetPendingDeletions(10)).NodeUrl);
+    }
+
+    [Fact]
+    public void UrlReusedByAnotherNode_IsNotCreditedWithThePreviousNodesCopies()
+    {
+        var store = Store();
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
+        nodes.Sync([new("0xA", "http://10.0.0.5:6180")]);
+        store.PutObject(Record("b", "k", "0xA"));
+
+        nodes.Sync([new("0xC", "http://10.0.0.5:6180")]);
+
+        var node = Assert.Single(nodes.All);
+        Assert.Equal("0xC", node.Id);
+        Assert.Equal(["0xA"], store.GetObject("b", "k")!.NodeIds);
+    }
+
+    [Fact]
+    public async Task NodeMissingFromItsSourcePastTheGracePeriod_IsDropped()
+    {
+        var store = Store();
+        var options = Microsoft.Extensions.Options.Options.Create(new GatewayOptions
+        {
+            MetadataDbPath = Path.Combine(_dir, "meta.db"),
+            ProbeIntervalSeconds = 3600,
+            NodeGracePeriodSeconds = 1,
+        });
+        using var nodes = new NodeRegistry(options, store, NullLogger<NodeRegistry>.Instance);
+        nodes.Sync([new("0xA", "http://10.0.0.5:6180"), new("0xB", "http://10.0.0.6:6180")]);
+
+        await Task.Delay(1200);
+        nodes.Sync([new("0xA", "http://10.0.0.5:6180")]);
+
+        Assert.Equal(["0xA"], nodes.All.Select(n => n.Id));
     }
 
     [Fact]

@@ -77,7 +77,7 @@ public sealed class GcWorker : BackgroundService
             }
 
             var node = _nodes.All.FirstOrDefault(n =>
-                n.Url.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+                n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
             if (node is null || !node.IsHealthy)
             {

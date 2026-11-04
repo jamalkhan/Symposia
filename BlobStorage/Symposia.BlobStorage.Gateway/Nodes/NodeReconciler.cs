@@ -79,7 +79,7 @@ public sealed class NodeReconciler
                 // No object in the entire metadata store references this CID — true orphan.
                 _logger.LogDebug(
                     "NodeReconciler: CID {Cid} on {Url} has no metadata; queuing GC deletion.", cid, node.Url);
-                _store.EnqueueNodeDeletion(cid, node.Url);
+                _store.EnqueueNodeDeletion(cid, node.Id);
                 orphanQueued++;
             }
         }
@@ -97,7 +97,7 @@ public sealed class NodeReconciler
             {
                 ct.ThrowIfCancellationRequested();
 
-                if (!record.NodeIds.Any(u => u.Equals(node.Url, StringComparison.OrdinalIgnoreCase)))
+                if (!record.NodeIds.Any(u => u.Equals(node.Id, StringComparison.OrdinalIgnoreCase)))
                     continue; // This node isn't a listed replica of this object — skip.
 
                 if (!nodeCids.Contains(record.Cid))
@@ -106,7 +106,7 @@ public sealed class NodeReconciler
                     _logger.LogWarning(
                         "NodeReconciler: {Url} is missing CID {Cid} for {Bucket}/{Key}; flagging for repair.",
                         node.Url, record.Cid, record.Bucket, record.Key);
-                    _repairQueue.EnqueueMissingReplica(record, node.Url, _store, _nodes);
+                    _repairQueue.EnqueueMissingReplica(record, node.Id, _store, _nodes);
                     repaired++;
                 }
                 else
@@ -118,7 +118,7 @@ public sealed class NodeReconciler
                         _logger.LogWarning(
                             "NodeReconciler: CID {Cid} on {Url} failed integrity challenge after reconnect.",
                             record.Cid, node.Url);
-                        _repairQueue.EnqueueCorruptReplica(record, node.Url, _store, _nodes);
+                        _repairQueue.EnqueueCorruptReplica(record, node.Id, _store, _nodes);
                         repaired++;
                     }
                 }

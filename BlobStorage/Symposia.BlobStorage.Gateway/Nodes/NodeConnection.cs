@@ -14,6 +14,7 @@ public sealed class NodeConnection : IDisposable
     {
         Url = url;
         ExpectedNodeId = expectedNodeId;
+        Id = expectedNodeId ?? url;
         // Allow unencrypted HTTP/2 (h2c) for node communication in dev.
         // Production: set TLS on the channel or terminate TLS at a sidecar.
         // A short connect timeout keeps a powered-off node from stalling writes and probes.
@@ -28,6 +29,7 @@ public sealed class NodeConnection : IDisposable
     internal NodeConnection(string url, HttpClient httpClient)
     {
         Url = url;
+        Id = url;
         _channel = GrpcChannel.ForAddress(httpClient.BaseAddress!, new GrpcChannelOptions
         {
             HttpClient = httpClient,
@@ -38,10 +40,39 @@ public sealed class NodeConnection : IDisposable
     public string Url { get; }
 
     /// <summary>
+    /// The node's identity in replica metadata (<c>node_ids</c>, GC queue, repair tasks; issue #137):
+    /// its registry address when it came from the on-chain registry, otherwise its URL. Stable
+    /// across address changes; the URL is just where to reach it right now.
+    /// </summary>
+    public string Id { get; }
+
+    /// <summary>
     /// The node address the registry lists for this URL (issue #135). When set, a probe whose
     /// NodeId differs marks the node unhealthy, so an endpoint can't pose as another node.
     /// </summary>
-    public string? ExpectedNodeId { get; set; }
+    public string? ExpectedNodeId { get; }
+
+    /// <summary>When this connection was created (start of the gateway's knowledge of the node).</summary>
+    public DateTimeOffset KnownSince { get; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Whether copies on this node still count toward an object's healthy replicas: it's healthy,
+    /// or it has been down for less than <paramref name="grace"/> (issue #137). Past that, the
+    /// compliance scan stops counting it and repair adds a copy elsewhere.
+    /// </summary>
+    public bool CountsAsReplica(TimeSpan grace)
+    {
+        if (IsHealthy)
+        {
+            return true;
+        }
+
+        var downSince = LastUnhealthyAt == DateTimeOffset.MinValue ? KnownSince : LastUnhealthyAt;
+        return DateTimeOffset.UtcNow - downSince < grace;
+    }
+
+    /// <summary>When the node's source last listed it; nodes absent past the grace period are dropped.</summary>
+    public DateTimeOffset LastSeenInSource { get; set; } = DateTimeOffset.UtcNow;
 
     public Protocol.StorageNode.StorageNodeClient Client { get; }
 
@@ -68,6 +99,11 @@ public sealed class NodeConnection : IDisposable
     /// <summary>Treat the node as down until its next successful probe (e.g. after a failed read).</summary>
     public void MarkUnhealthy()
     {
+        if (IsHealthy)
+        {
+            LastUnhealthyAt = DateTimeOffset.UtcNow;
+        }
+
         LastProbe = null;
         LastProbeTime = DateTimeOffset.MinValue;
     }

@@ -53,7 +53,7 @@ public static class BlobGatewayApp
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ReplicationMonitor>());
         builder.Services.AddHostedService<ReconcilePollerService>();
 
-        // Storage nodes from the on-chain registry instead of a static list (issue #135).
+        // Where storage nodes come from (issues #135, #137): the on-chain registry, or static config.
         if (builder.Configuration.GetValue("Gateway:NodeSource", NodeSourceKind.Static) == NodeSourceKind.Registry)
         {
             var chainGateway = builder.Configuration["Gateway:BlockchainGatewayUrl"];
@@ -67,9 +67,15 @@ public static class BlobGatewayApp
                 http.BaseAddress = new Uri(chainGateway);
                 http.Timeout = TimeSpan.FromSeconds(10);
             });
-            builder.Services.AddHttpClient(RegistryNodeSync.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
-            builder.Services.AddHostedService<RegistryNodeSync>();
+            builder.Services.AddHttpClient(RegistryNodeSource.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
+            builder.Services.AddSingleton<IStorageNodeSource, RegistryNodeSource>();
         }
+        else
+        {
+            builder.Services.AddSingleton<IStorageNodeSource, StaticNodeSource>();
+        }
+
+        builder.Services.AddHostedService<NodeSourceSyncService>();
 
         // ── Kestrel: HTTP/1.1 for S3 clients ─────────────────────────────────────────
         // Production terminates TLS externally (load-balancer or sidecar). Cleartext HTTP/2 isn't

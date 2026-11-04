@@ -124,7 +124,7 @@ internal static class ObjectEndpoints
         // client until the first chunk arrives, so a replica on a node that just went down (and
         // isn't yet marked unhealthy by a probe) costs a retry, not a failed GET (issue #135 AC3).
         var replicas = nodes.All
-            .Where(n => record.NodeIds.Contains(n.Url, StringComparer.OrdinalIgnoreCase))
+            .Where(n => record.NodeIds.Contains(n.Id, StringComparer.OrdinalIgnoreCase))
             .OrderByDescending(n => n.IsHealthy)
             .ThenByDescending(n => n.LastProbeTime)
             .ToList();
@@ -151,7 +151,7 @@ internal static class ObjectEndpoints
                 if (ex.StatusCode == StatusCode.NotFound)
                 {
                     logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair and trying another replica.", candidate.Url, record.Cid);
-                    repairQueue.EnqueueMissingReplica(record, candidate.Url, store, nodes);
+                    repairQueue.EnqueueMissingReplica(record, candidate.Id, store, nodes);
                 }
                 else
                 {
@@ -223,7 +223,7 @@ internal static class ObjectEndpoints
         {
             // Node claims it doesn't have the blob — it's missing from this replica.
             logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair.", node.Url, record.Cid);
-            repairQueue.EnqueueMissingReplica(record, node.Url, store, nodes);
+            repairQueue.EnqueueMissingReplica(record, node.Id, store, nodes);
             ctx.Abort();
             return Results.Empty;
         }
@@ -239,7 +239,7 @@ internal static class ObjectEndpoints
                     "Aborting connection and flagging node {Url} for repair.",
                     bucket, key, record.Cid, actualHex, node.Url);
 
-                repairQueue.EnqueueCorruptReplica(record, node.Url, store, nodes);
+                repairQueue.EnqueueCorruptReplica(record, node.Id, store, nodes);
                 // Abort the underlying connection — the client receives a broken transfer and must retry.
                 ctx.Abort();
                 return Results.Empty;
@@ -286,7 +286,7 @@ internal static class ObjectEndpoints
             foreach (var nodeUrl in record.NodeIds)
             {
                 var node = nodes.All.FirstOrDefault(n =>
-                    n.Url.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+                    n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
                 if (node is not null)
                     _ = DeleteFromNodeAsync(node, record.Cid, store, logger);
@@ -311,7 +311,7 @@ internal static class ObjectEndpoints
             logger.LogWarning(
                 "Failed to delete blob {Cid} from node {Url}: {Message}. Queued for retry.",
                 cid, node.Url, ex.Message);
-            store.EnqueueNodeDeletion(cid, node.Url);
+            store.EnqueueNodeDeletion(cid, node.Id);
         }
     }
 

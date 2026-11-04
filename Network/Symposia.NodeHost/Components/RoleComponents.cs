@@ -26,6 +26,10 @@ public sealed class StorageRoleComponent : WebAppComponent
 {
     public override string Name => "storage";
 
+    protected override bool UsesRoleDataDir => true;
+
+    protected override bool ServesNodeHealth => true;
+
     protected override bool BindsOwnPort => true;
 
     protected override string? SkipReason(HostContext context) =>
@@ -57,6 +61,10 @@ public sealed class StorageRoleComponent : WebAppComponent
 public sealed class ComputeRoleComponent : WebAppComponent
 {
     public override string Name => "compute";
+
+    protected override bool UsesRoleDataDir => true;
+
+    protected override bool ServesNodeHealth => true;
 
     protected override string? SkipReason(HostContext context) =>
         !context.Settings.Compute.Enabled ? "Compute role is turned off" : base.SkipReason(context);
@@ -139,6 +147,8 @@ public sealed class ComputeRoleComponent : WebAppComponent
 public sealed class BlobGatewayRoleComponent : WebAppComponent
 {
     public override string Name => "blobgateway";
+
+    protected override bool UsesRoleDataDir => true;
 
     protected override bool BindsOwnPort => true;
 

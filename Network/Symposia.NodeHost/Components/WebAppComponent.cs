@@ -24,6 +24,12 @@ public abstract class WebAppComponent : HostComponent
 
     protected virtual bool BindsOwnPort => false;
 
+    /// <summary>Roles keep their data in a per-network directory (<see cref="HostContext.RoleDataDir"/>).</summary>
+    protected virtual bool UsesRoleDataDir => false;
+
+    /// <summary>Roles that publish this host's health summary for peers' Network tab.</summary>
+    protected virtual bool ServesNodeHealth => false;
+
     /// <summary>Hook to add middleware to the built app before it starts (runs ahead of its endpoints).</summary>
     protected virtual void Secure(WebApplication app)
     {
@@ -36,7 +42,7 @@ public abstract class WebAppComponent : HostComponent
     {
         var dir = context.Paths.Component(Name);
         Directory.CreateDirectory(dir);
-        if (Name is "storage" or "compute" or "blobgateway")
+        if (UsesRoleDataDir)
         {
             Directory.CreateDirectory(context.RoleDataDir(Name));
         }
@@ -57,7 +63,7 @@ public abstract class WebAppComponent : HostComponent
         }, context);
 
         Secure(_app);
-        if (context.Health is { } health && Name is "storage" or "compute")
+        if (context.Health is { } health && ServesNodeHealth)
         {
             // Public, read-only health summary peers poll for their Network tab.
             var healthLogger = context.CreateLogger(Name, "Symposia.NodeHost.NodeHealth");

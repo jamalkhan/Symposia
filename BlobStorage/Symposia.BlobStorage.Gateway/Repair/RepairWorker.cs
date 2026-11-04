@@ -77,7 +77,7 @@ public sealed class RepairWorker : BackgroundService
         var currentNodeIds = record.NodeIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         // 2. Find a healthy source node that actually holds a good copy.
-        var sourceNode = await FindHealthySourceAsync(task.Cid, currentNodeIds, task.BadNodeUrl, ct);
+        var sourceNode = await FindHealthySourceAsync(task.Cid, currentNodeIds, task.BadNodeId, ct);
         if (sourceNode is null)
         {
             _logger.LogWarning(
@@ -87,7 +87,7 @@ public sealed class RepairWorker : BackgroundService
 
         // 3. Find a healthy target node not already in the replica set.
         var targetNode = _nodes.Healthy
-            .Where(n => !currentNodeIds.Contains(n.Url, StringComparer.OrdinalIgnoreCase))
+            .Where(n => !currentNodeIds.Contains(n.Id, StringComparer.OrdinalIgnoreCase))
             .FirstOrDefault();
 
         if (targetNode is null)
@@ -108,17 +108,17 @@ public sealed class RepairWorker : BackgroundService
         // 5. Record the new replica on every object holding this CID (idx_objects_cid, atomic).
         //    If the object was deleted or overwritten while copying, the target's copy is now
         //    orphaned storage: queue it for deletion instead of leaking it.
-        _store.AddReplicaForCid(task.Cid, targetNode.Url);
+        _store.AddReplicaForCid(task.Cid, targetNode.Id);
         if (!_store.IsCidReferenced(task.Cid))
         {
             _logger.LogInformation("Repair: CID {Cid} was deleted while copying; removing the new copy from {Target}.", task.Cid, targetNode.Url);
-            _store.EnqueueNodeDeletion(task.Cid, targetNode.Url);
+            _store.EnqueueNodeDeletion(task.Cid, targetNode.Id);
             return;
         }
 
         // 6. If we evicted a bad node, schedule its blob for GC deletion.
-        if (task.BadNodeUrl is not null && !_store.IsCidReferenced(task.Cid))
-            _store.EnqueueNodeDeletion(task.Cid, task.BadNodeUrl);
+        if (task.BadNodeId is not null && !_store.IsCidReferenced(task.Cid))
+            _store.EnqueueNodeDeletion(task.Cid, task.BadNodeId);
 
         _logger.LogInformation("Repair complete for CID {Cid}: replica added on {Target}.", task.Cid, targetNode.Url);
     }
@@ -127,8 +127,8 @@ public sealed class RepairWorker : BackgroundService
         string cid, ISet<string> candidateUrls, string? excludeUrl, CancellationToken ct)
     {
         var candidates = _nodes.Healthy
-            .Where(n => candidateUrls.Contains(n.Url, StringComparer.OrdinalIgnoreCase) &&
-                        !n.Url.Equals(excludeUrl, StringComparison.OrdinalIgnoreCase))
+            .Where(n => candidateUrls.Contains(n.Id, StringComparer.OrdinalIgnoreCase) &&
+                        !n.Id.Equals(excludeUrl, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         foreach (var node in candidates)

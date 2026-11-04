@@ -137,9 +137,9 @@ public sealed class RegistryReplicationTests : IDisposable
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
         using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
-        var sync = new RegistryNodeSync(nodes, registry, http, Options(), NullLogger<RegistryNodeSync>.Instance);
+        var source = new RegistryNodeSource(registry, http, Options(), NullLogger<RegistryNodeSource>.Instance);
 
-        await sync.SyncOnceAsync(CancellationToken.None);
+        nodes.Sync(await source.DiscoverAsync(CancellationToken.None));
 
         var node = Assert.Single(nodes.All);
         Assert.Equal("http://10.0.0.1:6180", node.Url);
