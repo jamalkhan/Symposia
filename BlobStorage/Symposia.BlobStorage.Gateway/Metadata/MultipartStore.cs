@@ -78,8 +78,12 @@ public sealed partial class GatewayMetadataStore
     public bool TransitionUpload(string uploadId, MultipartStatus from, MultipartStatus to)
     {
         using var conn = Open();
-        return Execute(Query(conn, "UPDATE multipart_uploads SET status = $to WHERE upload_id = $id AND status = $from",
-            ("$to", to.ToString()), ("$id", uploadId), ("$from", from.ToString()))) > 0;
+        // Entering Completing takes a lease (completing_since) so a crash mid-assembly can't strand
+        // the upload: ReapUploads releases leases older than the configured limit.
+        return Execute(Query(conn,
+            "UPDATE multipart_uploads SET status = $to, completing_since = CASE WHEN $to = 'Completing' THEN $now ELSE NULL END " +
+            "WHERE upload_id = $id AND status = $from",
+            ("$to", to.ToString()), ("$now", Now()), ("$id", uploadId), ("$from", from.ToString()))) > 0;
     }
 
     /// <summary>
@@ -109,6 +113,7 @@ public sealed partial class GatewayMetadataStore
             replaced = r.Read() ? ReadPart(r) : null;
         }
 
+        CancelPendingDeletion(conn, tx, part.Cid);
         using (var upsert = Query(conn,
                    """
                    INSERT INTO multipart_parts (upload_id, part_number, cid, size_bytes, node_ids, checksum, uploaded_at)
@@ -122,6 +127,11 @@ public sealed partial class GatewayMetadataStore
         {
             upsert.Transaction = tx;
             upsert.ExecuteNonQuery();
+        }
+
+        if (replaced is not null && replaced.Cid != part.Cid)
+        {
+            CollectIfUnreferenced(conn, tx, replaced.Cid, replaced.NodeIds);
         }
 
         tx.Commit();
@@ -147,72 +157,186 @@ public sealed partial class GatewayMetadataStore
     }
 
     /// <summary>
-    /// Commits a completed upload in one transaction: the object row, the upload's Completed state with
-    /// its committed-parts snapshot (for idempotent retries), and removal of its part rows. Returns the
-    /// removed parts so the caller can GC blobs no longer referenced.
+    /// Commits an assembled upload in one IMMEDIATE transaction (#5 review): re-checks that this
+    /// request still holds the Completing lease, re-reads the parts inside the transaction, enforces
+    /// <c>If-None-Match: *</c>, writes the object through the shared upsert (which also GCs an
+    /// overwritten blob), marks the upload Completed with its committed-parts snapshot, deletes the
+    /// part rows and queues any part blob nothing else references. Nothing is written unless all succeed.
     /// </summary>
-    public IReadOnlyList<MultipartPart> CompleteUpload(string uploadId, ObjectRecord record, string finalEtag, string committedPartsJson)
+    public CompleteOutcome CompleteUpload(string uploadId, ObjectRecord record, string finalEtag, string committedPartsJson, bool ifNoneMatch)
     {
-        var parts = ListParts(uploadId);
         using var conn = Open();
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
-        void Run(string sql, params (string, object?)[] args)
+        using (var status = Query(conn, "SELECT status FROM multipart_uploads WHERE upload_id = $id", ("$id", uploadId)))
         {
-            using var cmd = Query(conn, sql, args);
-            cmd.Transaction = tx;
-            cmd.ExecuteNonQuery();
+            status.Transaction = tx;
+            if (status.ExecuteScalar() as string != nameof(MultipartStatus.Completing))
+            {
+                return CompleteOutcome.LostLease;
+            }
         }
 
-        Run("""
-            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, etag_override)
-            VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc, $eo)
-            ON CONFLICT(bucket, key) DO UPDATE SET
-                cid = excluded.cid, size_bytes = excluded.size_bytes, content_type = excluded.content_type,
-                last_modified = excluded.last_modified, node_ids = excluded.node_ids,
-                replica_count = excluded.replica_count, etag_override = excluded.etag_override
-            """,
-            ("$b", record.Bucket), ("$k", record.Key), ("$cid", record.Cid), ("$sz", record.SizeBytes), ("$ct", record.ContentType),
-            ("$lm", record.LastModified.ToString("O")), ("$ni", string.Join(',', record.NodeIds)), ("$rc", record.NodeIds.Count),
-            ("$eo", finalEtag));
-        Run("""
-            UPDATE multipart_uploads SET status = 'Completed', completed_at = $at, final_cid = $cid, final_etag = $etag,
-                committed_parts_json = $parts WHERE upload_id = $id
+        if (ifNoneMatch)
+        {
+            using var exists = Query(conn, "SELECT 1 FROM objects WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key));
+            exists.Transaction = tx;
+            if (exists.ExecuteScalar() is not null)
+            {
+                return CompleteOutcome.PreconditionFailed;
+            }
+        }
+
+        var parts = new List<MultipartPart>();
+        using (var list = Query(conn,
+                   "SELECT upload_id, part_number, cid, size_bytes, node_ids, checksum, uploaded_at FROM multipart_parts WHERE upload_id = $id",
+                   ("$id", uploadId)))
+        {
+            list.Transaction = tx;
+            using var r = list.ExecuteReader();
+            while (r.Read())
+            {
+                parts.Add(ReadPart(r));
+            }
+        }
+
+        UpsertObject(conn, tx, record with { EtagOverride = finalEtag });
+        Run(conn, tx, """
+            UPDATE multipart_uploads SET status = 'Completed', completing_since = NULL, completed_at = $at, final_cid = $cid,
+                final_etag = $etag, committed_parts_json = $parts WHERE upload_id = $id AND status = 'Completing'
             """,
             ("$at", Now()), ("$cid", record.Cid), ("$etag", finalEtag), ("$parts", committedPartsJson), ("$id", uploadId));
-        Run("DELETE FROM multipart_parts WHERE upload_id = $id", ("$id", uploadId));
-        tx.Commit();
-        return parts;
-    }
-
-    /// <summary>Marks the upload aborted and removes its parts (returned for GC). False if not in progress.</summary>
-    public (bool Aborted, IReadOnlyList<MultipartPart> Parts) AbortUpload(string uploadId)
-    {
-        if (!TransitionUpload(uploadId, MultipartStatus.InProgress, MultipartStatus.Aborted))
+        Run(conn, tx, "DELETE FROM multipart_parts WHERE upload_id = $id", ("$id", uploadId));
+        foreach (var part in parts)
         {
-            return (false, []);
+            CollectIfUnreferenced(conn, tx, part.Cid, part.NodeIds);
         }
 
-        var parts = ListParts(uploadId);
-        using var conn = Open();
-        Execute(Query(conn, "DELETE FROM multipart_parts WHERE upload_id = $id", ("$id", uploadId)));
-        return (true, parts);
+        tx.Commit();
+        return CompleteOutcome.Committed;
     }
 
-    /// <summary>In-progress uploads for a bucket in (key, upload_id) order (idx_multipart_uploads_bucket_key).</summary>
-    public IReadOnlyList<MultipartUpload> ListUploads(string bucket, string prefix, string? keyMarker, string? uploadIdMarker, int limit, DateTimeOffset now)
+    /// <summary>
+    /// Aborts an in-progress upload (or one whose Completing lease is older than
+    /// <paramref name="staleCompleting"/>) and removes its parts, queuing unreferenced part blobs
+    /// for deletion, all in one transaction. False if there was nothing to abort.
+    /// </summary>
+    public bool AbortUpload(string uploadId, TimeSpan staleCompleting)
     {
         using var conn = Open();
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        var aborted = AbortInTransaction(conn, tx, uploadId, DateTimeOffset.UtcNow - staleCompleting);
+        tx.Commit();
+        return aborted;
+    }
+
+    private static bool AbortInTransaction(SqliteConnection conn, SqliteTransaction tx, string uploadId, DateTimeOffset staleBefore)
+    {
+        using (var update = Query(conn, """
+                   UPDATE multipart_uploads SET status = 'Aborted', completing_since = NULL, completed_at = $now
+                   WHERE upload_id = $id AND (status = 'InProgress' OR (status = 'Completing' AND completing_since < $stale))
+                   """, ("$now", Now()), ("$id", uploadId), ("$stale", staleBefore.ToString("O"))))
+        {
+            update.Transaction = tx;
+            if (update.ExecuteNonQuery() == 0)
+            {
+                return false;
+            }
+        }
+
+        var parts = new List<MultipartPart>();
+        using (var list = Query(conn,
+                   "SELECT upload_id, part_number, cid, size_bytes, node_ids, checksum, uploaded_at FROM multipart_parts WHERE upload_id = $id",
+                   ("$id", uploadId)))
+        {
+            list.Transaction = tx;
+            using var r = list.ExecuteReader();
+            while (r.Read())
+            {
+                parts.Add(ReadPart(r));
+            }
+        }
+
+        Run(conn, tx, "DELETE FROM multipart_parts WHERE upload_id = $id", ("$id", uploadId));
+        foreach (var part in parts)
+        {
+            CollectIfUnreferenced(conn, tx, part.Cid, part.NodeIds);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Housekeeping (run periodically by <see cref="Repair.MultipartReaper"/>; #5 review):
+    /// releases Completing leases older than <paramref name="completingLease"/> back to InProgress (a
+    /// gateway crashed mid-assembly), aborts expired in-progress uploads (their parts would otherwise
+    /// pin blobs forever) and purges finished upload rows older than <paramref name="retention"/>.
+    /// Indexed by idx_multipart_uploads_status_expiry.
+    /// </summary>
+    public (int Released, int Expired, int Purged) ReapUploads(DateTimeOffset now, TimeSpan completingLease, TimeSpan retention)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        int released;
+        using (var release = Query(conn,
+                   "UPDATE multipart_uploads SET status = 'InProgress', completing_since = NULL WHERE status = 'Completing' AND completing_since < $stale",
+                   ("$stale", (now - completingLease).ToString("O"))))
+        {
+            release.Transaction = tx;
+            released = release.ExecuteNonQuery();
+        }
+
+        var expired = new List<string>();
+        using (var find = Query(conn, "SELECT upload_id FROM multipart_uploads WHERE status = 'InProgress' AND expires_at < $now", ("$now", now.ToString("O"))))
+        {
+            find.Transaction = tx;
+            using var r = find.ExecuteReader();
+            while (r.Read())
+            {
+                expired.Add(r.GetString(0));
+            }
+        }
+
+        foreach (var id in expired)
+        {
+            AbortInTransaction(conn, tx, id, now - completingLease);
+        }
+
+        int purged;
+        using (var purge = Query(conn,
+                   "DELETE FROM multipart_uploads WHERE status IN ('Completed', 'Aborted') AND completed_at < $before",
+                   ("$before", (now - retention).ToString("O"))))
+        {
+            purge.Transaction = tx;
+            purged = purge.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        return (released, expired.Count, purged);
+    }
+
+    /// <summary>
+    /// A tenant's in-progress uploads for a bucket in (key, upload_id) order, S3 marker semantics
+    /// (key-marker alone: keys strictly after it). Uses the partial index idx_multipart_uploads_open;
+    /// the prefix is a case-sensitive range, not LIKE (#5 review).
+    /// </summary>
+    public IReadOnlyList<MultipartUpload> ListUploads(
+        string tenantId, string bucket, string prefix, string? keyMarker, string? uploadIdMarker, int limit, DateTimeOffset now)
+    {
+        using var conn = Open();
+        var marker = string.IsNullOrEmpty(uploadIdMarker)
+            ? "AND key > $km"
+            : "AND (key, upload_id) > ($km, $um)";
         using var cmd = Query(conn,
-            """
+            $"""
             SELECT upload_id, tenant_id, bucket, key, content_type, checksum_algorithm, checksum_type, initiated_at, expires_at,
                    status, final_etag, committed_parts_json
-            FROM multipart_uploads
-            WHERE bucket = $b AND status = 'InProgress' AND expires_at > $now
-              AND key LIKE $prefix ESCAPE '\'
-              AND (key, upload_id) > ($km, $um)
+            FROM multipart_uploads INDEXED BY idx_multipart_uploads_open
+            WHERE bucket = $b AND status = 'InProgress' AND tenant_id = $t AND expires_at > $now
+              AND key >= $prefix AND ($prefix = '' OR key < $prefix || char(1114111))
+              {(keyMarker is null ? "" : marker)}
             ORDER BY key, upload_id LIMIT $limit
             """,
-            ("$b", bucket), ("$now", now.ToString("O")), ("$prefix", EscapeLike(prefix) + "%"),
+            ("$b", bucket), ("$t", tenantId), ("$now", now.ToString("O")), ("$prefix", prefix),
             ("$km", keyMarker ?? ""), ("$um", uploadIdMarker ?? ""), ("$limit", limit));
         using var r = cmd.ExecuteReader();
         var uploads = new List<MultipartUpload>();
@@ -234,4 +358,11 @@ public sealed partial class GatewayMetadataStore
     private static MultipartPart ReadPart(SqliteDataReader r) => new(
         r.GetString(0), r.GetInt32(1), r.GetString(2), r.GetInt64(3), SplitNodeIds(r.GetString(4)),
         r.IsDBNull(5) ? null : r.GetString(5), DateTimeOffset.Parse(r.GetString(6), CultureInfo.InvariantCulture));
+}
+
+public enum CompleteOutcome
+{
+    Committed,
+    LostLease,
+    PreconditionFailed,
 }

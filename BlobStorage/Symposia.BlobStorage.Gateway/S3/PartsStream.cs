@@ -14,8 +14,6 @@ namespace Symposia.BlobStorage.Gateway.S3;
 /// </summary>
 public sealed class PartsStream(IReadOnlyList<MultipartPart> parts, INodeRegistry nodes, ILogger logger) : Stream
 {
-    private static readonly TimeSpan FirstChunkTimeout = TimeSpan.FromSeconds(10);
-
     private int _index = -1;
     private AsyncServerStreamingCall<ReadBlobChunk>? _call;
     private ReadOnlyMemory<byte> _pending;
@@ -75,39 +73,38 @@ public sealed class PartsStream(IReadOnlyList<MultipartPart> parts, INodeRegistr
     private async Task OpenPartAsync(MultipartPart part, CancellationToken ct)
     {
         _hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var replicas = nodes.All
-            .Where(n => part.NodeIds.Contains(n.Id, StringComparer.OrdinalIgnoreCase))
-            .OrderByDescending(n => n.IsHealthy)
-            .ToList();
 
-        foreach (var node in replicas)
+        // Each replica first proves its copy hashes to the part's CID (the node hashes locally), so
+        // a corrupt replica is skipped for the next one instead of failing Complete every time (#5 review).
+        async Task<bool> Intact(NodeConnection node)
         {
-            var call = node.Client.ReadBlob(new ReadBlobRequest { Cid = part.Cid }, deadline: DateTime.UtcNow.AddHours(1), cancellationToken: ct);
-            using var first = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            first.CancelAfter(FirstChunkTimeout);
             try
             {
-                if (await call.ResponseStream.MoveNext(first.Token))
+                var proof = await node.Client.IntegrityChallengeAsync(
+                    new IntegrityChallengeRequest { Cid = part.Cid, Offset = 0, Length = 0 }, deadline: DateTime.UtcNow.AddMinutes(10), cancellationToken: ct);
+                if (proof.Sha256Hex.Equals(part.Cid, StringComparison.OrdinalIgnoreCase))
                 {
-                    Take(call.ResponseStream.Current);
+                    return true;
                 }
 
-                _call = call;
-                return;
+                logger.LogWarning("Part {Part} replica on {Url} is corrupt (hash {Actual}); using another replica.", part.PartNumber, node.Url, proof.Sha256Hex);
+                return false;
             }
-            catch (Exception ex) when (ex is RpcException or OperationCanceledException && !ct.IsCancellationRequested)
+            catch (RpcException ex) when (!ct.IsCancellationRequested)
             {
-                call.Dispose();
-                logger.LogWarning("Reading part {Part} (CID {Cid}) from {Url} failed ({Error}); trying another replica.",
-                    part.PartNumber, part.Cid, node.Url, ex.Message);
-                if (ex is not RpcException { StatusCode: StatusCode.NotFound })
-                {
-                    node.MarkUnhealthy();
-                }
+                logger.LogWarning("Integrity check of part {Part} on {Url} failed ({Status}); using another replica.", part.PartNumber, node.Url, ex.StatusCode);
+                return false;
             }
         }
 
-        throw new S3RequestRejectedException(503, "ServiceUnavailable", $"No replica of part {part.PartNumber} could be read.");
+        var opened = await ReplicaReader.OpenAsync(
+            ReplicaReader.Order(nodes, part.NodeIds), new ReadBlobRequest { Cid = part.Cid }, logger, ct, precheck: Intact)
+            ?? throw new S3RequestRejectedException(503, "ServiceUnavailable", $"No intact replica of part {part.PartNumber} could be read.");
+        _call = opened.Call;
+        if (opened.HasFirst)
+        {
+            Take(_call.ResponseStream.Current);
+        }
     }
 
     protected override void Dispose(bool disposing)

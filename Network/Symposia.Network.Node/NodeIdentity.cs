@@ -69,6 +69,21 @@ public sealed class NodeIdentity
         WriteOwnerOnly(markerPath, "");
     }
 
+    /// <summary>
+    /// Loads an existing key and never creates one: for processes that sign on behalf of a host
+    /// whose identity is already initialized (the blob gateway, #140), where a fresh key would be a
+    /// stranger to the registry.
+    /// </summary>
+    public void LoadExisting()
+    {
+        var keyPath = Path.GetFullPath(_options.NodeIdentityKeyPath);
+        var error = File.Exists(keyPath) ? TryLoad(keyPath) : $"Node identity key file '{keyPath}' is missing.";
+        if (error is not null)
+        {
+            throw new NodeIdentityException(error);
+        }
+    }
+
     private string? TryLoad(string keyPath)
     {
         var content = File.ReadAllText(keyPath).Trim();

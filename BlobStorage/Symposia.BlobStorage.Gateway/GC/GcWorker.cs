@@ -59,7 +59,7 @@ public sealed class GcWorker : BackgroundService
 
     private async Task DrainBatchAsync(CancellationToken ct)
     {
-        var pending = _store.GetPendingDeletions(BatchSize);
+        var pending = _store.GetPendingDeletions(BatchSize, TimeSpan.FromSeconds(_options.Value.GcMinAgeSeconds));
         if (pending.Count == 0) return;
 
         _logger.LogInformation("GcWorker processing {Count} pending node deletions.", pending.Count);

@@ -133,53 +133,12 @@ internal static class ObjectEndpoints
             Length = isRange ? length : 0,
         };
 
-        // Try each replica (healthy ones first) until one starts streaming. Nothing is sent to the
-        // client until the first chunk arrives, so a replica on a node that just went down (and
-        // isn't yet marked unhealthy by a probe) costs a retry, not a failed GET (issue #135 AC3).
-        var replicas = nodes.All
-            .Where(n => record.NodeIds.Contains(n.Id, StringComparer.OrdinalIgnoreCase))
-            .OrderByDescending(n => n.IsHealthy)
-            .ThenByDescending(n => n.LastProbeTime)
-            .ToList();
-
-        NodeConnection? node = null;
-        AsyncServerStreamingCall<ReadBlobChunk>? call = null;
-        var hasFirst = false;
-        foreach (var candidate in replicas)
-        {
-            var attempt = candidate.Client.ReadBlob(request, deadline: DateTime.UtcNow.AddMinutes(30), cancellationToken: ctx.RequestAborted);
-            // A hung node must not stall the GET before a healthy replica is tried.
-            using var firstChunk = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
-            firstChunk.CancelAfter(TimeSpan.FromSeconds(10));
-            try
-            {
-                hasFirst = await attempt.ResponseStream.MoveNext(firstChunk.Token);
-                node = candidate;
-                call = attempt;
-                break;
-            }
-            catch (RpcException ex) when (!ctx.RequestAborted.IsCancellationRequested)
-            {
-                attempt.Dispose();
-                if (ex.StatusCode == StatusCode.NotFound)
-                {
-                    logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair and trying another replica.", candidate.Url, record.Cid);
-                    repairQueue.EnqueueMissingReplica(record, candidate.Id, store, nodes);
-                }
-                else
-                {
-                    // Treat it as down until its next successful probe so other requests skip it.
-                    logger.LogWarning("Read of CID {Cid} from {Url} failed ({Status}); trying another replica.", record.Cid, candidate.Url, ex.StatusCode);
-                    candidate.MarkUnhealthy();
-                }
-            }
-            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
-            {
-                attempt.Dispose();
-                logger.LogWarning("Read of CID {Cid} from {Url} sent nothing for 10 s; trying another replica.", record.Cid, candidate.Url);
-                candidate.MarkUnhealthy();
-            }
-        }
+        // Try each replica (healthy ones first) until one starts streaming (#135); shared with Complete (#5).
+        var opened = await ReplicaReader.OpenAsync(ReplicaReader.Order(nodes, record.NodeIds), request, logger, ctx.RequestAborted,
+            onNotFound: missing => repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes));
+        var node = opened?.Node;
+        var call = opened?.Call;
+        var hasFirst = opened?.HasFirst ?? false;
 
         if (node is null || call is null)
         {

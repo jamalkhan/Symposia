@@ -86,6 +86,48 @@ public sealed class StorageRpcAuthTests : IDisposable
         Assert.False(await callers.IsRegisteredAsync("0x00000000000000000000000000000000000000aa", CancellationToken.None));
     }
 
+    private sealed class Clock(DateTimeOffset start) : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = start;
+
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    // Review: a chain-gateway outage must not take the storage layer down at once, but can't last forever.
+    [Fact]
+    public async Task CallerRegistry_KeepsConfirmedMembersThroughAnOutage_UpToTheGrace()
+    {
+        var registry = new FakeRegistry();
+        registry.Members[_gateway.NodeId] = "http://gw";
+        var clock = new Clock(DateTimeOffset.UtcNow);
+        var callers = new StorageRpcCallerRegistry(registry, clock);
+        var outageHits = 0;
+        callers.AcceptedDuringOutage += _ => outageHits++;
+        Assert.True(await callers.IsRegisteredAsync(_gateway.NodeId, CancellationToken.None));
+
+        registry.Down = true;
+        clock.Now += TimeSpan.FromMinutes(30);
+        Assert.True(await callers.IsRegisteredAsync(_gateway.NodeId, CancellationToken.None));
+        Assert.Equal(1, outageHits);
+
+        clock.Now += TimeSpan.FromMinutes(31);
+        Assert.False(await callers.IsRegisteredAsync(_gateway.NodeId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CallerRegistry_ManyThrowawayKeys_StayBounded()
+    {
+        var callers = new StorageRpcCallerRegistry(new FakeRegistry());
+        for (var i = 0; i < StorageRpcCallerRegistry.MaxEntries + 500; i++)
+        {
+            Assert.False(await callers.IsRegisteredAsync($"0x{i:x40}", CancellationToken.None));
+        }
+
+        var cache = (System.Collections.ICollection)typeof(StorageRpcCallerRegistry)
+            .GetField("_cache", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(callers)!;
+        Assert.True(cache.Count <= StorageRpcCallerRegistry.MaxEntries);
+    }
+
     public void Dispose()
     {
         try

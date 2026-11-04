@@ -46,7 +46,16 @@ internal sealed class StorageRpcSigningInterceptor(IStorageRpcSigner signer, str
         where TResponse : class
     {
         var token = signer.Sign(audience, context.Method.FullName);
-        var headers = context.Options.Headers ?? [];
+        // A fresh Metadata: never mutate the caller's (a reused instance would accumulate stale tokens).
+        var headers = new Grpc.Core.Metadata();
+        foreach (var entry in context.Options.Headers ?? [])
+        {
+            if (!entry.Key.StartsWith("x-symposia-", StringComparison.OrdinalIgnoreCase))
+            {
+                headers.Add(entry);
+            }
+        }
+
         headers.Add(StorageRpcAuth.CallerHeader, token.Caller);
         headers.Add(StorageRpcAuth.TimestampHeader, token.UnixSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
         headers.Add(StorageRpcAuth.SignatureHeader, token.Signature);

@@ -85,36 +85,85 @@ public static class StorageRpcAuth
 }
 
 /// <summary>
-/// Whether a caller is a registered member of this node's network, cached for <see cref="Ttl"/>
-/// (positive and negative) so storage RPCs don't hit the chain gateway per call. If the registry
-/// can't be reached and there's no cached answer, the caller is refused.
+/// Whether a caller is a registered member of this node's network (#140), cached so storage RPCs
+/// don't hit the chain gateway per call:
+/// <list type="bullet">
+/// <item>answers are fresh for <see cref="Ttl"/> (positive and negative);</item>
+/// <item>while the registry is unreachable, a caller last confirmed registered within
+/// <see cref="OutageGrace"/> is still accepted, so a chain-gateway outage doesn't stop the whole
+/// storage layer (#140 review; a member removed during an outage stays accepted until it ends or the
+/// grace runs out). Unknown callers are refused;</item>
+/// <item>the cache is bounded (<see cref="MaxEntries"/>) and at most <see cref="MaxConcurrentLookups"/>
+/// lookups run at once, so throwaway keys can't grow memory or flood the registry.</item>
+/// </list>
 /// </summary>
 public sealed class StorageRpcCallerRegistry(INodeRegistryClient registry, TimeProvider? time = null)
 {
     public static readonly TimeSpan Ttl = TimeSpan.FromSeconds(60);
+    public static readonly TimeSpan OutageGrace = TimeSpan.FromHours(1);
+    public const int MaxEntries = 10_000;
+    public const int MaxConcurrentLookups = 4;
 
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private readonly ConcurrentDictionary<string, (bool Registered, DateTimeOffset At)> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _lookups = new(MaxConcurrentLookups, MaxConcurrentLookups);
+
+    /// <summary>Raised when a caller is accepted only because of the outage grace (log/alert hook).</summary>
+    public event Action<string>? AcceptedDuringOutage;
 
     public async Task<bool> IsRegisteredAsync(string caller, CancellationToken ct)
     {
         var now = _time.GetUtcNow();
-        if (_cache.TryGetValue(caller, out var hit) && now - hit.At < Ttl)
+        var cached = _cache.TryGetValue(caller, out var hit);
+        if (cached && now - hit.At < Ttl)
         {
             return hit.Registered;
+        }
+
+        if (!await _lookups.WaitAsync(TimeSpan.FromSeconds(5), ct))
+        {
+            return cached && hit.Registered && now - hit.At < OutageGrace;
         }
 
         try
         {
             var status = await registry.GetStatusAsync(caller, ct);
-            _cache[caller] = (status.Registered, now);
+            Remember(caller, status.Registered, now);
             return status.Registered;
         }
         catch (Exception) when (!ct.IsCancellationRequested)
         {
-            // Unreachable registry: an expired cached "yes" is still better evidence than nothing for a
-            // short while, but with no answer at all the safe default is to refuse.
-            return hit.At != default && hit.Registered && now - hit.At < Ttl * 5;
+            // Registry unreachable: only a caller recently confirmed as a member keeps access.
+            var accepted = cached && hit.Registered && now - hit.At < OutageGrace;
+            if (accepted)
+            {
+                AcceptedDuringOutage?.Invoke(caller);
+            }
+
+            return accepted;
         }
+        finally
+        {
+            _lookups.Release();
+        }
+    }
+
+    private void Remember(string caller, bool registered, DateTimeOffset now)
+    {
+        if (_cache.Count >= MaxEntries)
+        {
+            // Evict expired negatives first (throwaway keys), then anything stale.
+            foreach (var stale in _cache.Where(e => !e.Value.Registered || now - e.Value.At > OutageGrace).Select(e => e.Key).Take(MaxEntries / 10).ToList())
+            {
+                _cache.TryRemove(stale, out _);
+            }
+
+            if (_cache.Count >= MaxEntries && !registered)
+            {
+                return;
+            }
+        }
+
+        _cache[caller] = (registered, now);
     }
 }

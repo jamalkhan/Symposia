@@ -34,11 +34,10 @@ public sealed class QuorumWriter
     /// <summary>
     /// Fans out the body stream to all healthy nodes, waits for quorum, commits metadata.
     /// Returns the committed ObjectRecord on success, null if quorum was not reached.
-    /// <paramref name="etagOverride"/> is the S3 multipart ETag for objects assembled from parts (#5).
     /// </summary>
     public async Task<ObjectRecord?> WriteAsync(
         string tenantId, string bucket, string key, string contentType,
-        Stream body, CancellationToken cancellationToken, string? etagOverride = null)
+        Stream body, CancellationToken cancellationToken)
     {
         var blob = await WriteBlobAsync(tenantId, bucket, key, body, cancellationToken);
         if (blob is null)
@@ -46,18 +45,23 @@ public sealed class QuorumWriter
 
         var record = new ObjectRecord(
             bucket, key, blob.Cid, blob.SizeBytes, contentType,
-            DateTimeOffset.UtcNow, blob.NodeIds, etagOverride);
+            DateTimeOffset.UtcNow, blob.NodeIds);
 
         _metadata.PutObject(record);
+        RepairIfShort(blob);
+        return record;
+    }
 
-        // Quorum can be below the copy target (issue #135: write succeeds on one node); queue the
-        // missing copies now rather than waiting for the next replication scan.
+    /// <summary>
+    /// Quorum can be below the copy target (issue #135: a write succeeds on one node); queue the
+    /// missing copies now rather than waiting for the next replication scan. Shared with multipart Complete.
+    /// </summary>
+    public void RepairIfShort(BlobWriteResult blob)
+    {
         if (blob.NodeIds.Count < _minCopies)
         {
             _repairQueue.Enqueue(new Repair.RepairTask(blob.Cid, null, Repair.RepairReason.UnderReplicated));
         }
-
-        return record;
     }
 
     /// <summary>

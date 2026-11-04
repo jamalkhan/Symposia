@@ -141,6 +141,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     {
         var now = DateTimeOffset.UtcNow;
         var added = new List<NodeConnection>();
+        var migrations = new List<(string Url, string Id)>();
         lock (_lock)
         {
             foreach (var d in descriptors)
@@ -173,11 +174,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                 {
                     if (d.Id != d.Url)
                     {
-                        var migrated = _store.RenameReplicaUrl(d.Url, d.Id);
-                        if (migrated > 0)
-                        {
-                            _logger.LogInformation("Migrated {Count} object(s) from URL {Url} to node ID {Node}.", migrated, d.Url, d.Id);
-                        }
+                        // O(objects) rewrite: done after the lock is released (#137 review).
+                        migrations.Add((d.Url, d.Id));
                     }
 
                     _logger.LogInformation("Added storage node {Node} at {Url}.", d.Id, d.Url);
@@ -194,6 +192,15 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                     gone.Id, gone.Url, grace);
                 _nodes.Remove(gone);
                 gone.Dispose();
+            }
+        }
+
+        foreach (var (url, id) in migrations)
+        {
+            var migrated = _store.RenameReplicaUrl(url, id);
+            if (migrated > 0)
+            {
+                _logger.LogInformation("Migrated {Count} replica reference(s) from URL {Url} to node ID {Node}.", migrated, url, id);
             }
         }
 

@@ -46,7 +46,14 @@ public static class StorageNodeApp
         // Storage RPCs only from registered members of this node's network (issue #140).
         if (builder.Configuration.GetValue("StorageNode:RequireCallerAuth", false))
         {
-            builder.Services.AddSingleton<StorageRpcCallerRegistry>();
+            builder.Services.AddSingleton(sp =>
+            {
+                var callers = new StorageRpcCallerRegistry(sp.GetRequiredService<INodeRegistryClient>());
+                var log = sp.GetRequiredService<ILoggerFactory>().CreateLogger("Symposia.Network.Node.StorageRpcAuth");
+                callers.AcceptedDuringOutage += caller =>
+                    log.LogWarning("Registry unreachable: accepting {Caller} on its last confirmed membership.", caller);
+                return callers;
+            });
             builder.Services.AddSingleton<StorageRpcAuthInterceptor>();
             builder.Services.AddGrpc(grpc => grpc.Interceptors.Add<StorageRpcAuthInterceptor>());
         }

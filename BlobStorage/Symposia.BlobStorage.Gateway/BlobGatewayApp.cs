@@ -48,6 +48,7 @@ public static class BlobGatewayApp
         builder.Services.AddSingleton<RepairQueue>();
         builder.Services.AddSingleton<NodeReconciler>();
         builder.Services.AddHostedService<GcWorker>();
+        builder.Services.AddHostedService<MultipartReaper>();
         builder.Services.AddHostedService<RepairWorker>();
         builder.Services.AddSingleton<ReplicationMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ReplicationMonitor>());
@@ -75,11 +76,6 @@ public static class BlobGatewayApp
             var keyPath = builder.Configuration["Gateway:NodeIdentityKeyPath"];
             if (!string.IsNullOrWhiteSpace(keyPath))
             {
-                if (!File.Exists(keyPath))
-                {
-                    throw new InvalidOperationException($"Gateway:NodeIdentityKeyPath '{keyPath}' does not exist.");
-                }
-
                 builder.Services.AddSingleton<IStorageRpcSigner>(sp =>
                 {
                     var identity = new NodeIdentity(Microsoft.Extensions.Options.Options.Create(new NodeNetworkOptions
@@ -88,7 +84,7 @@ public static class BlobGatewayApp
                         ChainId = builder.Configuration.GetValue<ulong>("Gateway:ChainId"),
                         NodeRegistryAddress = builder.Configuration["Gateway:NodeRegistryAddress"] ?? "",
                     }));
-                    identity.EnsureLoadedOrGenerated();
+                    identity.LoadExisting();
                     return new NodeIdentityRpcSigner(identity);
                 });
             }

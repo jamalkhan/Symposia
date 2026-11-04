@@ -127,12 +127,19 @@ public sealed partial class GatewayMetadataStore
                 initiated_at         TEXT NOT NULL,
                 expires_at           TEXT NOT NULL,
                 status               TEXT NOT NULL,   -- InProgress | Completing | Completed | Aborted
+                completing_since     TEXT NULL,       -- lease: a Completing row older than the lease is released
                 completed_at         TEXT NULL,
                 final_cid            TEXT NULL,
                 final_etag           TEXT NULL,
                 committed_parts_json TEXT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_multipart_uploads_bucket_key ON multipart_uploads (bucket, key, upload_id);
+            -- Only open uploads are listed; finished rows don't bloat the listing range (#5 review).
+            CREATE INDEX IF NOT EXISTS idx_multipart_uploads_open ON multipart_uploads (bucket, key, upload_id) WHERE status = 'InProgress';
+            CREATE INDEX IF NOT EXISTS idx_multipart_uploads_status_expiry ON multipart_uploads (status, expires_at);
+
+            -- One pending deletion per (blob, node); collapse any duplicates from before the constraint.
+            DELETE FROM gc_queue WHERE id NOT IN (SELECT MIN(id) FROM gc_queue GROUP BY cid, node_url);
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_gc_queue_cid_node ON gc_queue (cid, node_url);
 
             CREATE TABLE IF NOT EXISTS multipart_parts (
                 upload_id    TEXT NOT NULL,
@@ -193,8 +200,31 @@ public sealed partial class GatewayMetadataStore
     public void PutObject(ObjectRecord record)
     {
         using var conn = Open();
-        Execute(Query(conn,
-            """
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        UpsertObject(conn, tx, record);
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// The one write path for <c>objects</c> rows (PUT, COPY, multipart Complete). Inside the caller's
+    /// transaction it also: cancels pending GC for the new CID (the blob is referenced again, so a
+    /// deletion queued before this write must not run), and queues the overwritten blob for GC if
+    /// nothing references it any more.
+    /// </summary>
+    private static void UpsertObject(SqliteConnection conn, SqliteTransaction tx, ObjectRecord record)
+    {
+        (string Cid, string[] NodeIds)? previous = null;
+        using (var old = Query(conn, "SELECT cid, node_ids FROM objects WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key)))
+        {
+            old.Transaction = tx;
+            using var r = old.ExecuteReader();
+            if (r.Read() && r.GetString(0) != record.Cid)
+            {
+                previous = (r.GetString(0), SplitNodeIds(r.GetString(1)));
+            }
+        }
+
+        Run(conn, tx, """
             INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, etag_override)
             VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc, $eo)
             ON CONFLICT(bucket, key) DO UPDATE SET
@@ -211,7 +241,52 @@ public sealed partial class GatewayMetadataStore
             ("$lm", record.LastModified.ToString("O")),
             ("$ni", string.Join(',', record.NodeIds)),
             ("$rc", record.NodeIds.Count),
-            ("$eo", (object?)record.EtagOverride ?? DBNull.Value)));
+            ("$eo", (object?)record.EtagOverride ?? DBNull.Value));
+        CancelPendingDeletion(conn, tx, record.Cid);
+        if (previous is { } p)
+        {
+            CollectIfUnreferenced(conn, tx, p.Cid, p.NodeIds);
+        }
+    }
+
+    /// <summary>A blob is referenced again: drop any queued deletion of it (GC/dedup race, #5 review).</summary>
+    internal static void CancelPendingDeletion(SqliteConnection conn, SqliteTransaction tx, string cid) =>
+        Run(conn, tx, "DELETE FROM gc_queue WHERE cid = $cid", ("$cid", cid));
+
+    /// <summary>Queues a blob's copies for deletion if no object or multipart part references it (same transaction).</summary>
+    internal static void CollectIfUnreferenced(SqliteConnection conn, SqliteTransaction tx, string cid, IEnumerable<string> nodeIds)
+    {
+        using (var check = Query(conn,
+                   "SELECT 1 FROM objects WHERE cid = $cid UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid LIMIT 1", ("$cid", cid)))
+        {
+            check.Transaction = tx;
+            if (check.ExecuteScalar() is not null)
+            {
+                return;
+            }
+        }
+
+        foreach (var node in nodeIds)
+        {
+            Run(conn, tx, "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at) VALUES ($cid, $url, $t)",
+                ("$cid", cid), ("$url", node), ("$t", Now()));
+        }
+    }
+
+    /// <summary>Non-transactional convenience for callers outside the store (e.g. a blob written but never committed).</summary>
+    public void CollectIfUnreferenced(string cid, IEnumerable<string> nodeIds)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        CollectIfUnreferenced(conn, tx, cid, nodeIds);
+        tx.Commit();
+    }
+
+    private static void Run(SqliteConnection conn, SqliteTransaction tx, string sql, params (string, object?)[] args)
+    {
+        using var cmd = Query(conn, sql, args);
+        cmd.Transaction = tx;
+        cmd.ExecuteNonQuery();
     }
 
     /// <summary>Returns false if the object did not exist (externally delete is always idempotent).</summary>
@@ -288,18 +363,50 @@ public sealed partial class GatewayMetadataStore
     /// </summary>
     public int RenameReplicaUrl(string oldUrl, string newUrl)
     {
-        var changed = ModifyNodeIds("WHERE instr(',' || node_ids || ',', ',' || $old || ',') > 0", [("$old", oldUrl)],
-            ids => ids.Select(u => u.Equals(oldUrl, StringComparison.OrdinalIgnoreCase) ? newUrl : u)
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        // objects, in-flight multipart parts and the GC queue move together in one transaction (#5 review).
         using var conn = Open();
-        Execute(Query(conn, "UPDATE gc_queue SET node_url = $new WHERE node_url = $old", ("$new", newUrl), ("$old", oldUrl)));
-        return changed;
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        List<string> Rename(List<string> ids) =>
+            ids.Select(u => u.Equals(oldUrl, StringComparison.OrdinalIgnoreCase) ? newUrl : u).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        const string contains = "WHERE instr(',' || node_ids || ',', ',' || $old || ',') > 0";
+
+        var changed = ModifyNodeIds(conn, tx, contains, [("$old", oldUrl)], Rename);
+        var parts = new List<(string Upload, int Part, List<string> Ids)>();
+        using (var select = Query(conn, "SELECT upload_id, part_number, node_ids FROM multipart_parts " + contains, ("$old", oldUrl)))
+        {
+            select.Transaction = tx;
+            using var r = select.ExecuteReader();
+            while (r.Read())
+            {
+                parts.Add((r.GetString(0), r.GetInt32(1), SplitNodeIds(r.GetString(2)).ToList()));
+            }
+        }
+
+        foreach (var (upload, part, ids) in parts)
+        {
+            Run(conn, tx, "UPDATE multipart_parts SET node_ids = $ni WHERE upload_id = $u AND part_number = $p",
+                ("$ni", string.Join(',', Rename(ids))), ("$u", upload), ("$p", part));
+        }
+
+        // UNIQUE(cid, node_url): where the new name already has the entry, the old row is redundant.
+        Run(conn, tx, "UPDATE OR IGNORE gc_queue SET node_url = $new WHERE node_url = $old", ("$new", newUrl), ("$old", oldUrl));
+        Run(conn, tx, "DELETE FROM gc_queue WHERE node_url = $old", ("$old", oldUrl));
+        tx.Commit();
+        return changed + parts.Count;
     }
 
     private int ModifyNodeIds(string where, (string, object)[] parameters, Func<List<string>, List<string>> change)
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        var changed = ModifyNodeIds(conn, tx, where, parameters, change);
+        tx.Commit();
+        return changed;
+    }
+
+    private static int ModifyNodeIds(SqliteConnection conn, SqliteTransaction tx, string where, (string, object)[] parameters,
+        Func<List<string>, List<string>> change)
+    {
         var rows = new List<(string Bucket, string Key, List<string> Ids)>();
         using (var select = Query(conn, "SELECT bucket, key, node_ids FROM objects " + where, parameters))
         {
@@ -326,7 +433,6 @@ public sealed partial class GatewayMetadataStore
             changed += update.ExecuteNonQuery();
         }
 
-        tx.Commit();
         return changed;
     }
 
@@ -402,12 +508,17 @@ public sealed partial class GatewayMetadataStore
             ("$cid", cid), ("$url", nodeUrl), ("$t", Now())));
     }
 
-    public IReadOnlyList<(long Id, string Cid, string NodeUrl, int Attempts)> GetPendingDeletions(int limit)
+    /// <summary>
+    /// Deletions queued at least <paramref name="minAge"/> ago. The delay closes the window where a
+    /// write of the same bytes (dedup) has reached the nodes but not yet committed its reference,
+    /// which would cancel the entry (#5 review).
+    /// </summary>
+    public IReadOnlyList<(long Id, string Cid, string NodeUrl, int Attempts)> GetPendingDeletions(int limit, TimeSpan? minAge = null)
     {
         using var conn = Open();
         using var cmd = Query(conn,
-            "SELECT id, cid, node_url, attempts FROM gc_queue ORDER BY attempts, id LIMIT $limit",
-            ("$limit", limit));
+            "SELECT id, cid, node_url, attempts FROM gc_queue WHERE queued_at <= $cutoff ORDER BY attempts, id LIMIT $limit",
+            ("$cutoff", (DateTimeOffset.UtcNow - (minAge ?? TimeSpan.Zero)).ToString("O")), ("$limit", limit));
         using var r = cmd.ExecuteReader();
         var results = new List<(long, string, string, int)>();
         while (r.Read())
