@@ -25,27 +25,27 @@ public sealed class RegistryNodeSource(
         var members = await registry.ListNodesAsync(ct);
         logger.LogDebug("Registry lists {Count} node(s); resolving storage services.", members.Count);
 
-        var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var found = new Dictionary<string, StorageNodeDescriptor>(StringComparer.OrdinalIgnoreCase);
         await Parallel.ForEachAsync(members, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (member, token) =>
         {
-            var grpc = await StorageGrpcUrlAsync(member, token);
-            if (grpc is not null)
+            var descriptor = await DescribeAsync(member, token);
+            if (descriptor is not null)
             {
                 lock (found)
                 {
-                    found[grpc] = member.Node;
+                    found[descriptor.Url] = descriptor;
                 }
             }
         });
 
         logger.LogDebug("Registry sync: {Storage} storage node(s) of {Count} registered.", found.Count, members.Count);
-        return found.Select(kv => new StorageNodeDescriptor(kv.Value, kv.Key)).ToList();
+        return found.Values.ToList();
     }
 
     // The services document was fetched from this endpoint, so loopback here means the node is local.
     private static bool IsLocal(string endpoint) => Uri.TryCreate(endpoint, UriKind.Absolute, out var u) && u.IsLoopback;
 
-    private async Task<string?> StorageGrpcUrlAsync(RegisteredNode member, CancellationToken ct)
+    private async Task<StorageNodeDescriptor?> DescribeAsync(RegisteredNode member, CancellationToken ct)
     {
         var endpoint = NodeEndpoint.Normalize(member.Endpoint);
         if (endpoint is null)
@@ -78,7 +78,28 @@ public sealed class RegistryNodeSource(
                     member.Node, grpc);
             }
 
-            return grpc;
+            // TLS (#142): pin only a fingerprint the node's registry key vouches for; refuse cleartext if required.
+            var o = options.Value;
+            if (grpc.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                var fingerprint = services.Storage.TlsFingerprint;
+                if (fingerprint is null || !StorageTlsProof.Verify(o.ChainId, o.NodeRegistryAddress, member.Node, fingerprint, services.Storage.TlsProof))
+                {
+                    logger.LogWarning("Node {Node} offers TLS storage without a valid certificate proof; not using it.", member.Node);
+                    return null;
+                }
+
+                return new StorageNodeDescriptor(member.Node, grpc, fingerprint.ToLowerInvariant());
+            }
+
+            if (o.RequireStorageTls)
+            {
+                logger.LogWarning("Node {Node} offers only cleartext storage gRPC ({Grpc}) and TLS is required; not using it. Upgrade that host.",
+                    member.Node, grpc);
+                return null;
+            }
+
+            return new StorageNodeDescriptor(member.Node, grpc);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
         {

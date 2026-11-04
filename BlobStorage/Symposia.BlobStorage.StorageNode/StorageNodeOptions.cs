@@ -22,6 +22,12 @@ public sealed class StorageNodeOptions
     /// </summary>
     public bool RequireCallerAuth { get; set; }
 
+    /// <summary>Serve the gRPC port over TLS with a node-key-bound certificate (issue #142). Requires <see cref="GrpcPort"/>.</summary>
+    public bool GrpcTls { get; set; }
+
+    /// <summary>Where the gRPC TLS certificate lives; empty = grpc-tls.pfx next to the manifest database.</summary>
+    public string TlsCertificatePath { get; set; } = "";
+
     /// <summary>Total bytes this node offers to the network (operator-configured).</summary>
     public long MaxCapacityBytes { get; set; } = 10L * 1024 * 1024 * 1024;
 

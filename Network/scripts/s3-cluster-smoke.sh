@@ -9,6 +9,7 @@
 #   AC5     wrong secret -> 403
 #   AC6     no storage nodes -> 503-class error within 30 s
 #   #140    an unsigned gRPC call straight to a storage node is refused (Unauthenticated)
+#   #142    the storage gRPC port is TLS-only (cleartext h2c gets nothing); the cluster works over pinned TLS
 #   #139    over HTTPS (local TLS proxy, as Traefik) the CLI's chunked uploads with CRC64NVME
 #           trailing checksums round-trip byte for byte
 #   #5      multipart: the default aws s3 cp of a 20 MB file (multipart above 8 MB) over HTTP and
@@ -107,11 +108,17 @@ aws --endpoint-url http://127.0.0.1:$S3_A s3 ls s3://proof >/dev/null 2>&1 \
   || fail "AC5: wrong secret was not rejected with 403"
 echo "PASS AC5: wrong secret rejected"
 
-# #140: storage gRPC only answers registered, signed callers. An empty Probe frame without a token:
+# #142: the storage gRPC port speaks TLS only; cleartext h2c gets no gRPC answer.
 GRPC_B=$((6180 + B))
-status=$(printf '\x00\x00\x00\x00\x00' | curl -s --http2-prior-knowledge -o /dev/null -D - -X POST \
+plain=$(printf '\x00\x00\x00\x00\x00' | curl -s --max-time 5 --http2-prior-knowledge -o /dev/null -w '%{http_code}' -X POST \
+  -H 'content-type: application/grpc' --data-binary @- http://127.0.0.1:$GRPC_B/symposia.blobstorage.v1.StorageNode/Probe || true)
+[ "$plain" = "000" ] || fail "#142: cleartext h2c to the storage gRPC port answered ($plain); expected TLS only"
+echo "PASS #142: storage gRPC port refuses cleartext"
+
+# #140: over TLS, storage gRPC still only answers registered, signed callers. An empty Probe without a token:
+status=$(printf '\x00\x00\x00\x00\x00' | curl -sk --http2 -o /dev/null -D - -X POST \
   -H 'content-type: application/grpc' -H 'te: trailers' --data-binary @- \
-  http://127.0.0.1:$GRPC_B/symposia.blobstorage.v1.StorageNode/Probe | tr -d '\r' | awk -F': ' 'tolower($1)=="grpc-status"{print $2}')
+  https://127.0.0.1:$GRPC_B/symposia.blobstorage.v1.StorageNode/Probe | tr -d '\r' | awk -F': ' 'tolower($1)=="grpc-status"{print $2}')
 [ "$status" = "16" ] || fail "#140: unsigned gRPC call to storage node returned grpc-status '$status', expected 16 (Unauthenticated)"
 echo "PASS #140: unsigned storage gRPC call refused"
 

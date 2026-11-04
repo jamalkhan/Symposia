@@ -11,8 +11,9 @@ public sealed class NodeConnection : IDisposable
 {
     private readonly GrpcChannel _channel;
 
-    public NodeConnection(string url, string? expectedNodeId = null, IStorageRpcSigner? signer = null)
+    public NodeConnection(string url, string? expectedNodeId = null, IStorageRpcSigner? signer = null, string? tlsFingerprint = null)
     {
+        TlsFingerprint = tlsFingerprint;
         Url = url;
         ExpectedNodeId = expectedNodeId;
         Id = expectedNodeId ?? url;
@@ -21,7 +22,17 @@ public sealed class NodeConnection : IDisposable
         // A short connect timeout keeps a powered-off node from stalling writes and probes.
         _channel = GrpcChannel.ForAddress(url, new GrpcChannelOptions
         {
-            HttpHandler = new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5), EnableMultipleHttp2Connections = true },
+            HttpHandler = new SocketsHttpHandler
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(5),
+                EnableMultipleHttp2Connections = true,
+                // TLS (#142): trust exactly the certificate whose fingerprint the node's key vouched for.
+                // Pinning replaces CA validation, so chain/name errors are expected and ignored.
+                SslOptions = tlsFingerprint is null ? new() : new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    RemoteCertificateValidationCallback = (_, certificate, _, _) => PinMatches(certificate?.GetRawCertData(), tlsFingerprint),
+                },
+            },
         });
         // Registry nodes authenticate callers (issue #140): sign every call for this node's address.
         Client = signer is not null && expectedNodeId is not null
@@ -42,6 +53,14 @@ public sealed class NodeConnection : IDisposable
     }
 
     public string Url { get; }
+
+    /// <summary>The pinned TLS certificate fingerprint, or null for a cleartext (h2c) node.</summary>
+    public string? TlsFingerprint { get; }
+
+    /// <summary>True when the presented certificate (DER) hashes to the pinned fingerprint (#142).</summary>
+    public static bool PinMatches(byte[]? certificateDer, string pinnedFingerprint) =>
+        certificateDer is not null && string.Equals(
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(certificateDer)), pinnedFingerprint, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The node's identity in replica metadata (<c>node_ids</c>, GC queue, repair tasks; issue #137):

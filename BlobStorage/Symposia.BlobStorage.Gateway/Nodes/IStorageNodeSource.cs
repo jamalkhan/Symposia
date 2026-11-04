@@ -1,7 +1,10 @@
 namespace Symposia.BlobStorage.Gateway.Nodes;
 
-/// <summary>A storage node as a source describes it: stable identity plus where to reach it now.</summary>
-public sealed record StorageNodeDescriptor(string Id, string Url);
+/// <summary>
+/// A storage node as a source describes it: stable identity, where to reach it now, and (for TLS,
+/// #142) the certificate fingerprint to pin.
+/// </summary>
+public sealed record StorageNodeDescriptor(string Id, string Url, string? TlsFingerprint = null);
 
 /// <summary>
 /// Where the gateway's storage nodes come from (issue #137). <see cref="NodeSourceSyncService"/>

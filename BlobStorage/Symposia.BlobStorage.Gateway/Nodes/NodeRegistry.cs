@@ -147,7 +147,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
             foreach (var d in descriptors)
             {
                 var existing = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
-                if (existing is not null && existing.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase))
+                if (existing is not null && existing.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(existing.TlsFingerprint, d.TlsFingerprint, StringComparison.OrdinalIgnoreCase))
                 {
                     existing.LastSeenInSource = now;
                     continue;
@@ -163,10 +164,11 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                     squatter.Dispose();
                 }
 
-                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer) { LastSeenInSource = now };
+                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint) { LastSeenInSource = now };
                 if (existing is not null)
                 {
-                    _logger.LogInformation("Storage node {Node} moved from {Old} to {New}.", d.Id, existing.Url, d.Url);
+                    _logger.LogInformation("Storage node {Node} changed from {Old} to {New} (certificate {Fingerprint}).",
+                        d.Id, existing.Url, d.Url, d.TlsFingerprint ?? "none");
                     _nodes.Remove(existing);
                     existing.Dispose();
                 }

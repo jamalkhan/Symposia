@@ -50,6 +50,9 @@ public sealed class StorageRoleComponent : WebAppComponent
             ["StorageNode:GrpcPort"] = storage.GrpcPort.ToString(),
             // Only registered members of this network may call the storage API (issue #140).
             ["StorageNode:RequireCallerAuth"] = "true",
+            // gRPC over TLS with a node-key-bound certificate, pinned by gateways (issue #142).
+            ["StorageNode:GrpcTls"] = "true",
+            ["StorageNode:TlsCertificatePath"] = Path.Combine(dir, "grpc-tls.pfx"),
             ["StorageNode:StorageRoot"] = Path.Combine(dir, "blobs"),
             ["StorageNode:ManifestDbPath"] = Path.Combine(dir, "manifest.db"),
             ["StorageNode:MaxCapacityBytes"] = storage.MaxCapacityBytes.ToString(),
@@ -196,6 +199,8 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:NodeIdentityKeyPath"] = context.Paths.NodeKey,
             ["Gateway:ChainId"] = network.ChainId.ToString(),
             ["Gateway:NodeRegistryAddress"] = network.NodeRegistryAddress,
+            // Never send object data to a storage node in cleartext (issue #142).
+            ["Gateway:RequireStorageTls"] = "true",
             ["Gateway:Credentials:0:AccessKeyId"] = gateway.AccessKeyId,
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
             ["Gateway:Credentials:0:TenantId"] = "dev",

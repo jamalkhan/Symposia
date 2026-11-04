@@ -99,6 +99,9 @@ public sealed class GatewayOptions
 
     public ulong ChainId { get; set; }
 
+    /// <summary>Use only storage nodes that serve gRPC over pinned TLS (#142); cleartext nodes are skipped.</summary>
+    public bool RequireStorageTls { get; set; }
+
     public string NodeRegistryAddress { get; set; } = "";
 
     /// <summary>How often the registry is re-read for storage nodes (seconds).</summary>
