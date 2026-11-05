@@ -28,6 +28,7 @@ button { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var
 button.tab { background:#fff; color:var(--fg); border-color:var(--line); } button.tab.active { border-color:var(--accent); color:var(--accent); }
 button.link { background:none; border:none; color:var(--muted); }
 .notice { background:#fff8e6; border-color:#f3d48a; }
+.warn { color:#9a5b00; }
 .error { color:var(--bad); min-height:1em; }
 .actions { display:flex; gap:12px; align-items:center; }
 .hint { color:var(--muted); }

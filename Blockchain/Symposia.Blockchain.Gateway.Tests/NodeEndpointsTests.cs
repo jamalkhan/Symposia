@@ -219,6 +219,36 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
         Assert.Equal(ChainFixture.ChainId, network.GetProperty("chainId").GetUInt64());
         Assert.Equal(_fixture.NodeRegistryAddress, network.GetProperty("nodeRegistryAddress").GetString(), ignoreCase: true);
         Assert.Equal(_fixture.EpochRootRegistryAddress, network.GetProperty("epochRootRegistryAddress").GetString(), ignoreCase: true);
+        Assert.Equal(_fixture.ProtocolActivationsAddress, network.GetProperty("protocolActivationsAddress").GetString(), ignoreCase: true);
+    }
+
+    // #145 AC6 / TC-13: the schedule lists features with their activation times and the minimum version.
+    [Fact]
+    public async Task Protocol_ListsScheduledActivations()
+    {
+        var web3 = new Nethereum.Web3.Web3(new Nethereum.Web3.Accounts.Account(_fixture.RelayerPrivateKey, ChainFixture.ChainId), _fixture.RpcUrl);
+        var before = await _client.GetFromJsonAsync<JsonElement>("/v1/protocol");
+        var at = before.GetProperty("now").GetUInt64() + 3600;
+        var name = "test.feature." + Guid.NewGuid().ToString("N")[..8];
+
+        await web3.Eth.GetContractTransactionHandler<ScheduleFunction>().SendRequestAndWaitForReceiptAsync(
+            _fixture.ProtocolActivationsAddress, new ScheduleFunction { Name = name, ActivatesAt = at });
+
+        var schedule = await _client.GetFromJsonAsync<JsonElement>("/v1/protocol");
+        Assert.True(schedule.GetProperty("configured").GetBoolean());
+        var feature = schedule.GetProperty("features").EnumerateArray().Single(f => f.GetProperty("name").GetString() == name);
+        Assert.Equal(at, feature.GetProperty("activatesAt").GetUInt64());
+        Assert.Equal(0u, schedule.GetProperty("minProtocolVersion").GetProperty("effective").GetUInt32());
+    }
+
+    [Nethereum.ABI.FunctionEncoding.Attributes.Function("schedule")]
+    private sealed class ScheduleFunction : Nethereum.Contracts.FunctionMessage
+    {
+        [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("string", "name", 1)]
+        public string Name { get; set; } = "";
+
+        [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("uint64", "activatesAt", 2)]
+        public ulong ActivatesAt { get; set; }
     }
 
     private const string Endpoint = "http://127.0.0.1:5180";

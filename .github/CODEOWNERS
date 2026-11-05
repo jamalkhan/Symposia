@@ -1,0 +1,32 @@
+# Code owners (issue #146). With "Require review from Code Owners" on qa and master
+# (docs/engineering/branch-protection.md), changes to these paths need a maintainer's approval.
+# Protocol surfaces are listed explicitly so they can be scoped to a protocol team as maintainers join.
+
+*                                                       @jamalkhan
+
+# Protocol definitions and the compatibility tooling
+/protocol/                                              @jamalkhan
+/tools/protocol-compat/                                 @jamalkhan
+/docs/engineering/                                      @jamalkhan
+/BlobStorage/Symposia.BlobStorage.Protocol/Protos/      @jamalkhan
+
+# Node-to-node contracts and identity
+/Network/Symposia.Network.Node/NodeServices.cs          @jamalkhan
+/Network/Symposia.Network.Node/ProtocolFeatures.cs      @jamalkhan
+/Network/Symposia.Network.Node/ProtocolSchedule.cs      @jamalkhan
+/Network/Symposia.Network.Node/StorageRpcAuth.cs        @jamalkhan
+/Network/Symposia.Network.Node/StorageTlsProof.cs       @jamalkhan
+/Network/Symposia.Network.Node/NodeIdentity.cs          @jamalkhan
+/Network/Symposia.Network.Node/PeerHandshake*.cs        @jamalkhan
+/BlobStorage/Symposia.BlobStorage.Gateway/Nodes/NetworkPolicy.cs  @jamalkhan
+
+# On-chain contracts
+/Blockchain/bootstrap-chain/src/                        @jamalkhan
+/Blockchain/bootstrap-chain/script/                     @jamalkhan
+
+# Data at rest: metadata schemas and migrations
+/BlobStorage/Symposia.BlobStorage.Gateway/Metadata/     @jamalkhan
+/BlobStorage/Symposia.BlobStorage.StorageNode/Storage/ManifestStore.cs  @jamalkhan
+
+# CI and review rules themselves
+/.github/                                               @jamalkhan

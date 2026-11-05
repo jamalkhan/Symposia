@@ -1,0 +1,35 @@
+{
+  "structs": {
+    "NodePenaltyState": [
+      {
+        "type": "uint8",
+        "name": "stage"
+      },
+      {
+        "type": "uint256",
+        "name": "cumulativeStage3SlashBps"
+      },
+      {
+        "type": "uint256",
+        "name": "stage3BaselineStake"
+      },
+      {
+        "type": "uint256",
+        "name": "consecutiveCleanEpochs"
+      },
+      {
+        "type": "bool",
+        "name": "stage4Confirmed"
+      }
+    ],
+    "SlashingStorage": [
+      {
+        "type": "mapping(address => NodePenaltyState)",
+        "name": "states"
+      }
+    ]
+  },
+  "locations": {
+    "SLASHING_STORAGE_LOCATION": "keccak256(\"symposia.storage.SlashingController\")"
+  }
+}

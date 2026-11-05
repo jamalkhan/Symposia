@@ -39,6 +39,7 @@ public sealed class ReplicationMonitor : BackgroundService
     private readonly RepairQueue _repairQueue;
     private readonly IOptions<GatewayOptions> _options;
     private readonly ILogger<ReplicationMonitor> _logger;
+    private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
     public ReplicationMonitor(
         GatewayMetadataStore store,
@@ -153,7 +154,7 @@ public sealed class ReplicationMonitor : BackgroundService
     private async Task ScanAsync(CancellationToken ct)
     {
         var minCopies = _options.Value.MinCopiesPerObject;
-        var knownUrls = _nodes.All.Select(n => n.Url).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var knownUrls = _nodes.All.Select(n => n.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         // Pruning by absence is only safe when the node list is the operator's static config.
         // Registry-sourced nodes live in memory and appear only once a sync reaches them, so after a
@@ -192,12 +193,20 @@ public sealed class ReplicationMonitor : BackgroundService
                 foreach (var nodeUrl in knownReplicas)
                 {
                     var node = _nodes.All.FirstOrDefault(n =>
-                        n.Url.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+                        n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
+                    var grace = TimeSpan.FromSeconds(_options.Value.NodeGracePeriodSeconds);
                     if (node is null || !node.IsHealthy)
                     {
-                        // Offline but within grace period — keep it, don't challenge.
-                        healthyReplicas.Add(nodeUrl);
+                        // Offline within the grace period: still counts (don't challenge). Past it, or on a
+                        // node that left the node list (once this gateway has run long enough to have
+                        // loaded every node), it no longer counts, so repair adds a copy elsewhere (#137).
+                        var counts = node?.CountsAsReplica(grace) ?? DateTimeOffset.UtcNow - _startedAt < grace;
+                        if (counts)
+                        {
+                            healthyReplicas.Add(nodeUrl);
+                        }
+
                         continue;
                     }
 

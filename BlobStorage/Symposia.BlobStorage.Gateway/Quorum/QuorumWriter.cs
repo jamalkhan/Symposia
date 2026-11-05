@@ -39,6 +39,39 @@ public sealed class QuorumWriter
         string tenantId, string bucket, string key, string contentType,
         Stream body, CancellationToken cancellationToken)
     {
+        var blob = await WriteBlobAsync(tenantId, bucket, key, body, cancellationToken);
+        if (blob is null)
+            return null;
+
+        var record = new ObjectRecord(
+            bucket, key, blob.Cid, blob.SizeBytes, contentType,
+            DateTimeOffset.UtcNow, blob.NodeIds);
+
+        _metadata.PutObject(record);
+        RepairIfShort(blob);
+        return record;
+    }
+
+    /// <summary>
+    /// Quorum can be below the copy target (issue #135: a write succeeds on one node); queue the
+    /// missing copies now rather than waiting for the next replication scan. Shared with multipart Complete.
+    /// </summary>
+    public void RepairIfShort(BlobWriteResult blob)
+    {
+        if (blob.NodeIds.Count < _minCopies)
+        {
+            _repairQueue.Enqueue(new Repair.RepairTask(blob.Cid, null, Repair.RepairReason.UnderReplicated));
+        }
+    }
+
+    /// <summary>
+    /// Stores a blob on the healthy nodes and waits for quorum, without creating an object (multipart
+    /// parts, #5). Null if quorum was not reached. Throws (after cancelling node writes) if reading
+    /// the body fails, e.g. a failed integrity check.
+    /// </summary>
+    public async Task<BlobWriteResult?> WriteBlobAsync(
+        string tenantId, string bucket, string key, Stream body, CancellationToken cancellationToken)
+    {
         var targetNodes = _nodes.Healthy;
         if (targetNodes.Count == 0)
             return null;
@@ -78,24 +111,10 @@ public sealed class QuorumWriter
         if (successes.Count < _quorumCount)
             return null; // Quorum not reached.
 
-        var cid = successes[0].Response!.Cid;
-        var sizeBytes = successes[0].Response!.SizeBytes;
-        var nodeIds = successes.Select(s => s.Node.Url).ToList();
-
-        var record = new ObjectRecord(
-            bucket, key, cid, sizeBytes, contentType,
-            DateTimeOffset.UtcNow, nodeIds);
-
-        _metadata.PutObject(record);
-
-        // Quorum can be below the copy target (issue #135: write succeeds on one node); queue the
-        // missing copies now rather than waiting for the next replication scan.
-        if (nodeIds.Count < _minCopies)
-        {
-            _repairQueue.Enqueue(new Repair.RepairTask(cid, null, Repair.RepairReason.UnderReplicated));
-        }
-
-        return record;
+        return new BlobWriteResult(
+            successes[0].Response!.Cid,
+            successes[0].Response!.SizeBytes,
+            successes.Select(s => s.Node.Id).ToList());
     }
 
     /// <summary>
@@ -148,3 +167,6 @@ public sealed class QuorumWriter
         }
     }
 }
+
+/// <summary>A blob stored at quorum: its content hash, size and the nodes holding it.</summary>
+public sealed record BlobWriteResult(string Cid, long SizeBytes, IReadOnlyList<string> NodeIds);

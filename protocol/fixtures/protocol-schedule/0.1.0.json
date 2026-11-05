@@ -1,0 +1,9 @@
+{
+  "configured": true,
+  "now": 1793845310,
+  "minProtocolVersion": { "effective": 0, "pending": 1, "pendingAt": 1794450110 },
+  "features": [
+    { "name": "storage.grpc.tls", "activatesAt": 1794450110 },
+    { "name": "storage.cancelled.example", "activatesAt": 0 }
+  ]
+}

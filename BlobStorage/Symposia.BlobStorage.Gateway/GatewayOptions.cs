@@ -46,6 +46,34 @@ public sealed class GatewayOptions
     /// </summary>
     public int NodeGracePeriodSeconds { get; set; } = 900;
 
+    /// <summary>Smallest allowed multipart part except the last (S3: 5 MiB).</summary>
+    public long MultipartMinPartSizeBytes { get; set; } = 5L * 1024 * 1024;
+
+    /// <summary>How long an in-progress multipart upload lives without activity (refreshed by each part).</summary>
+    public int MultipartUploadTtlDays { get; set; } = 7;
+
+    public TimeSpan MultipartUploadTtl => TimeSpan.FromDays(MultipartUploadTtlDays);
+
+    /// <summary>
+    /// How long a Complete may hold an upload in Completing before the lease is released (a gateway that
+    /// crashed mid-assembly). Must exceed the longest expected assembly.
+    /// </summary>
+    public int MultipartCompletingLeaseMinutes { get; set; } = 60;
+
+    public TimeSpan CompletingLease => TimeSpan.FromMinutes(MultipartCompletingLeaseMinutes);
+
+    /// <summary>How long finished (completed/aborted) upload rows are kept for idempotent Complete retries.</summary>
+    public int MultipartRetentionDays { get; set; } = 7;
+
+    /// <summary>How often expired uploads and stale Completing leases are reaped.</summary>
+    public int MultipartReapIntervalSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Minimum age of a queued blob deletion before GC acts on it, so a concurrent write of the same
+    /// bytes (dedup) can commit its reference first and cancel the deletion.
+    /// </summary>
+    public int GcMinAgeSeconds { get; set; } = 900;
+
     /// <summary>Port the S3 listener binds on all interfaces.</summary>
     public int ListenPort { get; set; } = 5181;
 
@@ -61,6 +89,17 @@ public sealed class GatewayOptions
 
     /// <summary>Blockchain Gateway base URL; required when <see cref="NodeSource"/> is Registry.</summary>
     public string BlockchainGatewayUrl { get; set; } = "";
+
+    /// <summary>
+    /// The gateway host's node identity key (issue #140). When set (registry mode), every storage RPC
+    /// is signed with it; storage nodes requiring caller auth only accept registered callers, so the
+    /// host must be registered on <see cref="ChainId"/> / <see cref="NodeRegistryAddress"/>.
+    /// </summary>
+    public string NodeIdentityKeyPath { get; set; } = "";
+
+    public ulong ChainId { get; set; }
+
+    public string NodeRegistryAddress { get; set; } = "";
 
     /// <summary>How often the registry is re-read for storage nodes (seconds).</summary>
     public int RegistryRefreshSeconds { get; set; } = 10;

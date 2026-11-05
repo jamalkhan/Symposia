@@ -76,6 +76,17 @@ public sealed class NodeHealth(ComponentSupervisor supervisor, string nodeAddres
             // Diagnostics only; leave the count unknown.
         }
 
+        // Storage nodes only accept registered callers (issue #140); a host with no storage or
+        // compute role isn't registered, so every node refuses its gateway.
+        var refused = nodes.All.Count(n => n.LastProbeError?.StartsWith("Unauthenticated", StringComparison.Ordinal) == true);
+        if (refused > 0 && healthy == 0)
+        {
+            return new GatewayHealth(true, HealthLevel.Bad, all, 0, shortCopies, settings.Port,
+                supervisor.Context.PrimaryEndpoint is null
+                    ? "Storage nodes refuse this gateway: this host isn't registered on the network. Turn on Storage or Compute here."
+                    : "Storage nodes refuse this gateway (not authorized). Is this host's registration complete? See On-chain registration.");
+        }
+
         var level = healthy == 0 ? HealthLevel.Bad
             : healthy < settings.MinCopies || shortCopies > 0 ? HealthLevel.Warn
             : HealthLevel.Ok;

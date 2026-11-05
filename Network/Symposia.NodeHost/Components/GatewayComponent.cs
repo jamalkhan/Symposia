@@ -29,6 +29,7 @@ public sealed class GatewayComponent : WebAppComponent
             ["Gateway:RpcUrl"] = network.RpcUrl,
             ["Gateway:NodeRegistryAddress"] = network.NodeRegistryAddress,
             ["Gateway:EpochRootRegistryAddress"] = network.EpochRootRegistryAddress,
+            ["Gateway:ProtocolActivationsAddress"] = network.ProtocolActivationsAddress,
             ["Gateway:RelayerPrivateKey"] = context.Settings.Network.Mode == NetworkMode.LocalDev
                 ? ChainComponent.AnvilDevKey
                 : context.Secrets.RelayerPrivateKey,

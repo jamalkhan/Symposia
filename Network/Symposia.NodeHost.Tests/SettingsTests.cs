@@ -210,7 +210,23 @@ public sealed class SettingsTests : IDisposable
         var settings = new SettingsStore(Paths, 1, Env()).Effective;
 
         Assert.Equal(6181, settings.Storage.GrpcPort);
+        Assert.Equal(6281, settings.Storage.GrpcTlsPort);
+        Assert.True(settings.Storage.PlaintextGrpc); // #145 overlap: serve the previous release's gateways too
         Assert.Equal(9001, settings.BlobGateway.Port);
+    }
+
+    // Issue #145: the TLS and cleartext gRPC ports must not clash; cleartext stops counting once turned off.
+    [Fact]
+    public void Validate_ChecksTlsGrpcPort_AndIgnoresCleartextPortWhenOff()
+    {
+        var s = HostSettings.Defaults(0);
+        s.Network.Mode = NetworkMode.LocalDev;
+        s.Storage.Enabled = true;
+        s.Storage.GrpcTlsPort = s.Storage.GrpcPort;
+        Assert.Contains(UiApp.Validate(s), e => e.Contains("storage gRPC (TLS)") && e.Contains("storage gRPC"));
+
+        s.Storage.PlaintextGrpc = false;
+        Assert.DoesNotContain(UiApp.Validate(s), e => e.Contains("storage gRPC (TLS)"));
     }
 
     [Fact]

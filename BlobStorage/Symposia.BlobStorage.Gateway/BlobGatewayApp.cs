@@ -48,12 +48,18 @@ public static class BlobGatewayApp
         builder.Services.AddSingleton<RepairQueue>();
         builder.Services.AddSingleton<NodeReconciler>();
         builder.Services.AddHostedService<GcWorker>();
+        builder.Services.AddHostedService<MultipartReaper>();
         builder.Services.AddHostedService<RepairWorker>();
         builder.Services.AddSingleton<ReplicationMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ReplicationMonitor>());
         builder.Services.AddHostedService<ReconcilePollerService>();
 
-        // Storage nodes from the on-chain registry instead of a static list (issue #135).
+        // Which storage nodes may be used, from the network's on-chain protocol activations (issue #145).
+        // With a static node source there is no chain to read, so nothing is required.
+        builder.Services.AddSingleton<NetworkPolicy>();
+        builder.Services.AddSingleton<INetworkPolicy>(sp => sp.GetRequiredService<NetworkPolicy>());
+
+        // Where storage nodes come from (issues #135, #137): the on-chain registry, or static config.
         if (builder.Configuration.GetValue("Gateway:NodeSource", NodeSourceKind.Static) == NodeSourceKind.Registry)
         {
             var chainGateway = builder.Configuration["Gateway:BlockchainGatewayUrl"];
@@ -67,9 +73,36 @@ public static class BlobGatewayApp
                 http.BaseAddress = new Uri(chainGateway);
                 http.Timeout = TimeSpan.FromSeconds(10);
             });
-            builder.Services.AddHttpClient(RegistryNodeSync.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
-            builder.Services.AddHostedService<RegistryNodeSync>();
+            builder.Services.AddHttpClient(RegistryNodeSource.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
+            builder.Services.AddSingleton<IStorageNodeSource, RegistryNodeSource>();
+            builder.Services.AddHttpClient(ProtocolScheduleSyncService.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(5));
+            // Before NodeSourceSyncService, so the first node sync already applies the schedule.
+            builder.Services.AddHostedService<ProtocolScheduleSyncService>();
+
+            // Sign storage RPCs with the host's node key (issue #140). The host's key already exists;
+            // never generate one here, or the gateway would sign as an unregistered stranger.
+            var keyPath = builder.Configuration["Gateway:NodeIdentityKeyPath"];
+            if (!string.IsNullOrWhiteSpace(keyPath))
+            {
+                builder.Services.AddSingleton<IStorageRpcSigner>(sp =>
+                {
+                    var identity = new NodeIdentity(Microsoft.Extensions.Options.Options.Create(new NodeNetworkOptions
+                    {
+                        NodeIdentityKeyPath = keyPath,
+                        ChainId = builder.Configuration.GetValue<ulong>("Gateway:ChainId"),
+                        NodeRegistryAddress = builder.Configuration["Gateway:NodeRegistryAddress"] ?? "",
+                    }));
+                    identity.LoadExisting();
+                    return new NodeIdentityRpcSigner(identity);
+                });
+            }
         }
+        else
+        {
+            builder.Services.AddSingleton<IStorageNodeSource, StaticNodeSource>();
+        }
+
+        builder.Services.AddHostedService<NodeSourceSyncService>();
 
         // ── Kestrel: HTTP/1.1 for S3 clients ─────────────────────────────────────────
         // Production terminates TLS externally (load-balancer or sidecar). Cleartext HTTP/2 isn't
@@ -93,6 +126,8 @@ public static class BlobGatewayApp
         // A node coming online (new, or back from an outage) gets missing copies straight away (issue #135).
         var replicationMonitor = app.Services.GetRequiredService<ReplicationMonitor>();
         app.Services.GetRequiredService<NodeRegistry>().NodeBecameHealthy += _ => replicationMonitor.RequestSweep();
+        // Nodes refused by network policy (#145): re-replicate their objects now, not at the next scan.
+        app.Services.GetRequiredService<NodeRegistry>().NodesDropped += _ => replicationMonitor.RequestSweep();
 
         // ── SigV4 middleware ──────────────────────────────────────────────────────────
 
@@ -108,7 +143,8 @@ public static class BlobGatewayApp
             }
 
             var verifier = ctx.RequestServices.GetRequiredService<SigV4Verifier>();
-            var tenantId = verifier.Verify(ctx.Request);
+            var sigv4 = verifier.Authenticate(ctx.Request);
+            var tenantId = sigv4?.TenantId;
             if (tenantId is null)
             {
                 ctx.Response.StatusCode = 403;
@@ -119,6 +155,7 @@ public static class BlobGatewayApp
             }
 
             ctx.Items["TenantId"] = tenantId;
+            ctx.Items[nameof(SigV4Context)] = sigv4;
             await next();
         });
 
@@ -142,6 +179,7 @@ public static class BlobGatewayApp
 
         // Object routes must be registered before bucket routes so /{bucket}/{**key}
         // takes priority over /{bucket} when a key is present.
+        MultipartEndpoints.Map(app);
         ObjectEndpoints.Map(app);
         BucketEndpoints.Map(app);
         return app;

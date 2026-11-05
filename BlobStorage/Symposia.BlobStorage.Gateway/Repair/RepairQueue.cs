@@ -8,7 +8,7 @@ public enum RepairReason { CorruptReplica, MissingReplica, UnderReplicated }
 
 public sealed record RepairTask(
     string Cid,
-    string? BadNodeUrl,   // null = no specific bad node, just add a copy
+    string? BadNodeId,   // null = no specific bad node, just add a copy
     RepairReason Reason);
 
 /// <summary>

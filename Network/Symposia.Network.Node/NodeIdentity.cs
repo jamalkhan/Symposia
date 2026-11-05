@@ -69,6 +69,21 @@ public sealed class NodeIdentity
         WriteOwnerOnly(markerPath, "");
     }
 
+    /// <summary>
+    /// Loads an existing key and never creates one: for processes that sign on behalf of a host
+    /// whose identity is already initialized (the blob gateway, #140), where a fresh key would be a
+    /// stranger to the registry.
+    /// </summary>
+    public void LoadExisting()
+    {
+        var keyPath = Path.GetFullPath(_options.NodeIdentityKeyPath);
+        var error = File.Exists(keyPath) ? TryLoad(keyPath) : $"Node identity key file '{keyPath}' is missing.";
+        if (error is not null)
+        {
+            throw new NodeIdentityException(error);
+        }
+    }
+
     private string? TryLoad(string keyPath)
     {
         var content = File.ReadAllText(keyPath).Trim();
@@ -101,6 +116,22 @@ public sealed class NodeIdentity
     /// <summary>Answers a peer handshake challenge from <paramref name="dialer"/> (#129 FR-D1).</summary>
     public string SignHandshake(string dialer, byte[] nonce) =>
         PeerHandshake.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, dialer, nonce);
+
+    /// <summary>Proves this node owns the TLS certificate with this SHA-256 fingerprint, until its expiry (#142).</summary>
+    public string SignStorageTls(byte[] fingerprint, long notAfterUnixSeconds) =>
+        StorageTlsProof.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, fingerprint, notAfterUnixSeconds);
+
+    /// <summary>Signs a storage-node RPC call for <paramref name="audience"/> (#140), using this node's network.</summary>
+    public StorageRpcToken SignStorageRpc(string audience, string method, long unixSeconds) =>
+        StorageRpcAuth.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, audience, method, unixSeconds);
+
+    /// <summary>Signs a 5-minute telemetry heartbeat for gossip (issue #75), bound to this node's network.</summary>
+    public Telemetry.SignedTelemetry<Telemetry.HeartbeatSample> SignHeartbeat(Telemetry.HeartbeatSample sample) =>
+        Telemetry.TelemetrySigning.Sign(Key, sample, _options.ChainId, _options.NodeRegistryAddress);
+
+    /// <summary>Signs a verifier attestation about a peer (issue #75).</summary>
+    public Telemetry.SignedTelemetry<Telemetry.Attestation> SignAttestation(Telemetry.Attestation attestation) =>
+        Telemetry.TelemetrySigning.Sign(Key, attestation, _options.ChainId, _options.NodeRegistryAddress);
 
     /// <summary>
     /// Signs an arbitrary digest with this node's key, in the packed r||s||v

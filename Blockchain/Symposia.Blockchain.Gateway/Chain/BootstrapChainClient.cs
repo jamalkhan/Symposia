@@ -16,6 +16,7 @@ public sealed class BootstrapChainClient
     private readonly Web3 _web3;
     private readonly string _nodeRegistryAddress;
     private readonly string _epochRootRegistryAddress;
+    private readonly string _protocolActivationsAddress;
 
     public BootstrapChainClient(IOptions<GatewayOptions> options)
     {
@@ -23,6 +24,7 @@ public sealed class BootstrapChainClient
         _web3 = new Web3(new Nethereum.Web3.Accounts.Account(o.RelayerPrivateKey), o.RpcUrl);
         _nodeRegistryAddress = o.NodeRegistryAddress;
         _epochRootRegistryAddress = o.EpochRootRegistryAddress;
+        _protocolActivationsAddress = o.ProtocolActivationsAddress;
     }
 
     private Task<ulong>? _chainId;
@@ -30,6 +32,39 @@ public sealed class BootstrapChainClient
     public string NodeRegistryAddress => _nodeRegistryAddress;
 
     public string EpochRootRegistryAddress => _epochRootRegistryAddress;
+
+    /// <summary>Empty when this network has no ProtocolActivations contract.</summary>
+    public string ProtocolActivationsAddress => _protocolActivationsAddress;
+
+    /// <summary>
+    /// The protocol activation schedule (issue #145), read at one block so the list, the minimum
+    /// version and <c>Now</c> (that block's timestamp) agree. O(features) view calls; tens at most.
+    /// </summary>
+    public async Task<ProtocolScheduleRead> GetProtocolScheduleAsync()
+    {
+        var number = await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync();
+        var block = new BlockParameter(number);
+        var header = await _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(number);
+        var now = (ulong)header.Timestamp.Value;
+        if (string.IsNullOrEmpty(_protocolActivationsAddress))
+        {
+            return new ProtocolScheduleRead(now, 0, 0, 0, []);
+        }
+
+        var count = (int)await _web3.Eth.GetContractQueryHandler<FeatureCountFunction>()
+            .QueryAsync<System.Numerics.BigInteger>(_protocolActivationsAddress, new FeatureCountFunction(), block);
+        var features = new List<(string, ulong)>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var f = await _web3.Eth.GetContractQueryHandler<FeatureAtFunction>()
+                .QueryDeserializingToObjectAsync<FeatureAtOutputDTO>(new FeatureAtFunction { Index = i }, _protocolActivationsAddress, block);
+            features.Add((f.Name, f.ActivatesAt));
+        }
+
+        var min = await _web3.Eth.GetContractQueryHandler<MinProtocolVersionFunction>()
+            .QueryDeserializingToObjectAsync<MinProtocolVersionOutputDTO>(new MinProtocolVersionFunction(), _protocolActivationsAddress, block);
+        return new ProtocolScheduleRead(now, min.Effective, min.Pending, min.PendingAt, features);
+    }
 
     /// <summary>The connected chain's ID, read from the RPC endpoint and cached once it succeeds.</summary>
     public async Task<ulong> GetChainIdAsync()
@@ -142,3 +177,6 @@ public sealed class BootstrapChainClient
         _web3.Eth.GetContractQueryHandler<GetRootFunction>()
             .QueryAsync<byte[]>(_epochRootRegistryAddress, new GetRootFunction { Node = node, Epoch = epoch });
 }
+
+public sealed record ProtocolScheduleRead(ulong Now, uint MinVersion, uint PendingMinVersion, ulong PendingMinVersionAt,
+    IReadOnlyList<(string Name, ulong ActivatesAt)> Features);

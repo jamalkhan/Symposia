@@ -12,4 +12,12 @@ public sealed record ObjectRecord(
     long SizeBytes,
     string ContentType,
     DateTimeOffset LastModified,
-    IReadOnlyList<string> NodeIds);
+    IReadOnlyList<string> NodeIds,
+    string? EtagOverride = null)
+{
+    /// <summary>
+    /// The client-visible ETag: the CID, except for multipart-completed objects, whose S3-convention
+    /// ETag (<c>md5-of-part-etags-N</c>) is stored separately so the CID stays a true content hash (#5).
+    /// </summary>
+    public string ETag => EtagOverride ?? Cid;
+}

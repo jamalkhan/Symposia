@@ -26,6 +26,10 @@ public sealed class StorageRoleComponent : WebAppComponent
 {
     public override string Name => "storage";
 
+    protected override bool UsesRoleDataDir => true;
+
+    protected override bool ServesNodeHealth => true;
+
     protected override bool BindsOwnPort => true;
 
     protected override string? SkipReason(HostContext context) =>
@@ -43,10 +47,19 @@ public sealed class StorageRoleComponent : WebAppComponent
         var config = new Dictionary<string, string?>
         {
             ["StorageNode:ListenPort"] = storage.Port.ToString(),
-            ["StorageNode:GrpcPort"] = storage.GrpcPort.ToString(),
+            // Cleartext gRPC only during the overlap with the previous release (issue #145).
+            ["StorageNode:GrpcPort"] = storage.PlaintextGrpc ? storage.GrpcPort.ToString() : "0",
+            // Only registered members of this network may call the storage API (issue #140).
+            ["StorageNode:RequireCallerAuth"] = "true",
+            // gRPC over TLS with a node-key-bound certificate, pinned by gateways (issue #142).
+            ["StorageNode:GrpcTlsPort"] = storage.GrpcTlsPort.ToString(),
+            ["StorageNode:TlsCertificatePath"] = Path.Combine(dir, "grpc-tls.pfx"),
             ["StorageNode:StorageRoot"] = Path.Combine(dir, "blobs"),
             ["StorageNode:ManifestDbPath"] = Path.Combine(dir, "manifest.db"),
             ["StorageNode:MaxCapacityBytes"] = storage.MaxCapacityBytes.ToString(),
+            // 5-minute signed heartbeats that feed reward scoring (issue #75).
+            ["StorageNode:Telemetry:Enabled"] = storage.Heartbeats.ToString(),
+            ["StorageNode:Telemetry:GenesisUnixSeconds"] = storage.EpochGenesisUnixSeconds.ToString(),
         };
         RoleNetwork.Add(config, "StorageNode", context, HostContext.EndpointFor(storage.AdvertisedEndpoint, storage.Port));
         return config;
@@ -57,6 +70,10 @@ public sealed class StorageRoleComponent : WebAppComponent
 public sealed class ComputeRoleComponent : WebAppComponent
 {
     public override string Name => "compute";
+
+    protected override bool UsesRoleDataDir => true;
+
+    protected override bool ServesNodeHealth => true;
 
     protected override string? SkipReason(HostContext context) =>
         !context.Settings.Compute.Enabled ? "Compute role is turned off" : base.SkipReason(context);
@@ -140,6 +157,8 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
 {
     public override string Name => "blobgateway";
 
+    protected override bool UsesRoleDataDir => true;
+
     protected override bool BindsOwnPort => true;
 
     protected override string? SkipReason(HostContext context)
@@ -180,6 +199,12 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:BlockchainGatewayUrl"] = network.GatewayUrl,
             // Same cadence as peer discovery: both read the same registry, so one knob for both.
             ["Gateway:RegistryRefreshSeconds"] = context.Settings.Discovery.IntervalSeconds.ToString(),
+            // Storage RPCs are signed with this host's node key (issue #140).
+            ["Gateway:NodeIdentityKeyPath"] = context.Paths.NodeKey,
+            ["Gateway:ChainId"] = network.ChainId.ToString(),
+            ["Gateway:NodeRegistryAddress"] = network.NodeRegistryAddress,
+            // Whether cleartext storage nodes are still acceptable is network policy, read from the
+            // chain's protocol activations through the Blockchain Gateway (issue #145), not a local switch.
             ["Gateway:Credentials:0:AccessKeyId"] = gateway.AccessKeyId,
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
             ["Gateway:Credentials:0:TenantId"] = "dev",

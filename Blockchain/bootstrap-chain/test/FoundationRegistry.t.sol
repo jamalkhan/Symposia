@@ -7,6 +7,7 @@ import {INodeRegistry} from "../src/interfaces/INodeRegistry.sol";
 import {ISlashingController} from "../src/interfaces/ISlashingController.sol";
 import {ConfigKeys} from "../src/config/ConfigKeys.sol";
 import {FoundationRegistry} from "../src/FoundationRegistry.sol";
+import {RewardDistributor} from "../src/RewardDistributor.sol";
 import {RegionDistribution} from "../src/foundation/RegionDistribution.sol";
 
 /// @notice Test suite for issue #57 (Foundation Node Infrastructure
@@ -280,7 +281,12 @@ contract FoundationRegistryTest is CoreProtocolTestBase {
 
     // --- AC6: reward-surplus routing ---
 
-    function test_surplusRouting_capsOperatorPayout_andRoutesSurplusToEcosystemReserve() public {
+    /// @dev Foundation nodes are Verifiers, which #80 FR9 excludes from the
+    /// capacity emission flow (they are paid via the separate 8% path, #81).
+    /// The FOUNDATION_REWARD_HOOK routing in `_payNode` is unchanged and
+    /// applies once #81 pays verifiers; until then a foundation node earns
+    /// nothing from `sealEpoch` and no surplus is routed.
+    function test_surplusRouting_verifierFoundationNodeExcludedFromCapacityFlow() public {
         address node = makeAddr("rewardedFoundationNode");
         _registerFoundation(node, "us-east", VERIFIER_MIN, FIVE_X - VERIFIER_MIN);
 
@@ -307,14 +313,10 @@ contract FoundationRegistryTest is CoreProtocolTestBase {
 
         rewards.sealEpoch(0, nodes);
 
-        uint256 grossPayout = rewards.payoutOf(0, node);
-        assertGt(grossPayout, baseline); // sanity: sole-eligible node earns the full pool, > tiny baseline.
-
-        uint256 nodePaid = token.balanceOf(node) - nodeBefore;
-        uint256 ecosystemPaid = token.balanceOf(ecosystemReserve) - ecosystemBefore;
-
-        assertEq(nodePaid, baseline);
-        assertEq(ecosystemPaid, grossPayout - baseline);
+        assertEq(rewards.payoutOf(0, node), 0);
+        assertEq(uint8(rewards.settlementOf(0, node).reason), uint8(RewardDistributor.SettlementReason.ExcludedType));
+        assertEq(token.balanceOf(node), nodeBefore);
+        assertEq(token.balanceOf(ecosystemReserve), ecosystemBefore);
     }
 
     function test_surplusRouting_noSurplus_whenRewardAtOrBelowBaseline() public {

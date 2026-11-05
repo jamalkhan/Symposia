@@ -1,0 +1,59 @@
+# Mixed-version cluster test (issue #146): the S3 cluster smoke with one host on this build and the
+# other on the latest release (N-1), then swapped. Until a v* tag exists there is no baseline.
+name: Mixed-version cluster
+
+on:
+  pull_request:
+    branches: [dev, qa, stage, master, production]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: mixed-version-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: N and N-1 hosts together
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Find the release baseline
+        id: baseline
+        run: |
+          tag=$(tools/protocol-compat/bases.sh pull_request "${{ github.base_ref || 'master' }}" "" | sed -n "s/^tag=//p")
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          [ -n "$tag" ] || echo "::notice::No release tag yet: no N-1 baseline to test against. Tag master as v<release> to enable this check."
+      - uses: actions/setup-dotnet@v4
+        if: steps.baseline.outputs.tag != ''
+        with:
+          dotnet-version: 9.0.x
+      - uses: foundry-rs/foundry-toolchain@v1
+        if: steps.baseline.outputs.tag != ''
+        with:
+          version: v1.7.1
+      - name: Build both versions
+        if: steps.baseline.outputs.tag != ''
+        run: |
+          tools/install-contract-libs.sh
+          git worktree add "$RUNNER_TEMP/baseline" "${{ steps.baseline.outputs.tag }}"
+          dotnet publish Network/Symposia.NodeHost -c Release -o "$RUNNER_TEMP/current"
+          dotnet publish "$RUNNER_TEMP/baseline/Network/Symposia.NodeHost" -c Release -o "$RUNNER_TEMP/previous"
+      - name: Gateway host on this build, second host on N-1
+        if: steps.baseline.outputs.tag != ''
+        run: HOST_A_BIN="$RUNNER_TEMP/current/Symposia.NodeHost" HOST_B_BIN="$RUNNER_TEMP/previous/Symposia.NodeHost" Network/scripts/s3-cluster-smoke.sh "$RUNNER_TEMP/smoke-ab"
+      - name: Gateway host on N-1, second host on this build
+        if: steps.baseline.outputs.tag != ''
+        run: HOST_A_BIN="$RUNNER_TEMP/previous/Symposia.NodeHost" HOST_B_BIN="$RUNNER_TEMP/current/Symposia.NodeHost" Network/scripts/s3-cluster-smoke.sh "$RUNNER_TEMP/smoke-ba"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: smoke-logs
+          path: ${{ runner.temp }}/smoke-*

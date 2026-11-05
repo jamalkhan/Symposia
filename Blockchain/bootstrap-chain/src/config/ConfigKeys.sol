@@ -54,6 +54,9 @@ library ConfigKeys {
     bytes32 internal constant REWARD_RESERVE_SWEEP_EPOCHS = keccak256("reward.reserve.sweepEpochs");
     bytes32 internal constant REWARD_FINALITY_WINDOW = keccak256("reward.finalityWindow");
     bytes32 internal constant REWARD_METRIC_SIGNER = keccak256("reward.metric.signer");
+    /// @notice NetworkRewardsEmission (#73). When set, `sealEpoch` pulls the
+    /// epoch's emission from it instead of `REWARD_EMISSION_PER_EPOCH`.
+    bytes32 internal constant REWARD_EMISSION_SOURCE = keccak256("reward.emissionSource");
 
     function rewardTypeWeight(uint8 nodeType) internal pure returns (bytes32) {
         return keccak256(abi.encode("reward.typeWeight", nodeType));
@@ -77,6 +80,34 @@ library ConfigKeys {
     /// gross payout by `REWARD_RELIABILITY_BONUS_BPS` (e.g. 10_500 = 1.05x).
     bytes32 internal constant REWARD_RELIABILITY_BONUS_THRESHOLD_BPS = keccak256("reward.reliabilityBonusThresholdBps");
     bytes32 internal constant REWARD_RELIABILITY_BONUS_BPS = keccak256("reward.reliabilityBonusBps");
+
+    // --- TelemetryCheckpointRegistry (issue #75) ---
+    /// @notice Checkpoint windows per epoch (MVP: 24, i.e. hourly for a 24h epoch).
+    bytes32 internal constant TELEMETRY_CHECKPOINTS_PER_EPOCH = keccak256("telemetry.checkpointsPerEpoch");
+    /// @notice Seconds after a checkpoint window closes before a node may
+    /// self-checkpoint that window because the committee did not.
+    bytes32 internal constant TELEMETRY_SELF_CHECKPOINT_GRACE = keccak256("telemetry.selfCheckpointGrace");
+    /// @notice Self-reported vs verifier-attested uptime gap (bps of 10_000) that sets `divergenceFlag`.
+    bytes32 internal constant TELEMETRY_DIVERGENCE_UPTIME_BPS = keccak256("telemetry.divergence.uptimeBps");
+    /// @notice Relative latency gap (bps of the verifier value) that sets `divergenceFlag`.
+    bytes32 internal constant TELEMETRY_DIVERGENCE_LATENCY_BPS = keccak256("telemetry.divergence.latencyBps");
+
+    // --- ReliabilityRegistry (issue #79) ---
+    /// @notice Single address allowed to record challenge / timeout outcomes.
+    bytes32 internal constant RELIABILITY_CHALLENGER = keccak256("reliability.challenger");
+    /// @notice Single address allowed to finalize epochs (the RewardDistributor).
+    bytes32 internal constant RELIABILITY_FINALIZER = keccak256("reliability.finalizer");
+    bytes32 internal constant RELIABILITY_DELTA_POR_BPS = keccak256("reliability.delta.porBps");
+    bytes32 internal constant RELIABILITY_DELTA_PROBE_BPS = keccak256("reliability.delta.probeBps");
+    bytes32 internal constant RELIABILITY_DELTA_TIMEOUT_BPS = keccak256("reliability.delta.timeoutBps");
+    /// @notice Deficit added per full percentage point of missed heartbeats.
+    bytes32 internal constant RELIABILITY_DELTA_HEARTBEAT_BPS_PER_PCT = keccak256("reliability.delta.heartbeatBpsPerPct");
+    /// @notice Score recovered after each epoch with no degradation.
+    bytes32 internal constant RELIABILITY_RECOVERY_BPS = keccak256("reliability.recoveryBps");
+    /// @notice Consecutive at-or-above-threshold epochs required for the bonus (30).
+    bytes32 internal constant RELIABILITY_BONUS_WINDOW = keccak256("reliability.bonusWindow");
+    /// @notice ReliabilityRegistry address read by RewardDistributor (#80).
+    bytes32 internal constant REWARD_RELIABILITY_REGISTRY = keccak256("reward.reliabilityRegistry");
 
     // --- SlashingController ---
     bytes32 internal constant SLASHING_STAGE3_PCT_PER_EPOCH_BPS = keccak256("slashing.stage3.pctPerEpochBps");

@@ -56,6 +56,7 @@ internal static class BucketEndpoints
         string bucket, HttpContext ctx, GatewayMetadataStore store)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
+        if (ctx.Request.Query.ContainsKey("uploads")) return MultipartEndpoints.ListUploads(bucket, ctx);
 
         if (!store.BucketExists(bucket))
             return S3Xml.NoSuchBucket(bucket);

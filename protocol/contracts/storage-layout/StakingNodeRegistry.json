@@ -1,0 +1,51 @@
+{
+  "structs": {
+    "NodeRecord": [
+      {
+        "type": "NodeType",
+        "name": "nodeType"
+      },
+      {
+        "type": "uint256",
+        "name": "capacity"
+      },
+      {
+        "type": "bytes32",
+        "name": "region"
+      },
+      {
+        "type": "uint256",
+        "name": "stake"
+      },
+      {
+        "type": "NodeStatus",
+        "name": "status"
+      },
+      {
+        "type": "uint256",
+        "name": "lastVerifiedEpoch"
+      },
+      {
+        "type": "uint256",
+        "name": "unstakeCooldownEnd"
+      },
+      {
+        "type": "uint256",
+        "name": "pendingUnstakeAmount"
+      },
+      {
+        "type": "uint256",
+        "name": "banExpiry"
+      }
+    ],
+    "RegistryStorage": [
+      {
+        "type": "mapping(address => NodeRecord)",
+        "name": "records"
+      }
+    ]
+  },
+  "locations": {
+    "REGISTRY_STORAGE_LOCATION": "keccak256(\"symposia.storage.StakingNodeRegistry\")"
+  }
+}
