@@ -260,3 +260,83 @@ contract RewardDistributorPayoutTest is CoreProtocolTestBase {
         assertLe(_sumPayouts(0, storageNodes), POOL);
     }
 }
+
+/// @notice Review fixes: seal completeness, ordering, loud reliability
+/// failures, and the undistributed ledger.
+contract RewardDistributorSealGuardsTest is RewardDistributorPayoutTest {
+    function test_RevertWhen_SubsetOmitsReporter() public {
+        _report(storageNodes[0], 0, 100);
+        _report(storageNodes[1], 0, 100);
+        address[] memory only = new address[](1);
+        only[0] = storageNodes[0];
+        vm.warp(rewards.epochFinalityDeadline(0) + 1);
+        vm.expectRevert(abi.encodeWithSelector(RewardDistributor.IncompleteNodeSet.selector, 0, 1, 2));
+        rewards.sealEpoch(0, only); // would otherwise hand node 0 the whole pool
+    }
+
+    function test_RevertWhen_EmptyListWithReporters() public {
+        _report(storageNodes[0], 0, 100);
+        vm.warp(rewards.epochFinalityDeadline(0) + 1);
+        vm.expectRevert(abi.encodeWithSelector(RewardDistributor.IncompleteNodeSet.selector, 0, 0, 1));
+        rewards.sealEpoch(0, new address[](0));
+    }
+
+    function test_ReporterCountedOnceAcrossResubmits() public {
+        _report(storageNodes[0], 0, 100);
+        _report(storageNodes[0], 0, 200);
+        assertEq(rewards.reporterCount(0), 1);
+    }
+
+    function test_RevertWhen_SealOutOfOrder() public {
+        _report(storageNodes[0], 1, 100);
+        _seal(1, storageNodes);
+        assertEq(rewards.nextSealableEpoch(), 2);
+        vm.expectRevert(abi.encodeWithSelector(RewardDistributor.EpochSealOutOfOrder.selector, 0, 2));
+        rewards.sealEpoch(0, storageNodes);
+    }
+
+    function test_RevertWhen_ReliabilityRegistryPaused() public {
+        _report(storageNodes[0], 0, 100);
+        vm.prank(timelockAddr);
+        rel.pause();
+        vm.warp(rewards.epochFinalityDeadline(0) + 1);
+        vm.expectRevert(); // no silent neutral-1.0 fallback
+        rewards.sealEpoch(0, storageNodes);
+        assertFalse(rewards.isSealed(0));
+    }
+
+    function test_RevertWhen_FinalizerMisconfigured() public {
+        vm.prank(configOwner);
+        cfg.setAddress(ConfigKeys.RELIABILITY_FINALIZER, makeAddr("wrong"));
+        _report(storageNodes[0], 0, 100);
+        vm.warp(rewards.epochFinalityDeadline(0) + 1);
+        vm.expectRevert(abi.encodeWithSelector(ReliabilityRegistry.NotFinalizer.selector, address(rewards)));
+        rewards.sealEpoch(0, storageNodes);
+    }
+
+    function test_UndistributedLedgerAndSweep() public {
+        vm.prank(configOwner);
+        cfg.setAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER, address(stages));
+        stages.setStage(storageNodes[1], 3);
+        _report(storageNodes[0], 0, 100);
+        _report(storageNodes[1], 0, 100);
+        _seal(0, storageNodes);
+        // 8% verifier share + node 1's forfeited half of the pool.
+        uint256 expected = EMISSION - rewards.payoutOf(0, storageNodes[0]);
+        assertEq(rewards.undistributed(), expected);
+
+        address sink = makeAddr("sink");
+        vm.expectRevert(abi.encodeWithSelector(RewardDistributor.SweepExceedsUndistributed.selector, expected + 1, expected));
+        vm.prank(timelockAddr);
+        rewards.sweepUndistributed(sink, expected + 1);
+        vm.prank(timelockAddr);
+        rewards.sweepUndistributed(sink, expected);
+        assertEq(token.balanceOf(sink), expected);
+        assertEq(rewards.undistributed(), 0);
+    }
+
+    function test_RevertWhen_NonTimelockSweeps() public {
+        vm.expectRevert();
+        rewards.sweepUndistributed(address(this), 1);
+    }
+}

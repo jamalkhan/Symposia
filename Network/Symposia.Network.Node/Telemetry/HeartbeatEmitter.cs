@@ -138,7 +138,9 @@ public static class TelemetryServiceExtensions
         services.TryAddSingleton<ITelemetryGossip>(sp =>
         {
             var network = sp.GetRequiredService<IOptions<NodeNetworkOptions>>().Value;
-            return new InMemoryTelemetryGossip(network.ChainId, network.NodeRegistryAddress);
+            var telemetry = sp.GetRequiredService<IOptions<TelemetryOptions>>().Value;
+            var admission = new TelemetryAdmission(telemetry.Schedule, sp.GetRequiredService<TimeProvider>());
+            return new InMemoryTelemetryGossip(network.ChainId, network.NodeRegistryAddress, admission);
         });
         services.AddSingleton<HeartbeatEmitter>();
         services.AddHostedService(sp => sp.GetRequiredService<HeartbeatEmitter>());

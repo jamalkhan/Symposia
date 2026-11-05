@@ -70,6 +70,7 @@ contract NetworkRewardsEmissionTest is Test {
     MockFeeTreasury internal treasury;
     address internal distributor = makeAddr("rewardDistributor");
     address internal authority = makeAddr("tier3");
+    address internal governance = makeAddr("governance");
 
     function setUp() public {
         clock = new MockEpochClock(block.timestamp);
@@ -80,7 +81,7 @@ contract NetworkRewardsEmissionTest is Test {
         address predictedTreasury = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         address predictedToken = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
         emission = new NetworkRewardsEmission(
-            ISYMMinter(predictedToken), distributor, clock, IFeeTreasury(predictedTreasury)
+            ISYMMinter(predictedToken), distributor, clock, IFeeTreasury(predictedTreasury), governance
         );
         treasury = new MockFeeTreasury(SYMToken(predictedToken));
 
@@ -100,7 +101,7 @@ contract NetworkRewardsEmissionTest is Test {
     }
 
     function _setCumulativeMinted(uint256 amount) internal {
-        vm.store(address(emission), bytes32(uint256(0)), bytes32(amount));
+        vm.store(address(emission), bytes32(uint256(1)), bytes32(amount)); // slot 1: cumulativeMinted
         assertEq(emission.cumulativeMinted(), amount);
     }
 
@@ -248,7 +249,7 @@ contract NetworkRewardsEmissionTest is Test {
         treasury.setBalance(1_000_000e18);
         _warpPast(2922);
         uint256 delivered = emission.emitForEpoch(2922);
-        assertEq(delivered, 20_000e18); // gap funded by treasury
+        assertEq(delivered, 50_000e18); // 30k fee share + 20k gap funded by treasury
         assertEq(treasury.balance(), 1_000_000e18 - 20_000e18);
         assertEq(token.totalSupply(), 0); // nothing minted
     }
@@ -257,7 +258,7 @@ contract NetworkRewardsEmissionTest is Test {
         treasury.setFeeShare(3000, 75_000e18);
         treasury.setBalance(1_000_000e18);
         _warpPast(3000);
-        assertEq(emission.emitForEpoch(3000), 0);
+        assertEq(emission.emitForEpoch(3000), 75_000e18); // fee share only, no top-up
         assertEq(treasury.balance(), 1_000_000e18);
     }
 
@@ -265,7 +266,7 @@ contract NetworkRewardsEmissionTest is Test {
         treasury.setFeeShare(3000, 50_000e18);
         _warpPast(3000);
         vm.recordLogs();
-        assertEq(emission.emitForEpoch(3000), 0);
+        assertEq(emission.emitForEpoch(3000), 50_000e18);
         assertEq(vm.getRecordedLogs().length, 1); // EpochEmitted only, no shortfall alert
     }
 
@@ -275,7 +276,7 @@ contract NetworkRewardsEmissionTest is Test {
         _warpPast(2950);
         vm.expectEmit(true, false, false, true);
         emit NetworkRewardsEmission.FloorShortfallAlert(2950, 50_000e18, 5_000e18);
-        assertEq(emission.emitForEpoch(2950), 0); // runners get only the 5k fee share
+        assertEq(emission.emitForEpoch(2950), 5_000e18); // runners get only the 5k fee share
     }
 
     function test_FloorPartialTreasuryThenBucket() public {
@@ -287,7 +288,7 @@ contract NetworkRewardsEmissionTest is Test {
         vm.expectEmit(true, false, false, true);
         emit NetworkRewardsEmission.FloorShortfallAlert(2950, 50_000e18, 30_000e18);
         uint256 delivered = emission.emitForEpoch(2950);
-        assertEq(delivered, 25_000e18); // 15k treasury + 10k bucket
+        assertEq(delivered, 30_000e18); // 5k fee + 15k treasury + 10k bucket
         assertEq(token.balanceOf(distributor), 10_000e18);
         assertTrue(emission.isBucketExhausted());
     }
@@ -304,11 +305,24 @@ contract NetworkRewardsEmissionTest is Test {
     }
 
     function test_FloorWorksWithoutFeeTreasury() public {
-        NetworkRewardsEmission bare = new NetworkRewardsEmission(ISYMMinter(address(token)), distributor, clock, IFeeTreasury(address(0)));
+        NetworkRewardsEmission bare = new NetworkRewardsEmission(ISYMMinter(address(token)), distributor, clock, IFeeTreasury(address(0)), governance);
         _warpPast(3000);
         // Not a token minter, but with no remaining bucket configured nothing is minted:
-        vm.store(address(bare), bytes32(uint256(0)), bytes32(BUCKET));
+        vm.store(address(bare), bytes32(uint256(1)), bytes32(BUCKET));
         assertEq(bare.emitForEpoch(3000), 0);
+    }
+
+    function test_GovernanceWiresFeeTreasuryOnce() public {
+        NetworkRewardsEmission e =
+            new NetworkRewardsEmission(ISYMMinter(address(token)), distributor, clock, IFeeTreasury(address(0)), governance);
+        vm.expectRevert(abi.encodeWithSelector(NetworkRewardsEmission.NotGovernance.selector, address(this)));
+        e.setFeeTreasury(treasury);
+        vm.prank(governance);
+        e.setFeeTreasury(treasury);
+        assertEq(address(e.feeTreasury()), address(treasury));
+        vm.prank(governance);
+        vm.expectRevert(NetworkRewardsEmission.FeeTreasuryAlreadySet.selector);
+        e.setFeeTreasury(IFeeTreasury(address(1)));
     }
 
     function test_ReentrantTreasuryCannotDoubleEmit() public {
@@ -321,7 +335,7 @@ contract NetworkRewardsEmissionTest is Test {
 
     function test_RevertWhen_ZeroConstructorArgs() public {
         vm.expectRevert(NetworkRewardsEmission.ZeroAddress.selector);
-        new NetworkRewardsEmission(ISYMMinter(address(0)), distributor, clock, treasury);
+        new NetworkRewardsEmission(ISYMMinter(address(0)), distributor, clock, treasury, governance);
     }
 
     // --- G. Ledger reconciliation (FR8) ---
@@ -358,7 +372,7 @@ contract NetworkRewardsEmissionInvariantTest is Test {
         MockEpochClock clock = new MockEpochClock(block.timestamp);
         address impl = address(new SYMToken());
         address predictedToken = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
-        emission = new NetworkRewardsEmission(ISYMMinter(predictedToken), distributor, clock, IFeeTreasury(address(0)));
+        emission = new NetworkRewardsEmission(ISYMMinter(predictedToken), distributor, clock, IFeeTreasury(address(0)), address(2));
         address[] memory m = new address[](1);
         uint256[] memory a = new uint256[](1);
         (m[0], a[0]) = (address(emission), 4_000_000_000e18);

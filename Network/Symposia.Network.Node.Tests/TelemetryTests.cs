@@ -267,6 +267,42 @@ public sealed class TelemetryPipelineTests : IDisposable
         Assert.Empty(gossip.Heartbeats);
     }
 
+    [Fact]
+    public async Task Gossip_KeepsAndForwardsOneConflictingCopy()
+    {
+        var gossip = new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry);
+        var received = 0;
+        gossip.HeartbeatReceived += _ => received++;
+        Assert.True(await gossip.PublishAsync(Beat(3, latency: 50)));
+        Assert.True(await gossip.PublishAsync(Beat(3, latency: 9))); // equivocation: forwarded as evidence
+        Assert.False(await gossip.PublishAsync(Beat(3, latency: 7))); // capped at two copies per key
+        Assert.Equal(2, received);
+        Assert.Equal(2, gossip.Heartbeats.Count);
+    }
+
+    [Fact]
+    public async Task Gossip_RejectsBackfilledAndFarEpochSamples()
+    {
+        var now = Schedule.EpochStart(1) + 10 * 300 + 5;
+        var admission = new TelemetryAdmission(Schedule, new ManualTime(DateTimeOffset.FromUnixTimeSeconds(now)));
+        var gossip = new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry, admission);
+        Assert.True(await gossip.PublishAsync(Beat(10, epoch: 1)));      // live
+        Assert.False(await gossip.PublishAsync(Beat(2, epoch: 1)));      // signed 40 minutes ago: backfill
+        Assert.False(await gossip.PublishAsync(Beat(10, epoch: 3, at: now))); // epoch too far ahead
+        Assert.Single(gossip.Heartbeats);
+    }
+
+    [Fact]
+    public void Aggregator_DropsEquivocatedSlot_RegardlessOfWhichCopyArrivedFirst()
+    {
+        var honest = Enumerable.Range(0, 10).Select(i => Beat((uint)i)).ToList();
+        var conflict = Beat(4, latency: 9_999);
+        var a = Aggregate(honest.Append(conflict));
+        var b = Aggregate(new[] { conflict }.Concat(honest));
+        Assert.Equal(a, b);
+        Assert.Equal(9u, a.HeartbeatsReceived); // slot 4 counted as missed
+    }
+
     // --- emitter ---
 
     [Fact]

@@ -53,8 +53,9 @@ public sealed record TelemetrySchedule(long GenesisUnixSeconds, long EpochSecond
 /// <summary>
 /// Builds a node's <see cref="AggregatedMetricRecord"/> from the epoch's signed samples and
 /// attestations (issue #75 FR5/FR6). Invalid signatures, other nodes' or epochs' samples,
-/// out-of-range or timestamp-inconsistent slots, and replays are dropped before aggregation;
-/// duplicates keep the first occurrence in canonical order, so input order never matters.
+/// out-of-range or timestamp-inconsistent slots, and replays are dropped before aggregation.
+/// Exact duplicates collapse to one, and equivocated slots (same replay key, different signed
+/// payloads) are dropped entirely, so input order and which copy arrived first never matter.
 /// Self-reported and verifier-attested values are aggregated separately and never merged, so a
 /// discrepancy stays visible to #79.
 /// </summary>
@@ -78,9 +79,11 @@ public sealed class EpochMetricAggregator(TelemetrySchedule schedule, ulong chai
                         && s.Payload.SampleIndex < schedule.SlotsPerEpoch
                         && SlotMatches(epoch, s.Payload.SampleIndex, s.Payload.UnixSeconds)
                         && TelemetrySigning.Verify(s, chainId, registry))
-            .OrderBy(s => s.Payload.SampleIndex).ThenBy(s => s.Signature, StringComparer.Ordinal)
-            .DistinctBy(s => s.Payload.ReplayKey)
             .Select(s => s.Payload)
+            .GroupBy(p => p.ReplayKey)
+            .Where(NotEquivocated)
+            .Select(g => g.First())
+            .OrderBy(p => p.SampleIndex)
             .ToList();
 
         var attested = attestations
@@ -88,10 +91,12 @@ public sealed class EpochMetricAggregator(TelemetrySchedule schedule, ulong chai
                         && a.Payload.EpochIndex == epoch
                         && !string.Equals(a.Payload.VerifierId, nodeId, StringComparison.OrdinalIgnoreCase)
                         && TelemetrySigning.Verify(a, chainId, registry))
-            .OrderBy(a => a.Payload.VerifierId.ToLowerInvariant(), StringComparer.Ordinal)
-            .ThenBy(a => a.Payload.SampleIndex).ThenBy(a => a.Signature, StringComparer.Ordinal)
-            .DistinctBy(a => a.Payload.ReplayKey)
             .Select(a => a.Payload)
+            .GroupBy(p => p.ReplayKey)
+            .Where(NotEquivocated)
+            .Select(g => g.First())
+            .OrderBy(p => p.VerifierId.ToLowerInvariant(), StringComparer.Ordinal)
+            .ThenBy(p => p.SampleIndex)
             .ToList();
 
         var received = (uint)Math.Min(heartbeats.Count, expected);
@@ -121,6 +126,13 @@ public sealed class EpochMetricAggregator(TelemetrySchedule schedule, ulong chai
         return new AggregatedMetricRecord(nodeId, epoch, self, verifier, received, expected,
             (ushort)Math.Min(attested.Count, ushort.MaxValue), first, last);
     }
+
+    /// <summary>
+    /// A replay key signed with two different payloads is equivocation. The slot is dropped
+    /// (counted as missed) instead of picking one copy, so every committee member reaches the
+    /// same record no matter which copy it saw first, given gossip forwards both.
+    /// </summary>
+    private static bool NotEquivocated<TKey, T>(IGrouping<TKey, T> group) => group.Distinct().Count() == 1;
 
     private bool SlotMatches(ulong epoch, uint slot, long unixSeconds)
     {

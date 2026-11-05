@@ -20,7 +20,7 @@ contract EmissionDistributorIntegrationTest is CoreProtocolTestBase {
         _deployCoreProtocol();
         // MockERC20.mint(address,uint256) matches ISYMMinter, standing in for SYMToken.
         emission = new NetworkRewardsEmission(
-            ISYMMinter(address(token)), address(rewards), IEpochClock(address(rewards)), IFeeTreasury(address(0))
+            ISYMMinter(address(token)), address(rewards), IEpochClock(address(rewards)), IFeeTreasury(address(0)), timelockAddr
         );
         vm.prank(configOwner);
         cfg.setAddress(ConfigKeys.REWARD_EMISSION_SOURCE, address(emission));

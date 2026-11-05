@@ -81,6 +81,17 @@ library ConfigKeys {
     bytes32 internal constant REWARD_RELIABILITY_BONUS_THRESHOLD_BPS = keccak256("reward.reliabilityBonusThresholdBps");
     bytes32 internal constant REWARD_RELIABILITY_BONUS_BPS = keccak256("reward.reliabilityBonusBps");
 
+    // --- TelemetryCheckpointRegistry (issue #75) ---
+    /// @notice Checkpoint windows per epoch (MVP: 24, i.e. hourly for a 24h epoch).
+    bytes32 internal constant TELEMETRY_CHECKPOINTS_PER_EPOCH = keccak256("telemetry.checkpointsPerEpoch");
+    /// @notice Seconds after a checkpoint window closes before a node may
+    /// self-checkpoint that window because the committee did not.
+    bytes32 internal constant TELEMETRY_SELF_CHECKPOINT_GRACE = keccak256("telemetry.selfCheckpointGrace");
+    /// @notice Self-reported vs verifier-attested uptime gap (bps of 10_000) that sets `divergenceFlag`.
+    bytes32 internal constant TELEMETRY_DIVERGENCE_UPTIME_BPS = keccak256("telemetry.divergence.uptimeBps");
+    /// @notice Relative latency gap (bps of the verifier value) that sets `divergenceFlag`.
+    bytes32 internal constant TELEMETRY_DIVERGENCE_LATENCY_BPS = keccak256("telemetry.divergence.latencyBps");
+
     // --- ReliabilityRegistry (issue #79) ---
     /// @notice Single address allowed to record challenge / timeout outcomes.
     bytes32 internal constant RELIABILITY_CHALLENGER = keccak256("reliability.challenger");

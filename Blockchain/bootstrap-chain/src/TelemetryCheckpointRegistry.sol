@@ -9,19 +9,6 @@ import {IProtocolConfig} from "./config/IProtocolConfig.sol";
 import {ConfigKeys} from "./config/ConfigKeys.sol";
 import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
 
-/// @notice `IProtocolConfig` keys owned by the telemetry pipeline (issue #75).
-library TelemetryConfigKeys {
-    /// @notice Checkpoint windows per epoch (MVP: 24, i.e. hourly for a 24h epoch).
-    bytes32 internal constant CHECKPOINTS_PER_EPOCH = keccak256("telemetry.checkpointsPerEpoch");
-    /// @notice Seconds after a checkpoint window closes before a node may
-    /// self-checkpoint that window because the committee did not.
-    bytes32 internal constant SELF_CHECKPOINT_GRACE = keccak256("telemetry.selfCheckpointGrace");
-    /// @notice Self-reported vs verifier-attested uptime gap (bps of 10_000) that sets `divergenceFlag`.
-    bytes32 internal constant DIVERGENCE_UPTIME_BPS = keccak256("telemetry.divergence.uptimeBps");
-    /// @notice Relative latency gap (bps of the verifier value) that sets `divergenceFlag`.
-    bytes32 internal constant DIVERGENCE_LATENCY_BPS = keccak256("telemetry.divergence.latencyBps");
-}
-
 /// @title TelemetryCheckpointRegistry
 /// @notice On-chain half of the sub-epoch metrics pipeline (issue #75).
 ///
@@ -116,7 +103,9 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         address[] members;
     }
 
-    bytes32 private constant TELEMETRY_STORAGE_LOCATION = keccak256("symposia.storage.TelemetryCheckpointRegistry");
+    // keccak256(abi.encode(uint256(keccak256("symposia.TelemetryCheckpointRegistry")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant TELEMETRY_STORAGE_LOCATION =
+        0xa65fed527fb0a7d4e7fe4a45377cc933d800a0aef8dbd2b95282e0d3eb3f6e00;
 
     bytes32 public constant CHECKPOINT_TYPEHASH = keccak256(
         "TelemetryCheckpoint(uint256 epochIndex,uint256 checkpointIndex,bytes32 merkleRoot,bytes32 blobAddress,uint32 sampleCount)"
@@ -255,7 +244,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         if ($.checkpoints[epoch][checkpointIndex].committedAt != 0) {
             revert CheckpointAlreadyCommitted(epoch, checkpointIndex);
         }
-        uint256 grace = config().getUint(TelemetryConfigKeys.SELF_CHECKPOINT_GRACE);
+        uint256 grace = config().getUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE);
         if (block.timestamp < checkpointWindowEnd(epoch, checkpointIndex) + grace) {
             revert SelfCheckpointNotYetAllowed(epoch, checkpointIndex);
         }
@@ -326,8 +315,8 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         _requireThreshold(digest, signatures);
 
         uint256 perEpoch = checkpointsPerEpoch();
-        uint256 uptimeGap = config().getUint(TelemetryConfigKeys.DIVERGENCE_UPTIME_BPS);
-        uint256 latencyGap = config().getUint(TelemetryConfigKeys.DIVERGENCE_LATENCY_BPS);
+        uint256 uptimeGap = config().getUint(ConfigKeys.TELEMETRY_DIVERGENCE_UPTIME_BPS);
+        uint256 latencyGap = config().getUint(ConfigKeys.TELEMETRY_DIVERGENCE_LATENCY_BPS);
         TelemetryStorage storage $ = _ts();
         for (uint256 i; i < inputs.length; ++i) {
             AggregatedMetricInput calldata r = inputs[i];
@@ -398,7 +387,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     }
 
     function checkpointsPerEpoch() public view returns (uint256) {
-        uint256 n = config().getUint(TelemetryConfigKeys.CHECKPOINTS_PER_EPOCH);
+        uint256 n = config().getUint(ConfigKeys.TELEMETRY_CHECKPOINTS_PER_EPOCH);
         return n == 0 ? DEFAULT_CHECKPOINTS_PER_EPOCH : n;
     }
 

@@ -71,7 +71,9 @@ contract ReliabilityRegistry is GovernedUpgradeable, IReliabilityRegistry {
         mapping(bytes32 => bool) seenOutcome;
     }
 
-    bytes32 private constant RELIABILITY_STORAGE_LOCATION = keccak256("symposia.storage.ReliabilityRegistry");
+    // keccak256(abi.encode(uint256(keccak256("symposia.ReliabilityRegistry")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant RELIABILITY_STORAGE_LOCATION =
+        0x378195eb34af454070b69bab8e35fa427f61bc6c5c3c671d0f706e8ee865b900;
 
     event ChallengeRecorded(
         address indexed node,

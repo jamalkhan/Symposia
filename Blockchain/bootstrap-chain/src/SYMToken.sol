@@ -58,7 +58,9 @@ contract SYMToken is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, ER
         uint256 totalAllocated;
     }
 
-    bytes32 private constant SYM_TOKEN_STORAGE_LOCATION = keccak256("symposia.storage.SYMToken");
+    // keccak256(abi.encode(uint256(keccak256("symposia.SYMToken")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant SYM_TOKEN_STORAGE_LOCATION =
+        0xce549f04739ca5a13b3949db2cd3dc78a478d0b25ad02a1abde4125391febe00;
 
     /// @notice Emitted once per minter whenever an implementation's
     /// initializer configures the allowlist. Together with `Minted` and
@@ -88,7 +90,12 @@ contract SYMToken is Initializable, ERC20Upgradeable, ERC20PermitUpgradeable, ER
     /// and can't be front-run.
     /// @param name_ Token name.
     /// @param symbol_ Token symbol (`SYM`, provisional).
-    /// @param authority Sole address allowed to authorize upgrades.
+    /// @param authority Sole address allowed to authorize upgrades. Per the
+    /// #70 Arch plan this is deliberately a fixed address rather than the
+    /// config-resolved timelock other contracts use (GovernedUpgradeable), so
+    /// mutable config can never touch the cap. It MUST be the Tier 3
+    /// timelock (the 3-of-5 founding multi-sig during bootstrap), never an
+    /// EOA. Rotating it requires an upgrade whose reinitializer sets a new one.
     /// @param minters Allocation bucket / emission contracts allowed to mint.
     /// @param allowances Per-minter cumulative mint allowance, in wei. The sum
     /// must not exceed `MAX_SUPPLY`.

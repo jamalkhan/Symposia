@@ -6,7 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {MockProtocolConfig} from "../src/config/MockProtocolConfig.sol";
 import {ConfigKeys} from "../src/config/ConfigKeys.sol";
 import {INodeRegistry} from "../src/interfaces/INodeRegistry.sol";
-import {TelemetryCheckpointRegistry, TelemetryConfigKeys} from "../src/TelemetryCheckpointRegistry.sol";
+import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.sol";
 
 /// @dev Only `statusOf` is exercised by the registry under test.
 contract StatusOnlyRegistry {
@@ -50,9 +50,9 @@ contract TelemetryCheckpointRegistryTest is Test {
         cfg.setUint(ConfigKeys.EPOCH_LENGTH, EPOCH);
         cfg.setUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP, genesis);
         cfg.setUint(ConfigKeys.REWARD_FINALITY_WINDOW, FINALITY);
-        cfg.setUint(TelemetryConfigKeys.SELF_CHECKPOINT_GRACE, 30 minutes);
-        cfg.setUint(TelemetryConfigKeys.DIVERGENCE_UPTIME_BPS, 1_000);
-        cfg.setUint(TelemetryConfigKeys.DIVERGENCE_LATENCY_BPS, 5_000);
+        cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, 30 minutes);
+        cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_UPTIME_BPS, 1_000);
+        cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_LATENCY_BPS, 5_000);
         vm.stopPrank();
 
         // Three members, sorted by address, threshold 2.

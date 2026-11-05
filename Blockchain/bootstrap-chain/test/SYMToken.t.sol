@@ -73,6 +73,14 @@ contract SYMTokenTest is SYMTokenFixture {
         assertEq(token.totalSupply(), 0);
     }
 
+    function test_StorageUsesErc7201Slot() public {
+        bytes32 slot = keccak256(abi.encode(uint256(keccak256("symposia.SYMToken")) - 1)) & ~bytes32(uint256(0xff));
+        vm.prank(networkRewards);
+        token.mint(address(this), 42);
+        assertEq(uint256(vm.load(address(token), slot)), 42); // first field: totalMinted
+        assertEq(address(uint160(uint256(vm.load(address(token), bytes32(uint256(slot) + 1))))), authority);
+    }
+
     function test_ClockIsBlockNumber() public view {
         assertEq(token.clock(), uint48(block.number));
         assertEq(token.CLOCK_MODE(), "mode=blocknumber&from=default");
