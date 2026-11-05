@@ -367,6 +367,8 @@ contract RewardDistributor is GovernedUpgradeable {
         return genesis + (epoch + 1) * length;
     }
 
+    // TODO(#72): move epoch math into the epoch controller / a shared EpochMath library
+    // (duplicated in TelemetryCheckpointRegistry.epochFinalityDeadline).
     function epochFinalityDeadline(uint256 epoch) public view returns (uint256) {
         uint256 genesis = config().getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP);
         uint256 length = config().getUint(ConfigKeys.EPOCH_LENGTH);
@@ -397,9 +399,10 @@ contract RewardDistributor is GovernedUpgradeable {
     /// already sealed, the finality window hasn't closed, a node appears
     /// twice, `nodes` omits any node that reported metrics for the epoch
     /// (so a caller can't shrink the score denominator and capture a pool),
-    /// or `epoch` is not after the last sealed epoch. Seals are monotonic, so
-    /// per-node reliability finalization is always in order. A skipped epoch
-    /// can never be sealed later.
+    /// or `epoch` is not exactly the next unsealed epoch. Seals are strictly
+    /// sequential from epoch 0, so reliability finalization is always in
+    /// order and no epoch (or its emission or degradations) can be skipped.
+    /// An epoch with no reporters is sealed with an empty list.
     ///
     /// Payout (#80 FR1): `typePool * score / typeScoreSum * reliability *
     /// stagePenalty`, then the #79 reliability bonus is peer-normalized
@@ -412,7 +415,7 @@ contract RewardDistributor is GovernedUpgradeable {
         RewardStorage storage $ = _rewardStorage();
         if ($.seals[epoch].sealed_) revert EpochAlreadySealed(epoch);
         if (block.timestamp < epochFinalityDeadline(epoch)) revert FinalityWindowNotElapsed(epoch);
-        if (epoch < $.nextSealableEpoch) revert EpochSealOutOfOrder(epoch, $.nextSealableEpoch);
+        if (epoch != $.nextSealableEpoch) revert EpochSealOutOfOrder(epoch, $.nextSealableEpoch);
         $.nextSealableEpoch = epoch + 1;
         // Latch before any external call (emission mint, reliability finalize, payouts).
         $.seals[epoch] = EpochSeal({sealed_: true, sealedAt: block.timestamp});
@@ -498,7 +501,10 @@ contract RewardDistributor is GovernedUpgradeable {
         for (uint256 i = 0; i < nodes.length; i++) {
             address node = nodes[i];
             if ($.settlements[epoch][node].reason != SettlementReason.None) revert DuplicateNode(node);
-            $.settlements[epoch][node].reason = SettlementReason.ZeroAmount; // dedupe marker, overwritten later
+            // Dedupe marker, overwritten in sealEpoch. Relies on every early exit being a
+            // revert; a non-reverting return here would leave it behind. Duplicates are
+            // rejected before `covered` counts, so repeats cannot fake reporter coverage.
+            $.settlements[epoch][node].reason = SettlementReason.ZeroAmount;
 
             NodeCalc memory c = calc[i];
             c.node = node;

@@ -289,9 +289,15 @@ contract RewardDistributorSealGuardsTest is RewardDistributorPayoutTest {
 
     function test_RevertWhen_SealOutOfOrder() public {
         _report(storageNodes[0], 1, 100);
-        _seal(1, storageNodes);
+        vm.warp(rewards.epochFinalityDeadline(1) + 1);
+        // Skipping ahead is rejected: epoch 0 must be sealed first.
+        vm.expectRevert(abi.encodeWithSelector(RewardDistributor.EpochSealOutOfOrder.selector, 1, 0));
+        rewards.sealEpoch(1, storageNodes);
+        rewards.sealEpoch(0, new address[](0));
+        rewards.sealEpoch(1, storageNodes);
         assertEq(rewards.nextSealableEpoch(), 2);
-        vm.expectRevert(abi.encodeWithSelector(RewardDistributor.EpochSealOutOfOrder.selector, 0, 2));
+        // And re-sealing an earlier epoch is rejected.
+        vm.expectRevert(abi.encodeWithSelector(RewardDistributor.EpochAlreadySealed.selector, 0));
         rewards.sealEpoch(0, storageNodes);
     }
 

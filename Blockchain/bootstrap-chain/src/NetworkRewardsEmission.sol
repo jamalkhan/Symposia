@@ -43,6 +43,10 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 /// - The schedule is indexed by epoch and assumes 24h epochs (365/year).
 ///   Changing `EPOCH_LENGTH` is a Tier 3 tokenomics change that must ship
 ///   with a matching emission contract.
+/// - Successors: a replacement emission contract (installed via a Tier 3
+///   SYMToken upgrade) must inherit this contract's *remaining* allowance,
+///   not a fresh 4B, and must refuse epochs this one already emitted
+///   (import `isEmitted`/`cumulativeMinted` as its starting watermark).
 /// - If the fee-share read or treasury draw reverts, the call reverts too
 ///   (OQ7). Silently treating it as zero would under-pay runners
 ///   permanently.

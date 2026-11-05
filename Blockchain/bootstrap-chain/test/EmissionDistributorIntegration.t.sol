@@ -36,6 +36,11 @@ contract EmissionDistributorIntegrationTest is CoreProtocolTestBase {
         }
     }
 
+    function test_EpochLengthMatchesEmissionSchedule() public view {
+        // The emission schedule assumes 24h epochs (365/year); wiring must match.
+        assertEq(cfg.getUint(ConfigKeys.EPOCH_LENGTH), 1 days);
+    }
+
     function test_EpochEndMatchesClock() public view {
         assertEq(rewards.epochEndTimestamp(0), genesisTimestamp + EPOCH_LENGTH);
         assertEq(rewards.epochFinalityDeadline(0), rewards.epochEndTimestamp(0) + 1 hours);

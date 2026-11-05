@@ -380,6 +380,8 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     // Epoch timing (same config keys and formula as RewardDistributor)
     // ---------------------------------------------------------------------
 
+    // TODO(#72): move epoch math into the epoch controller / a shared EpochMath library
+    // (duplicated in RewardDistributor.epochFinalityDeadline).
     function epochFinalityDeadline(uint256 epoch) public view returns (uint256) {
         IProtocolConfig cfg = config();
         return cfg.getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP) + (epoch + 1) * cfg.getUint(ConfigKeys.EPOCH_LENGTH)
