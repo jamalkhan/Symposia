@@ -1,0 +1,55 @@
+{
+  "structs": {
+    "Manifest": [
+      {
+        "type": "uint8[]",
+        "name": "pgMajorVersions"
+      },
+      {
+        "type": "uint32",
+        "name": "maxDatabases"
+      },
+      {
+        "type": "uint32",
+        "name": "maxVcpu"
+      },
+      {
+        "type": "uint64",
+        "name": "maxRamMB"
+      },
+      {
+        "type": "ComputeTierRegistry.ComputeTier",
+        "name": "tier"
+      },
+      {
+        "type": "bool",
+        "name": "hipaaEligible"
+      },
+      {
+        "type": "bool",
+        "name": "overSubscriptionAcknowledged"
+      },
+      {
+        "type": "uint64",
+        "name": "declaredAt"
+      }
+    ],
+    "ManifestStorage": [
+      {
+        "type": "mapping(address => Manifest)",
+        "name": "manifests"
+      },
+      {
+        "type": "mapping(address => string[])",
+        "name": "extensionsOf"
+      },
+      {
+        "type": "mapping(address => bool)",
+        "name": "declared"
+      }
+    ]
+  },
+  "locations": {
+    "MANIFEST_STORAGE_LOCATION": "keccak256(\"symposia.storage.ComputeNodeManifest\")"
+  }
+}

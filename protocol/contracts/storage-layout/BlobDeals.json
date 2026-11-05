@@ -1,0 +1,63 @@
+{
+  "structs": {
+    "DealRecord": [
+      {
+        "type": "bytes32",
+        "name": "cid"
+      },
+      {
+        "type": "uint256",
+        "name": "size"
+      },
+      {
+        "type": "bytes32",
+        "name": "region"
+      },
+      {
+        "type": "address[]",
+        "name": "replicas"
+      },
+      {
+        "type": "uint256",
+        "name": "startEpoch"
+      },
+      {
+        "type": "uint256",
+        "name": "termLength"
+      },
+      {
+        "type": "uint8",
+        "name": "tier"
+      },
+      {
+        "type": "PaymentStatus",
+        "name": "paymentStatus"
+      },
+      {
+        "type": "uint256",
+        "name": "paymentStatusChangedAt"
+      },
+      {
+        "type": "address",
+        "name": "tenant"
+      },
+      {
+        "type": "bool",
+        "name": "exists"
+      }
+    ],
+    "DealsStorage": [
+      {
+        "type": "mapping(bytes32 => DealRecord)",
+        "name": "deals"
+      },
+      {
+        "type": "mapping(address => uint256)",
+        "name": "creditBalance"
+      }
+    ]
+  },
+  "locations": {
+    "DEALS_STORAGE_LOCATION": "keccak256(\"symposia.storage.BlobDeals\")"
+  }
+}

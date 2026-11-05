@@ -1,0 +1,81 @@
+{
+  "structs": {
+    "Measured": [
+      {
+        "type": "uint256",
+        "name": "mips"
+      },
+      {
+        "type": "uint256",
+        "name": "ramBandwidthGBs"
+      },
+      {
+        "type": "uint256",
+        "name": "iopsRandomRead"
+      },
+      {
+        "type": "uint256",
+        "name": "peerRttMs"
+      }
+    ],
+    "BenchmarkAttestation": [
+      {
+        "type": "uint256",
+        "name": "epoch"
+      },
+      {
+        "type": "Measured",
+        "name": "measured"
+      },
+      {
+        "type": "uint16",
+        "name": "declaredCores"
+      },
+      {
+        "type": "uint32",
+        "name": "declaredRamGB"
+      },
+      {
+        "type": "uint16",
+        "name": "observedCores"
+      },
+      {
+        "type": "uint32",
+        "name": "observedRamGB"
+      },
+      {
+        "type": "address[]",
+        "name": "witnessSet"
+      },
+      {
+        "type": "ComputeTier",
+        "name": "resultTier"
+      },
+      {
+        "type": "bool",
+        "name": "hardwareMismatch"
+      },
+      {
+        "type": "uint256",
+        "name": "recordedAt"
+      }
+    ],
+    "ComputeTierStorage": [
+      {
+        "type": "mapping(address => ComputeTier)",
+        "name": "currentTier"
+      },
+      {
+        "type": "mapping(address => uint256)",
+        "name": "lastVerifiedEpoch"
+      },
+      {
+        "type": "mapping(address => bool)",
+        "name": "everClassified"
+      }
+    ]
+  },
+  "locations": {
+    "COMPUTE_TIER_STORAGE_LOCATION": "keccak256(\"symposia.storage.ComputeTierRegistry\")"
+  }
+}

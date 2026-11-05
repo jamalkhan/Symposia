@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jamalkhan/Symposia/protocol/schemas/node-services.schema.json",
+  "title": "Node services document (GET /v1/node/services)",
+  "description": "What a node serves beyond its registered endpoint (#135), with its protocol version and features (#145). Compatibility rules: docs/engineering/protocol-compatibility.md. Properties may be added, never removed, retyped or made required (#146).",
+  "type": "object",
+  "required": ["node"],
+  "properties": {
+    "node": { "type": "string", "description": "The node's registry address." },
+    "protocolVersion": { "type": "integer", "description": "Absent before #145: read as 0." },
+    "features": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Protocol features served (protocol/features.json). Unknown names are ignored." },
+    "storage": {
+      "type": ["object", "null"],
+      "properties": {
+        "grpc": { "type": ["string", "null"], "description": "Cleartext storage gRPC base URL; https:// on #142 pre-release hosts." },
+        "grpcTls": { "type": ["string", "null"], "description": "TLS storage gRPC base URL (#145)." },
+        "tlsFingerprint": { "type": ["string", "null"] },
+        "tlsProof": { "type": ["string", "null"] },
+        "tlsNotAfter": { "type": ["integer", "null"] }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+# Labels PRs that touch protocol surfaces (issue #146). pull_request_target so forks get the label;
+# it checks out nothing and runs no PR code, which is the labeler action's documented safe use.
+name: Label protocol changes
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5

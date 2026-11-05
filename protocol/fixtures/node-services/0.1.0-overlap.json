@@ -1,0 +1,12 @@
+{
+  "node": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "protocolVersion": 1,
+  "features": ["storage.grpc.plaintext", "storage.grpc.tls", "storage.rpc.auth.v1"],
+  "storage": {
+    "grpc": "http://10.0.0.213:6180",
+    "grpcTls": "https://10.0.0.213:6280",
+    "tlsFingerprint": "3f1c0e0a9a4b8c2d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
+    "tlsProof": "0x00",
+    "tlsNotAfter": 1820000000
+  }
+}

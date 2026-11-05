@@ -1,0 +1,51 @@
+{
+  "structs": {
+    "FoundationRecord": [
+      {
+        "type": "bool",
+        "name": "isFoundation"
+      },
+      {
+        "type": "bytes32",
+        "name": "region"
+      },
+      {
+        "type": "uint256",
+        "name": "stake"
+      },
+      {
+        "type": "uint256",
+        "name": "registeredAt"
+      },
+      {
+        "type": "uint256",
+        "name": "floorEndDate"
+      }
+    ],
+    "FoundationStorage": [
+      {
+        "type": "mapping(address => FoundationRecord)",
+        "name": "records"
+      },
+      {
+        "type": "mapping(bytes32 => uint256)",
+        "name": "regionCounts"
+      },
+      {
+        "type": "uint256",
+        "name": "totalFoundationNodes"
+      },
+      {
+        "type": "bool",
+        "name": "genesisUsed"
+      },
+      {
+        "type": "address[]",
+        "name": "foundationNodeList"
+      }
+    ]
+  },
+  "locations": {
+    "FOUNDATION_STORAGE_LOCATION": "keccak256(\"symposia.storage.FoundationRegistry\")"
+  }
+}

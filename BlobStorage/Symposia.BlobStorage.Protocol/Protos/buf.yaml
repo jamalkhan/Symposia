@@ -1,0 +1,9 @@
+# Storage node gRPC protocol (issue #146). `buf breaking` against the base branch and the latest
+# release tag runs in .github/workflows/protocol-compat.yml. Rules: docs/engineering/protocol-compatibility.md
+version: v2
+breaking:
+  use:
+    - WIRE_JSON
+lint:
+  use:
+    - MINIMAL

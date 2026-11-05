@@ -1,0 +1,72 @@
+# Protocol compatibility gate (issue #146): wire formats, JSON documents, the feature registry,
+# upgradeable contract storage and migrations may only change compatibly.
+# What each check catches and how to fix it: docs/engineering/protocol-compatibility.md#the-checks
+name: Protocol compatibility
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches: [dev, qa, stage, master, production]
+
+concurrency:
+  group: protocol-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compat:
+    name: Compatibility vs base
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Choose bases
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then base="origin/${{ github.base_ref }}"; else base="${{ github.event.before }}"; fi
+          git rev-parse -q --verify "$base^{commit}" >/dev/null || base="HEAD~1"
+          echo "ref=$base" >>"$GITHUB_OUTPUT"
+          tag=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+      - name: Against the base branch
+        env:
+          ALLOW_DESTRUCTIVE_MIGRATION: ${{ contains(github.event.pull_request.labels.*.name, 'migration-contract-approved') && '1' || '0' }}
+        run: tools/protocol-compat/run.sh "${{ steps.base.outputs.ref }}"
+      - name: Against the latest release (N-1)
+        if: steps.base.outputs.tag != ''
+        env:
+          ALLOW_DESTRUCTIVE_MIGRATION: ${{ contains(github.event.pull_request.labels.*.name, 'migration-contract-approved') && '1' || '0' }}
+        run: tools/protocol-compat/run.sh "${{ steps.base.outputs.tag }}" schema fixtures registry storage-layout
+
+  grpc:
+    name: gRPC breaking changes (buf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: buf breaking vs base branch
+        working-directory: BlobStorage/Symposia.BlobStorage.Protocol/Protos
+        run: |
+          base="${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}"
+          git rev-parse -q --verify "$base^{commit}" >/dev/null || base="HEAD~1"
+          if git cat-file -e "$base:BlobStorage/Symposia.BlobStorage.Protocol/Protos/buf.yaml" 2>/dev/null; then
+            buf breaking --against "$GITHUB_WORKSPACE/.git#ref=$base,subdir=BlobStorage/Symposia.BlobStorage.Protocol/Protos"
+          else
+            echo "::notice::No buf module at the base yet; comparing the protos file by file is skipped this once."
+          fi
+      - name: buf breaking vs latest release (N-1)
+        working-directory: BlobStorage/Symposia.BlobStorage.Protocol/Protos
+        run: |
+          tag=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$tag" ]; then echo "::notice::No release tag yet; nothing to compare against."; exit 0; fi
+          buf breaking --against "$GITHUB_WORKSPACE/.git#tag=$tag,subdir=BlobStorage/Symposia.BlobStorage.Protocol/Protos"

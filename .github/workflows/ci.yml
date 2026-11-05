@@ -1,0 +1,63 @@
+# Build and test everything on every PR and on pushes to the long-lived branches (issue #146).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, qa, stage, master, production]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    name: .NET tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - uses: foundry-rs/foundry-toolchain@v1   # anvil + forge for the Blockchain Gateway tests
+        with:
+          version: v1.7.1
+      - name: Install contract libraries
+        run: tools/install-contract-libs.sh
+      - name: BlobStorage
+        run: dotnet test BlobStorage/Symposia.BlobStorage.slnx
+      - name: Network
+        run: dotnet test Network/Symposia.Network.slnx
+      - name: Database
+        run: dotnet test Database/Symposia.Database.slnx
+      - name: Identity
+        run: dotnet test Identity/Symposia.Identity.slnx
+      - name: Blockchain Gateway
+        run: dotnet test Blockchain/Symposia.Blockchain.Gateway.Tests
+
+  contracts:
+    name: Contracts (forge test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Blockchain/bootstrap-chain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - run: ../../tools/install-contract-libs.sh
+      - run: forge test
+
+  compat-tool:
+    name: Compatibility tool tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tools/protocol-compat -v

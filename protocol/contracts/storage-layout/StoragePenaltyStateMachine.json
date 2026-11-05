@@ -1,0 +1,101 @@
+{
+  "structs": {
+    "StorageTelemetry": [
+      {
+        "type": "uint256",
+        "name": "heartbeatMisses"
+      },
+      {
+        "type": "uint256",
+        "name": "checksumErrorRateBps"
+      },
+      {
+        "type": "uint256",
+        "name": "ioDegradationBps"
+      },
+      {
+        "type": "bool",
+        "name": "porFailed"
+      },
+      {
+        "type": "bool",
+        "name": "porAuditPassed"
+      },
+      {
+        "type": "bool",
+        "name": "reported"
+      }
+    ],
+    "StoragePenaltyState": [
+      {
+        "type": "Stage",
+        "name": "stage"
+      },
+      {
+        "type": "uint256",
+        "name": "troubleEpochCount"
+      },
+      {
+        "type": "uint256",
+        "name": "cleanEpochStreak"
+      },
+      {
+        "type": "bool",
+        "name": "dealHoldActive"
+      },
+      {
+        "type": "uint8",
+        "name": "dealHoldCleanEpoch"
+      },
+      {
+        "type": "uint256",
+        "name": "stage3EpisodeId"
+      },
+      {
+        "type": "uint256",
+        "name": "stage3EntryStake"
+      },
+      {
+        "type": "uint256",
+        "name": "stage3CumulativeSlashedBps"
+      },
+      {
+        "type": "uint256",
+        "name": "stage4Base"
+      },
+      {
+        "type": "TriggerType",
+        "name": "lastTriggerType"
+      },
+      {
+        "type": "uint256",
+        "name": "lastEvaluatedEpoch"
+      },
+      {
+        "type": "bool",
+        "name": "everEvaluated"
+      }
+    ],
+    "StoragePenaltyStorage": [
+      {
+        "type": "mapping(address => StoragePenaltyState)",
+        "name": "states"
+      },
+      {
+        "type": "mapping(address => mapping(uint256 => StorageTelemetry))",
+        "name": "telemetry"
+      },
+      {
+        "type": "mapping(address => mapping(uint256 => bool))",
+        "name": "sealedEpoch"
+      },
+      {
+        "type": "mapping(address => mapping(uint256 => uint256))",
+        "name": "epochMultiplierBps"
+      }
+    ]
+  },
+  "locations": {
+    "STORAGE_PENALTY_STORAGE_LOCATION": "keccak256(\"symposia.storage.StoragePenaltyStateMachine\")"
+  }
+}
