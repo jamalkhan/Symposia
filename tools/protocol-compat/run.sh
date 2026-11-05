@@ -57,7 +57,8 @@ PY
       run "storage layout" tools/protocol-compat/storage-layout.sh --check "$BASE" ;;
     migrations)
       if [ "${ALLOW_DESTRUCTIVE_MIGRATION:-0}" = "1" ]; then echo "── migrations (skipped: migration-contract-approved)"; continue; fi
-      run "migrations" sh -c "git diff '$BASE'...HEAD -U0 | $COMPAT migrations" ;;
+      # From the merge base, so base-branch changes aren't counted, to the working tree, so it also works before committing.
+      run "migrations" sh -c "git diff \"\$(git merge-base '$BASE' HEAD)\" -U0 | $COMPAT migrations" ;;
     *) echo "::error::unknown check $check"; status=2 ;;
   esac
 done
