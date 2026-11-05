@@ -81,6 +81,23 @@ library ConfigKeys {
     bytes32 internal constant REWARD_RELIABILITY_BONUS_THRESHOLD_BPS = keccak256("reward.reliabilityBonusThresholdBps");
     bytes32 internal constant REWARD_RELIABILITY_BONUS_BPS = keccak256("reward.reliabilityBonusBps");
 
+    // --- ReliabilityRegistry (issue #79) ---
+    /// @notice Single address allowed to record challenge / timeout outcomes.
+    bytes32 internal constant RELIABILITY_CHALLENGER = keccak256("reliability.challenger");
+    /// @notice Single address allowed to finalize epochs (the RewardDistributor).
+    bytes32 internal constant RELIABILITY_FINALIZER = keccak256("reliability.finalizer");
+    bytes32 internal constant RELIABILITY_DELTA_POR_BPS = keccak256("reliability.delta.porBps");
+    bytes32 internal constant RELIABILITY_DELTA_PROBE_BPS = keccak256("reliability.delta.probeBps");
+    bytes32 internal constant RELIABILITY_DELTA_TIMEOUT_BPS = keccak256("reliability.delta.timeoutBps");
+    /// @notice Deficit added per full percentage point of missed heartbeats.
+    bytes32 internal constant RELIABILITY_DELTA_HEARTBEAT_BPS_PER_PCT = keccak256("reliability.delta.heartbeatBpsPerPct");
+    /// @notice Score recovered after each epoch with no degradation.
+    bytes32 internal constant RELIABILITY_RECOVERY_BPS = keccak256("reliability.recoveryBps");
+    /// @notice Consecutive at-or-above-threshold epochs required for the bonus (30).
+    bytes32 internal constant RELIABILITY_BONUS_WINDOW = keccak256("reliability.bonusWindow");
+    /// @notice ReliabilityRegistry address read by RewardDistributor (#80).
+    bytes32 internal constant REWARD_RELIABILITY_REGISTRY = keccak256("reward.reliabilityRegistry");
+
     // --- SlashingController ---
     bytes32 internal constant SLASHING_STAGE3_PCT_PER_EPOCH_BPS = keccak256("slashing.stage3.pctPerEpochBps");
     bytes32 internal constant SLASHING_STAGE3_CAP_BPS = keccak256("slashing.stage3.capBps");
