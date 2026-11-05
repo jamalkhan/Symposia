@@ -54,6 +54,11 @@ public static class BlobGatewayApp
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ReplicationMonitor>());
         builder.Services.AddHostedService<ReconcilePollerService>();
 
+        // Which storage nodes may be used, from the network's on-chain protocol activations (issue #145).
+        // With a static node source there is no chain to read, so nothing is required.
+        builder.Services.AddSingleton<NetworkPolicy>();
+        builder.Services.AddSingleton<INetworkPolicy>(sp => sp.GetRequiredService<NetworkPolicy>());
+
         // Where storage nodes come from (issues #135, #137): the on-chain registry, or static config.
         if (builder.Configuration.GetValue("Gateway:NodeSource", NodeSourceKind.Static) == NodeSourceKind.Registry)
         {
@@ -70,6 +75,9 @@ public static class BlobGatewayApp
             });
             builder.Services.AddHttpClient(RegistryNodeSource.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
             builder.Services.AddSingleton<IStorageNodeSource, RegistryNodeSource>();
+            builder.Services.AddHttpClient(ProtocolScheduleSyncService.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(5));
+            // Before NodeSourceSyncService, so the first node sync already applies the schedule.
+            builder.Services.AddHostedService<ProtocolScheduleSyncService>();
 
             // Sign storage RPCs with the host's node key (issue #140). The host's key already exists;
             // never generate one here, or the gateway would sign as an unregistered stranger.

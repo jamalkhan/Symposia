@@ -123,11 +123,35 @@ async function refreshNetwork() {
   catch (ex) { $('#network-error').hidden = false; $('#network-error').textContent = `Network unavailable (${ex.message}) — showing last known data.`; return; }
   $('#network-error').hidden = !s.error;
   $('#network-error').textContent = s.error || '';
-  $('#network-nodes').innerHTML = table(['Public IP address', 'Node hash', 'Storage', 'Compute', 'Gateway'], s.nodes.map((n) =>
+  $('#network-nodes').innerHTML = table(['Public IP address', 'Node hash', 'Protocol', 'Storage', 'Compute', 'Gateway'], s.nodes.map((n) =>
     `<tr><td class="mono">${esc(n.host)}</td><td class="mono" title="${esc(n.endpoint)}">${esc(n.node)}${n.self ? ' <b>(this node)</b>' : ''}` +
-    `${n.registered ? '' : `<br><span class="hint">${esc(n.notRegisteredReason)}</span>`}</td>` +
+    `${n.registered ? '' : `<br><span class="hint">${esc(n.notRegisteredReason)}</span>`}` +
+    `${(n.warnings || []).map((w) => `<br><span class="warn">${esc(w)}</span>`).join('')}</td>` +
+    `<td>${protocolCell(n.services)}</td>` +
     `<td>${light(n.storage, storageTip)}</td><td>${light(n.compute, computeTip)}</td>` +
     `<td>${light(n.gateway || { level: 'Off', detail: 'Not reported' }, gatewayTip)}</td></tr>`));
+  renderProtocol(s.protocol);
+}
+
+// Protocol version and features from the node's services document (#145).
+function protocolCell(svc) {
+  if (!svc) return '<span class="hint">—</span>';
+  const features = svc.features || [];
+  return `v${esc(svc.protocolVersion ?? 0)}<br><span class="hint mono">${features.length ? features.map(esc).join('<br>') : 'no features listed'}</span>`;
+}
+
+// The on-chain activation schedule with storage-node readiness (#145).
+function renderProtocol(p) {
+  const el = $('#network-protocol');
+  if (!p || !p.configured) { el.innerHTML = '<p class="hint">This network has no protocol activation contract; nothing is required.</p>'; return; }
+  const when = (t) => new Date(t * 1000).toLocaleString();
+  const min = p.minProtocolVersion || {};
+  const minText = `Minimum protocol version: v${esc(min.effective ?? 0)}` + (min.pending ? ` (v${esc(min.pending)} from ${esc(when(min.pendingAt))})` : '');
+  el.innerHTML = `<p>${minText}</p>` + (p.activations.length
+    ? table(['Feature', 'Required from', 'State', 'Storage nodes ready'], p.activations.map((a) =>
+      `<tr><td class="mono">${esc(a.name)}</td><td>${esc(when(a.activatesAt))}</td><td>${a.inEffect ? 'Active' : 'Scheduled'}</td>` +
+      `<td>${a.ready === a.total ? '' : '<span class="warn">'}${esc(a.ready)} of ${esc(a.total)}${a.ready === a.total ? '' : '</span>'}</td></tr>`))
+    : '<p class="hint">No activations scheduled.</p>');
 }
 
 // ---------- settings ----------

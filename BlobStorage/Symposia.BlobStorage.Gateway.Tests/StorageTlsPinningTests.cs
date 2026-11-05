@@ -17,14 +17,26 @@ public sealed class StorageTlsPinningTests : IDisposable
     private const string Registry = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "sym142g-" + Guid.NewGuid().ToString("N"));
 
-    private IOptions<GatewayOptions> Options(bool requireTls = true) => Microsoft.Extensions.Options.Options.Create(new GatewayOptions
+    private IOptions<GatewayOptions> Options() => Microsoft.Extensions.Options.Options.Create(new GatewayOptions
     {
         MetadataDbPath = Path.Combine(_dir, "meta.db"),
         ProbeIntervalSeconds = 3600,
         ChainId = Chain,
         NodeRegistryAddress = Registry,
-        RequireStorageTls = requireTls,
     });
+
+    /// <summary>A policy with <c>storage.grpc.tls</c> activated on chain (#145), or with nothing activated.</summary>
+    private NetworkPolicy Policy(bool tlsActive)
+    {
+        var policy = new NetworkPolicy(Options(), NullLogger<NetworkPolicy>.Instance);
+        if (tlsActive)
+        {
+            policy.Apply(new ProtocolSchedule(true, 0, new ProtocolSchedule.MinVersion(0, 0, 0),
+                [new ProtocolSchedule.Activation(ProtocolFeatures.StorageGrpcTls, DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeSeconds())]));
+        }
+
+        return policy;
+    }
 
     [Fact]
     public void PinMatches_OnlyTheExactCertificate()
@@ -40,7 +52,7 @@ public sealed class StorageTlsPinningTests : IDisposable
     }
 
     [Fact]
-    public async Task Source_PinsVouchedCertificates_SkipsBadProofsAndCleartextWhenTlsRequired()
+    public async Task Source_PinsVouchedCertificates_SkipsBadProofs_AndCleartextOnceTlsIsActivated()
     {
         var good = EthECKey.GenerateKey();
         var forger = EthECKey.GenerateKey();
@@ -65,30 +77,46 @@ public sealed class StorageTlsPinningTests : IDisposable
             ["http://10.0.0.3:5180"] = new(plain.GetPublicAddress(), new("http://10.0.0.3:6180")),
         };
 
-        var required = await new RegistryNodeSource(registry, new Docs(docs), Options(), NullLogger<RegistryNodeSource>.Instance).DiscoverAsync(CancellationToken.None);
-        var node = Assert.Single(required);
+        var required = await new RegistryNodeSource(registry, new Docs(docs), Policy(tlsActive: true), Options(), NullLogger<RegistryNodeSource>.Instance).DiscoverAsync(CancellationToken.None);
+        var node = Assert.Single(required, d => d.RefusedBecause is null);
         Assert.Equal((good.GetPublicAddress(), fpHex), (node.Id, node.TlsFingerprint));
+        Assert.Equal(3, required.Count(d => d.RefusedBecause is not null)); // reported, so the registry drops them at once
 
-        var optional = await new RegistryNodeSource(registry, new Docs(docs), Options(requireTls: false), NullLogger<RegistryNodeSource>.Instance).DiscoverAsync(CancellationToken.None);
-        Assert.Equal(2, optional.Count);
+        // Before activation the cleartext-only node is still used; bad proofs are refused either way.
+        var optional = await new RegistryNodeSource(registry, new Docs(docs), Policy(tlsActive: false), Options(), NullLogger<RegistryNodeSource>.Instance).DiscoverAsync(CancellationToken.None);
+        Assert.Equal(2, optional.Count(d => d.RefusedBecause is null));
     }
 
     [Fact]
-    public void Sync_RefusesCleartextWhenTlsIsRequired_FromAnySource()
+    public void Sync_RefusesCleartextOnceTlsIsActivated_FromAnySource()
     {
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
-        using var nodes = new NodeRegistry(Options(requireTls: true), store, NullLogger<NodeRegistry>.Instance);
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, policy: Policy(tlsActive: true));
         nodes.Sync([new StorageNodeDescriptor("http://static:6180", "http://static:6180")]);
+        Assert.Empty(nodes.All);
+    }
+
+    // #145 AC4: a node the policy refuses stops being used on that sync, not after the grace period.
+    [Fact]
+    public void Sync_DropsARefusedNodeImmediately()
+    {
+        var store = new GatewayMetadataStore(Options());
+        store.Initialize();
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, policy: Policy(tlsActive: false));
+        nodes.Sync([new StorageNodeDescriptor("0xA", "https://10.0.0.1:6280", "aa")]);
+
+        nodes.Sync([StorageNodeDescriptor.Refused("0xA", "it lacks required protocol feature(s) storage.x")]);
+
         Assert.Empty(nodes.All);
     }
 
     [Fact]
     public void Sync_NeverDowngradesANodeOnceSeenWithTls()
     {
-        var store = new GatewayMetadataStore(Options(requireTls: false));
+        var store = new GatewayMetadataStore(Options());
         store.Initialize();
-        using var nodes = new NodeRegistry(Options(requireTls: false), store, NullLogger<NodeRegistry>.Instance);
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, policy: Policy(tlsActive: false));
         nodes.Sync([new StorageNodeDescriptor("0xA", "https://10.0.0.1:6180", "aa")]);
 
         nodes.Sync([new StorageNodeDescriptor("0xA", "http://10.0.0.1:6180")]); // e.g. a rewritten services document

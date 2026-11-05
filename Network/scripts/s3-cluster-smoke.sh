@@ -14,8 +14,13 @@
 #           trailing checksums round-trip byte for byte
 #   #5      multipart: the default aws s3 cp of a 20 MB file (multipart above 8 MB) over HTTP and
 #           HTTPS round-trips, lands on both nodes, and leaves no open uploads
+#   #145    storage nodes advertise protocol version + features; the Network tab reports readiness
+#           for a scheduled activation; once a storage feature no node has is activated on chain,
+#           the gateway stops using the nodes
 #
 # Usage: Network/scripts/s3-cluster-smoke.sh [work-dir]   (OFFSET_A / OFFSET_B env to change ports)
+# Mixed versions (#146): HOST_A_BIN / HOST_B_BIN point either host at another Node Host build (e.g.
+# the previous release's), so the same checks run across N and N-1. Default: this checkout's build.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -31,8 +36,12 @@ fail() { echo "FAIL: $*"; echo "logs in $WORK"; exit 1; }
 
 dotnet build "$ROOT/Network/Symposia.NodeHost" -v q -nologo >/dev/null
 BIN="$ROOT/Network/Symposia.NodeHost/bin/Debug/net9.0/Symposia.NodeHost"
-start_a() { (cd "$ROOT" && exec "$BIN" --data-dir "$WORK/a" --port-offset $A) >>"$WORK/a.log" 2>&1 & PID_A=$!; }
-start_b() { (cd "$ROOT" && exec "$BIN" --data-dir "$WORK/b" --port-offset $B) >>"$WORK/b.log" 2>&1 & PID_B=$!; }
+BIN_A="${HOST_A_BIN:-$BIN}" BIN_B="${HOST_B_BIN:-$BIN}"
+echo "host A: $BIN_A"; echo "host B: $BIN_B"
+CAST="${CAST:-$(command -v cast || echo "$HOME/.foundry/bin/cast")}"
+ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80  # anvil default account #0 (LocalDev owner)
+start_a() { (cd "$ROOT" && exec "$BIN_A" --data-dir "$WORK/a" --port-offset $A) >>"$WORK/a.log" 2>&1 & PID_A=$!; }
+start_b() { (cd "$ROOT" && exec "$BIN_B" --data-dir "$WORK/b" --port-offset $B) >>"$WORK/b.log" 2>&1 & PID_B=$!; }
 wait_for() { for _ in $(seq 1 60); do curl -sf "$1" >/dev/null && return 0; sleep 0.5; done; fail "timed out waiting for $1"; }
 
 configure() { # ui-port jar python-mutation [extra-json]
@@ -108,19 +117,52 @@ aws --endpoint-url http://127.0.0.1:$S3_A s3 ls s3://proof >/dev/null 2>&1 \
   || fail "AC5: wrong secret was not rejected with 403"
 echo "PASS AC5: wrong secret rejected"
 
-# #142: the storage gRPC port speaks TLS only; cleartext h2c gets no gRPC answer.
-GRPC_B=$((6180 + B))
-plain=$(printf '\x00\x00\x00\x00\x00' | curl -s --max-time 5 --http2-prior-knowledge -o /dev/null -w '%{http_code}' -X POST \
-  -H 'content-type: application/grpc' --data-binary @- http://127.0.0.1:$GRPC_B/symposia.blobstorage.v1.StorageNode/Probe || true)
-[ "$plain" = "000" ] || fail "#142: cleartext h2c to the storage gRPC port answered ($plain); expected TLS only"
-echo "PASS #142: storage gRPC port refuses cleartext"
+# #142/#145: what host B serves depends on its build; read its services document.
+SVC_B=$(curl -sf http://127.0.0.1:$((5180 + B))/v1/node/services)
+feature() { python3 -c "import json,sys; print('yes' if '$1' in (json.loads(sys.argv[1]).get('features') or []) else 'no')" "$SVC_B"; }
+storage_url() { python3 -c "import json,sys; s=json.loads(sys.argv[1]).get('storage') or {}; u=s.get('$1'); print(u or '')" "$SVC_B"; }
+probe_status() { # url -> grpc-status of an unsigned, empty Probe
+  printf '\x00\x00\x00\x00\x00' | curl -sk --max-time 5 ${2:-} -o /dev/null -D - -X POST \
+    -H 'content-type: application/grpc' -H 'te: trailers' --data-binary @- \
+    "$1/symposia.blobstorage.v1.StorageNode/Probe" | tr -d '\r' | awk -F': ' 'tolower($1)=="grpc-status"{print $2}'
+}
+TLS_URL=$(storage_url grpcTls); [ -n "$TLS_URL" ] || { u=$(storage_url grpc); case "$u" in https://*) TLS_URL=$u;; esac; }
+PLAIN_URL=$(storage_url grpc); case "$PLAIN_URL" in https://*) PLAIN_URL="";; esac
+if [ -n "$TLS_URL" ]; then
+  # #142: the TLS port speaks TLS only.
+  tls_port=${TLS_URL##*:}
+  plain=$(printf '\x00\x00\x00\x00\x00' | curl -s --max-time 5 --http2-prior-knowledge -o /dev/null -w '%{http_code}' -X POST \
+    -H 'content-type: application/grpc' --data-binary @- http://127.0.0.1:$tls_port/symposia.blobstorage.v1.StorageNode/Probe || true)
+  [ "$plain" = "000" ] || fail "#142: cleartext h2c to the TLS gRPC port answered ($plain)"
+  [ "$(probe_status "$TLS_URL" --http2)" = "16" ] || fail "#140: unsigned gRPC call over TLS was not refused with Unauthenticated"
+  grep -rq "Added storage node .* at https://" "$WORK/a/logs" 2>/dev/null || grep -q "Added storage node .* at https://" "$WORK/a.log" \
+    || fail "#145: the gateway did not connect to a storage node over TLS"
+  echo "PASS #142/#140: TLS gRPC port refuses cleartext and unsigned calls; the gateway uses pinned TLS"
+fi
+if [ -n "$PLAIN_URL" ]; then
+  # #145 overlap: the cleartext port (for the previous release's gateways) enforces caller auth too.
+  [ "$(feature storage.grpc.plaintext)" = "yes" ] || [ "$(feature storage.grpc.tls)" = "no" ] || fail "#145: cleartext served but not advertised"
+  [ "$(probe_status "$PLAIN_URL" --http2-prior-knowledge)" = "16" ] || fail "#140: unsigned gRPC call in cleartext was not refused"
+  echo "PASS #145: cleartext overlap port serves gRPC and refuses unsigned calls"
+fi
 
-# #140: over TLS, storage gRPC still only answers registered, signed callers. An empty Probe without a token:
-status=$(printf '\x00\x00\x00\x00\x00' | curl -sk --http2 -o /dev/null -D - -X POST \
-  -H 'content-type: application/grpc' -H 'te: trailers' --data-binary @- \
-  https://127.0.0.1:$GRPC_B/symposia.blobstorage.v1.StorageNode/Probe | tr -d '\r' | awk -F': ' 'tolower($1)=="grpc-status"{print $2}')
-[ "$status" = "16" ] || fail "#140: unsigned gRPC call to storage node returned grpc-status '$status', expected 16 (Unauthenticated)"
-echo "PASS #140: unsigned storage gRPC call refused"
+# #145: activations come from the chain; the Network tab reports readiness ahead of one.
+NET=$(curl -sf http://127.0.0.1:$GW_A/v1/network)
+PA=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('protocolActivationsAddress') or '')" "$NET")
+RPC_A="http://127.0.0.1:$((8545 + A))"
+if [ -n "$PA" ] && [ -x "$CAST" ]; then
+  chain_now() { curl -sf http://127.0.0.1:$GW_A/v1/protocol | python3 -c "import json,sys; print(json.load(sys.stdin)['now'])"; }
+  schedule() { "$CAST" send --rpc-url "$RPC_A" --private-key $ANVIL_KEY "$PA" 'schedule(string,uint64)' "$1" "$2" >/dev/null || fail "#145: could not schedule $1"; }
+  schedule storage.grpc.tls $(( $(chain_now) + 86400 ))
+  ready=$(curl -sf -b "$WORK/a.jar" http://127.0.0.1:$UI_A/api/network | python3 -c "
+import json,sys; p=json.load(sys.stdin)['protocol']; a=[x for x in p['activations'] if x['name']=='storage.grpc.tls']
+print(f\"{a[0]['ready']}/{a[0]['total']}\" if a else 'missing')")
+  expected_ready=$([ "$(feature storage.grpc.tls)" = "yes" ] && echo "2/2" || echo "1/2")
+  [ "$ready" = "$expected_ready" ] || fail "#145: Network tab readiness for storage.grpc.tls is '$ready', expected $expected_ready"
+  echo "PASS #145: Network tab shows storage.grpc.tls scheduled with $ready storage nodes ready"
+else
+  echo "SKIP #145 activation checks: host A's network has no ProtocolActivations contract (older build) or cast is missing"
+fi
 
 kill -TERM $PID_B; wait $PID_B 2>/dev/null || true; PID_B=""
 $S3 cp "s3://proof/dir one/ünï/medium.bin" "$WORK/medium.back2" >/dev/null || fail "AC3: download failed with node B down"
@@ -148,5 +190,25 @@ took=$(( $(date +%s) - began ))
 grep -q -E '503|ServiceUnavailable|SlowDown' "$WORK/ac6.out" || { cat "$WORK/ac6.out"; fail "AC6: expected a 503-class error"; }
 [ "$took" -le 30 ] || fail "AC6: failure took ${took}s (> 30s)"
 echo "PASS AC6: no storage nodes -> 503 in ${took}s"
+
+# #145 cutover: activating a storage feature no node advertises makes the gateway stop using them
+# (last, because activations are permanent on this chain).
+if [ -n "$PA" ] && [ -x "$CAST" ]; then
+  configure $UI_A "$WORK/a.jar" "s['storage']['enabled']=True"
+  for _ in $(seq 1 60); do read -r healthy _ < <(gateway_status || echo "0 0"); [ "$healthy" -ge 1 ] && break; sleep 1; done
+  [ "$healthy" -ge 1 ] || fail "#145: gateway did not pick storage node A back up"
+  # The restarted storage role may be counted before it accepts writes; give it a moment.
+  ok=""; for _ in $(seq 1 30); do $S3 cp "$WORK/small.bin" s3://proof/before-cutover.bin >/dev/null 2>&1 && { ok=1; break; }; sleep 1; done
+  [ -n "$ok" ] || fail "#145: upload before cutover failed"
+  schedule storage.smoke.unready $(( $(date +%s) + 5 ))  # anvil stamps the next block with wall-clock time; its latest block may be older
+  refused=""
+  for _ in $(seq 1 60); do
+    grep -rqs "lacks required protocol feature(s) storage.smoke.unready" "$WORK/a" "$WORK/a.log" && { refused=1; break; }; sleep 1
+  done
+  [ -n "$refused" ] || fail "#145: gateway kept using a node after a feature it lacks was activated"
+  if $S3 cp "$WORK/small.bin" s3://proof/after-cutover.bin >"$WORK/cutover.out" 2>&1; then fail "#145: upload succeeded on a refused node"; fi
+  grep -q -E '503|ServiceUnavailable|SlowDown' "$WORK/cutover.out" || { cat "$WORK/cutover.out"; fail "#145: expected a 503-class error after cutover"; }
+  echo "PASS #145: once storage.smoke.unready is activated the gateway drops nodes lacking it (uploads 503)"
+fi
 
 echo "PASS: S3 cluster smoke"

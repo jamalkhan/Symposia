@@ -2,9 +2,16 @@ namespace Symposia.BlobStorage.Gateway.Nodes;
 
 /// <summary>
 /// A storage node as a source describes it: stable identity, where to reach it now, and (for TLS,
-/// #142) the certificate fingerprint to pin.
+/// #142) the certificate fingerprint to pin. A node the network policy refuses (#145) is reported
+/// with <see cref="RefusedBecause"/> so the registry drops it at once instead of waiting out the
+/// grace period it gives nodes that merely went missing.
 /// </summary>
-public sealed record StorageNodeDescriptor(string Id, string Url, string? TlsFingerprint = null);
+public sealed record StorageNodeDescriptor(string Id, string Url, string? TlsFingerprint = null)
+{
+    public string? RefusedBecause { get; init; }
+
+    public static StorageNodeDescriptor Refused(string id, string reason) => new(id, "") { RefusedBecause = reason };
+}
 
 /// <summary>
 /// Where the gateway's storage nodes come from (issue #137). <see cref="NodeSourceSyncService"/>

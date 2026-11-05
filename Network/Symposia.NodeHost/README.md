@@ -67,13 +67,13 @@ $S3 s3 cp s3://proof/file.bin ./back.bin
 
 **Gateway to storage nodes:** the gateway signs every storage call with this host's node key, and storage nodes accept calls only from registered members of the network (#140). The host running the gateway must therefore be registered, which means Storage or Compute is on.
 
-**Encryption between gateway and storage nodes:** storage calls use TLS (#142). Each storage node creates its own certificate (`grpc-tls.pfx` in its storage data folder, owner-only, renewed automatically before it expires) and signs the certificate's fingerprint with its node key. The gateway accepts only a certificate vouched for by that node's on-chain address, and never sends data in cleartext.
+**Encryption between gateway and storage nodes:** storage calls use TLS (#142) on the gRPC TLS port (`6280+`). Each storage node creates its own certificate (`grpc-tls.pfx` in its storage data folder, owner-only, renewed automatically before it expires) and signs the certificate's fingerprint with its node key. The gateway accepts only a certificate vouched for by that node's on-chain address, prefers TLS whenever a node offers it, and never falls back to cleartext for a node it has seen with TLS.
 
-**Upgrading:** upgrade all hosts together. A gateway on this version won't use storage nodes that don't serve TLS, and older gateways can't use storage nodes that do.
+**Upgrading:** hosts can be upgraded one at a time (#145). Each release works with the one before it: during the overlap a storage node also serves cleartext gRPC on `6180+` (Settings → *Also serve gRPC in cleartext*) for gateways that don't speak TLS yet. A breaking requirement such as TLS-only takes effect for the whole network at a time scheduled on chain in the ProtocolActivations contract; the Network tab shows upcoming activations and which nodes aren't ready. Once `storage.grpc.tls` is active, turn cleartext off. See [docs/engineering/protocol-compatibility.md](../../docs/engineering/protocol-compatibility.md).
 
 Diagnostics shows how many storage nodes the gateway can reach and how many objects are waiting for their second copy. The Network tab shows a Gateway light for each node.
 
-**Public endpoint:** [`docs/ops/traefik/symposia.yml`](../../docs/ops/traefik/symposia.yml) is the Traefik route for `https://symposia.chateaukhan.com`. Only the gateway port (9000) needs to be reachable from Traefik. Keep the storage ports, including the gRPC ports `6180+`, LAN-only.
+**Public endpoint:** [`docs/ops/traefik/symposia.yml`](../../docs/ops/traefik/symposia.yml) is the Traefik route for `https://symposia.chateaukhan.com`. Only the gateway port (9000) needs to be reachable from Traefik. Keep the storage ports, including the gRPC ports `6180+` and `6280+`, LAN-only.
 
 To run a two-node S3 check automatically: `Network/scripts/s3-cluster-smoke.sh`.
 
@@ -82,7 +82,7 @@ To run a two-node S3 check automatically: `Network/scripts/s3-cluster-smoke.sh`.
 | Option | Default | |
 |---|---|---|
 | `--data-dir DIR` | `~/.symposia/node` | Holds the identity key, settings, secrets, chain state and role data |
-| `--port-offset N` | `0` | Adds N to every default port (UI 5170, gateway 8080, anvil 8545, storage 5180, storage gRPC 6180, compute 5190, blob gateway 9000) |
+| `--port-offset N` | `0` | Adds N to every default port (UI 5170, gateway 8080, anvil 8545, storage 5180, storage gRPC 6180 (cleartext) and 6280 (TLS), compute 5190, blob gateway 9000) |
 | `--ui-port P` | `5170 + offset` | |
 
 Any setting can be fixed with an environment variable, for example `SYMPOSIA__Storage__Enabled=true` or `SYMPOSIA__Network__Mode=Join`. Settings fixed this way are shown as locked in the UI.

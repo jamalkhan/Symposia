@@ -8,11 +8,13 @@ namespace Symposia.BlobStorage.Gateway.Nodes;
 /// Storage nodes from the on-chain NodeRegistry (issues #135, #137): lists registered nodes through
 /// the Blockchain Gateway and asks each where its storage gRPC API lives
 /// (<see cref="NodeServices.Path"/>). A node's identity is its registry address. Nodes without a
-/// storage service (compute-only) are skipped; identity is verified later by the Probe NodeId check.
+/// storage service (compute-only) are skipped, and <see cref="INetworkPolicy"/> decides whether and how
+/// each of the rest is used (#145); identity is verified later by the Probe NodeId check.
 /// </summary>
 public sealed class RegistryNodeSource(
     INodeRegistryClient registry,
     IHttpClientFactory httpFactory,
+    INetworkPolicy policy,
     IOptions<GatewayOptions> options,
     ILogger<RegistryNodeSource> logger) : IStorageNodeSource
 {
@@ -33,12 +35,13 @@ public sealed class RegistryNodeSource(
             {
                 lock (found)
                 {
-                    found[descriptor.Url] = descriptor;
+                    found[descriptor.RefusedBecause is null ? descriptor.Url : "refused:" + descriptor.Id] = descriptor;
                 }
             }
         });
 
-        logger.LogDebug("Registry sync: {Storage} storage node(s) of {Count} registered.", found.Count, members.Count);
+        logger.LogDebug("Registry sync: {Storage} usable storage node(s) of {Count} registered.",
+            found.Values.Count(d => d.RefusedBecause is null), members.Count);
         return found.Values.ToList();
     }
 
@@ -64,7 +67,7 @@ public sealed class RegistryNodeSource(
                 return null;
             }
 
-            if (services.Storage?.Grpc is not { Length: > 0 } grpc)
+            if (services.Storage is null)
             {
                 logger.LogDebug("Skipping node {Node}: it offers no storage service.", member.Node);
                 return null;
@@ -72,36 +75,27 @@ public sealed class RegistryNodeSource(
 
             // TC-60: a node on another machine advertising loopback is unreachable from here; the
             // operator needs to set its advertised endpoint to a LAN address.
+            var grpc = services.Storage.TlsUrl ?? services.Storage.PlaintextUrl;
             if (Uri.TryCreate(grpc, UriKind.Absolute, out var grpcUri) && grpcUri.IsLoopback && !IsLocal(endpoint))
             {
                 logger.LogWarning("Node {Node} advertises loopback storage address {Grpc}; if it runs on another machine, set its advertised endpoint to a LAN address.",
                     member.Node, grpc);
             }
 
-            // TLS (#142): pin only a fingerprint the node's registry key vouches for; refuse cleartext if required.
-            var o = options.Value;
-            if (grpc.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            // Network policy (#145): required features, minimum version, transport and TLS pinning.
+            var admitted = policy.AdmitStorageNode(member.Node, services);
+            foreach (var warning in admitted.Warnings)
             {
-                var fingerprint = services.Storage.TlsFingerprint;
-                var invalid = StorageTlsProof.Validate(o.ChainId, o.NodeRegistryAddress, member.Node, fingerprint,
-                    services.Storage.TlsNotAfter, services.Storage.TlsProof, DateTimeOffset.UtcNow);
-                if (invalid is not null)
-                {
-                    logger.LogWarning("Node {Node} offers TLS storage but {Reason}; not using it.", member.Node, invalid);
-                    return null;
-                }
-
-                return new StorageNodeDescriptor(member.Node, grpc, fingerprint!.ToLowerInvariant());
+                logger.LogWarning("Storage node {Node}: {Warning}. Upgrade that host before then.", member.Node, warning);
             }
 
-            if (o.RequireStorageTls)
+            if (admitted.Node is null)
             {
-                logger.LogError("Node {Node} offers only cleartext storage gRPC ({Grpc}) and TLS is required; not using it. Upgrade that host.",
-                    member.Node, grpc);
-                return null;
+                logger.LogError("Not using storage node {Node}: {Reason}.", member.Node, admitted.RefusedBecause);
+                return StorageNodeDescriptor.Refused(member.Node, admitted.RefusedBecause!);
             }
 
-            return new StorageNodeDescriptor(member.Node, grpc);
+            return admitted.Node;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
         {

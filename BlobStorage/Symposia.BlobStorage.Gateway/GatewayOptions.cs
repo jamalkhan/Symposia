@@ -99,13 +99,6 @@ public sealed class GatewayOptions
 
     public ulong ChainId { get; set; }
 
-    /// <summary>
-    /// Use only storage nodes that serve gRPC over pinned TLS (#142); cleartext nodes are skipped. On by
-    /// default (#142 review): object bytes and RPC tokens must never cross the network in the clear.
-    /// Turn off only for local development and tests against h2c nodes.
-    /// </summary>
-    public bool RequireStorageTls { get; set; } = true;
-
     public string NodeRegistryAddress { get; set; } = "";
 
     /// <summary>How often the registry is re-read for storage nodes (seconds).</summary>

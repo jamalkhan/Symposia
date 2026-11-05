@@ -261,7 +261,11 @@ public static class UiApp
 
         if (s.Storage.Enabled)
         {
-            ports.Add(("storage gRPC", s.Storage.GrpcPort));
+            ports.Add(("storage gRPC (TLS)", s.Storage.GrpcTlsPort));
+            if (s.Storage.PlaintextGrpc)
+            {
+                ports.Add(("storage gRPC", s.Storage.GrpcPort));
+            }
         }
 
         if (s.BlobGateway.Enabled)

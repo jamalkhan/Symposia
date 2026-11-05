@@ -27,6 +27,7 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
     public string RpcUrl => $"http://127.0.0.1:{_port}";
     public string NodeRegistryAddress { get; private set; } = "";
     public string EpochRootRegistryAddress { get; private set; } = "";
+    public string ProtocolActivationsAddress { get; private set; } = "";
     public string RelayerPrivateKey => DeployerPrivateKey;
 
     private static string BootstrapChainDir()
@@ -90,6 +91,7 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
 
         NodeRegistryAddress = ExtractAddress(stdout, "NodeRegistry");
         EpochRootRegistryAddress = ExtractAddress(stdout, "EpochRootRegistry");
+        ProtocolActivationsAddress = ExtractAddress(stdout, "ProtocolActivations");
     }
 
     private static string ExtractAddress(string output, string label)
@@ -135,6 +137,7 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
                 ["Gateway:RpcUrl"] = RpcUrl,
                 ["Gateway:NodeRegistryAddress"] = NodeRegistryAddress,
                 ["Gateway:EpochRootRegistryAddress"] = EpochRootRegistryAddress,
+                ["Gateway:ProtocolActivationsAddress"] = ProtocolActivationsAddress,
                 ["Gateway:RelayerPrivateKey"] = RelayerPrivateKey,
             });
         });

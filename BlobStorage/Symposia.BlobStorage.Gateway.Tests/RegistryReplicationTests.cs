@@ -22,7 +22,6 @@ public sealed class RegistryReplicationTests : IDisposable
         MetadataDbPath = Path.Combine(_dir, "meta.db"),
         MinCopiesPerObject = minCopies,
         ProbeIntervalSeconds = 3600,
-        RequireStorageTls = false, // replica bookkeeping tests use cleartext test nodes; TLS policy is tested in StorageTlsPinningTests
     });
 
     private static ObjectRecord Record(string bucket, string key, params string[] nodes) =>
@@ -138,7 +137,7 @@ public sealed class RegistryReplicationTests : IDisposable
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
         using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
-        var source = new RegistryNodeSource(registry, http, Options(), NullLogger<RegistryNodeSource>.Instance);
+        var source = new RegistryNodeSource(registry, http, new NetworkPolicy(Options(), NullLogger<NetworkPolicy>.Instance), Options(), NullLogger<RegistryNodeSource>.Instance);
 
         nodes.Sync(await source.DiscoverAsync(CancellationToken.None));
 

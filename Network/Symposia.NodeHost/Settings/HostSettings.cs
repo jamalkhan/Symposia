@@ -39,7 +39,7 @@ public sealed class HostSettings
             GatewayPort = 8080 + portOffset,
             GatewayUrl = "http://127.0.0.1:8080",
         },
-        Storage = new StorageSettings { Port = 5180 + portOffset, GrpcPort = 6180 + portOffset },
+        Storage = new StorageSettings { Port = 5180 + portOffset, GrpcPort = 6180 + portOffset, GrpcTlsPort = 6280 + portOffset },
         Compute = new ComputeSettings { Port = 5190 + portOffset },
         BlobGateway = new BlobGatewaySettings { Port = 9000 + portOffset },
     };
@@ -54,6 +54,11 @@ public sealed class HostSettings
         if (Storage.GrpcPort == 0)
         {
             Storage.GrpcPort = defaults.Storage.GrpcPort;
+        }
+
+        if (Storage.GrpcTlsPort == 0)
+        {
+            Storage.GrpcTlsPort = defaults.Storage.GrpcTlsPort;
         }
 
         if (BlobGateway.Port == 0)
@@ -102,8 +107,17 @@ public sealed class StorageSettings
 
     public long MaxCapacityBytes { get; set; } = 10L * 1024 * 1024 * 1024;
 
-    /// <summary>HTTP/2-only port for the storage gRPC API the blob gateway uses (issue #135).</summary>
+    /// <summary>HTTP/2-only cleartext port for the storage gRPC API (issue #135); served while <see cref="PlaintextGrpc"/> is on.</summary>
     public int GrpcPort { get; set; }
+
+    /// <summary>Port for the storage gRPC API over TLS, which gateways prefer and pin (issues #142, #145).</summary>
+    public int GrpcTlsPort { get; set; }
+
+    /// <summary>
+    /// Also serve storage gRPC in cleartext, so blob gateways from the previous release can still reach
+    /// this node (the #145 overlap). Turn off once <c>storage.grpc.tls</c> is activated on chain.
+    /// </summary>
+    public bool PlaintextGrpc { get; set; } = true;
 }
 
 /// <summary>

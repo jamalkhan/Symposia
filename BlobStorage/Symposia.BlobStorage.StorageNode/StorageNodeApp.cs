@@ -17,39 +17,46 @@ public static class StorageNodeApp
         var builder = WebApplication.CreateBuilder(options);
         configure?.Invoke(builder);
 
-        // Production deployments terminate TLS 1.3 in front of this (Requirements/Platform/security.md#encryption-in-transit).
-        // With GrpcPort set, plain HTTP (handshake, health, services) and gRPC get separate listeners,
-        // because cleartext HTTP/2 isn't negotiated on a mixed HTTP/1.1+2 listener (issue #135).
+        // With a dedicated gRPC port, plain HTTP (handshake, health, services) and gRPC get separate
+        // listeners, because cleartext HTTP/2 isn't negotiated on a mixed HTTP/1.1+2 listener (issue #135).
+        // gRPC is served over TLS (#142) and, during the overlap with the previous release, also in
+        // cleartext (#145); each is advertised as a protocol feature.
         // Listener settings are needed before the container exists, so bind the options once here (#142 review).
         var nodeOptions = builder.Configuration.GetSection("StorageNode").Get<StorageNodeOptions>() ?? new StorageNodeOptions();
         var listenPort = nodeOptions.ListenPort;
         var grpcPort = nodeOptions.GrpcPort;
-        // TLS on the gRPC port (issue #142): a self-signed certificate bound to the node key by a proof
-        // in /v1/node/services, which gateways pin. It needs the node identity, so Kestrel reads it lazily.
-        var grpcTls = nodeOptions.GrpcTls;
-        if (grpcTls && grpcPort <= 0)
+        // TLS (issue #142): a self-signed certificate bound to the node key by a proof in
+        // /v1/node/services, which gateways pin. It needs the node identity, so Kestrel reads it lazily.
+        var grpcTlsPort = nodeOptions.GrpcTlsPort;
+        var grpcTls = grpcTlsPort > 0;
+        var dedicatedGrpc = grpcPort > 0 || grpcTls;
+        if (grpcTls && grpcTlsPort == grpcPort)
         {
-            throw new InvalidOperationException("StorageNode:GrpcTls requires a dedicated StorageNode:GrpcPort; refusing to serve storage gRPC in cleartext.");
+            throw new InvalidOperationException("StorageNode:GrpcTlsPort must differ from StorageNode:GrpcPort.");
         }
 
         StorageTlsCertificateProvider? tls = null;
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
-            if (grpcPort > 0)
-            {
-                kestrel.ListenAnyIP(listenPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
-                kestrel.ListenAnyIP(grpcPort, listenOptions =>
-                {
-                    listenOptions.Protocols = HttpProtocols.Http2;
-                    if (grpcTls)
-                    {
-                        listenOptions.UseHttps(https => https.ServerCertificateSelector = (_, _) => tls!.Current.Certificate);
-                    }
-                });
-            }
-            else
+            if (!dedicatedGrpc)
             {
                 kestrel.ListenAnyIP(listenPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http1AndHttp2);
+                return;
+            }
+
+            kestrel.ListenAnyIP(listenPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http1);
+            if (grpcPort > 0)
+            {
+                kestrel.ListenAnyIP(grpcPort, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
+            }
+
+            if (grpcTls)
+            {
+                kestrel.ListenAnyIP(grpcTlsPort, listenOptions =>
+                {
+                    listenOptions.Protocols = HttpProtocols.Http2;
+                    listenOptions.UseHttps(https => https.ServerCertificateSelector = (_, _) => tls!.Current.Certificate);
+                });
             }
         });
 
@@ -67,7 +74,7 @@ public static class StorageNodeApp
         // configured from this node's own "StorageNode" section.
         builder.Services.AddNodeNetwork(builder.Configuration.GetSection("StorageNode"));
         // Storage RPCs only from registered members of this node's network (issue #140).
-        if (builder.Configuration.GetValue("StorageNode:RequireCallerAuth", false))
+        if (nodeOptions.RequireCallerAuth)
         {
             builder.Services.AddSingleton(sp =>
             {
@@ -91,10 +98,11 @@ public static class StorageNodeApp
         app.Services.GetRequiredService<ManifestStore>().Initialize();
         app.UseNodeNetwork();
 
+        // Both gRPC listeners share the service and its caller-auth interceptor (#140).
         var grpc = app.MapGrpcService<StorageNodeGrpcService>();
-        if (grpcPort > 0)
+        if (dedicatedGrpc)
         {
-            grpc.RequireHost($"*:{grpcPort}");
+            grpc.RequireHost(new[] { grpcPort, grpcTlsPort }.Where(p => p > 0).Select(p => $"*:{p}").ToArray());
         }
 
         // Where this node's services live, so a gateway that found it in the registry can reach
@@ -105,12 +113,31 @@ public static class StorageNodeApp
             tls.EnsureLoaded();
         }
 
+        var features = new List<string>();
+        if (grpcPort > 0 || !dedicatedGrpc)
+        {
+            features.Add(ProtocolFeatures.StorageGrpcPlaintext);
+        }
+
+        if (grpcTls)
+        {
+            features.Add(ProtocolFeatures.StorageGrpcTls);
+        }
+
+        if (nodeOptions.RequireCallerAuth)
+        {
+            features.Add(ProtocolFeatures.StorageRpcAuthV1);
+        }
+
         app.MapGet(NodeServices.Path, (NodeIdentity identity, Microsoft.Extensions.Options.IOptions<NodeNetworkOptions> network) =>
         {
+            var advertised = network.Value.AdvertisedEndpoint;
             var current = tls?.Current;
-            return Results.Ok(new NodeServices(identity.NodeId, new NodeServices.StorageService(
-                NodeServices.GrpcUrl(network.Value.AdvertisedEndpoint, listenPort, grpcPort, grpcTls),
-                current?.Fingerprint, current?.Proof, current?.NotAfterUnixSeconds)));
+            var plaintext = grpcPort > 0 || !dedicatedGrpc ? NodeServices.GrpcUrl(advertised, listenPort, grpcPort) : null;
+            var secure = grpcTls ? NodeServices.GrpcUrl(advertised, listenPort, grpcTlsPort, tls: true) : null;
+            return Results.Ok(new NodeServices(identity.NodeId,
+                new NodeServices.StorageService(plaintext, current?.Fingerprint, current?.Proof, current?.NotAfterUnixSeconds, secure),
+                ProtocolFeatures.ProtocolVersion, features));
         });
 
         app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));

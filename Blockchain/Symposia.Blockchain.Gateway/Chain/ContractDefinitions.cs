@@ -92,3 +92,40 @@ public sealed class GetRootFunction : FunctionMessage
     [Parameter("uint64", "epoch", 2)]
     public ulong Epoch { get; set; }
 }
+
+// ProtocolActivations (issue #145).
+[Function("featureCount", "uint256")]
+public sealed class FeatureCountFunction : FunctionMessage;
+
+[Function("featureAt", typeof(FeatureAtOutputDTO))]
+public sealed class FeatureAtFunction : FunctionMessage
+{
+    [Parameter("uint256", "index", 1)]
+    public System.Numerics.BigInteger Index { get; set; }
+}
+
+[FunctionOutput]
+public sealed class FeatureAtOutputDTO : IFunctionOutputDTO
+{
+    [Parameter("string", "name", 1)]
+    public string Name { get; set; } = "";
+
+    [Parameter("uint64", "activatesAt", 2)]
+    public ulong ActivatesAt { get; set; }
+}
+
+[Function("minProtocolVersion", typeof(MinProtocolVersionOutputDTO))]
+public sealed class MinProtocolVersionFunction : FunctionMessage;
+
+[FunctionOutput]
+public sealed class MinProtocolVersionOutputDTO : IFunctionOutputDTO
+{
+    [Parameter("uint32", "effective", 1)]
+    public uint Effective { get; set; }
+
+    [Parameter("uint32", "pending", 2)]
+    public uint Pending { get; set; }
+
+    [Parameter("uint64", "pendingAt", 3)]
+    public ulong PendingAt { get; set; }
+}

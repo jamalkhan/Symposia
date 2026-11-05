@@ -108,8 +108,16 @@ public sealed partial class ChainComponent : HostComponent
             deployment = await DeployAsync(network.FoundryBin, rpcUrl, ct);
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
         }
+        else if (string.IsNullOrEmpty(deployment!.ProtocolActivationsAddress) || !await HasCodeAsync(rpcUrl, deployment.ProtocolActivationsAddress, ct))
+        {
+            // Chains deployed before #145 lack ProtocolActivations: add it alone, keeping registrations.
+            deployment = deployment with { ProtocolActivationsAddress = await DeployProtocolActivationsAsync(network.FoundryBin, rpcUrl, ct) };
+            SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
+            context.Logger.LogInformation("Deployed ProtocolActivations at {Address} on the existing local chain.", deployment.ProtocolActivationsAddress);
+        }
 
-        return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl);
+        return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl,
+            deployment.ProtocolActivationsAddress);
     }
 
     private static NetworkInfo ResolveRemoteRpc(HostContext context)
@@ -127,7 +135,8 @@ public sealed partial class ChainComponent : HostComponent
             throw new ComponentFaultException("RemoteRpc mode runs a local gateway and needs a relayer key. Set it in Settings.");
         }
 
-        return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", preset.ChainId, preset.NodeRegistryAddress, preset.EpochRootRegistryAddress, preset.RpcUrl);
+        return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", preset.ChainId, preset.NodeRegistryAddress, preset.EpochRootRegistryAddress, preset.RpcUrl,
+            preset.ProtocolActivationsAddress);
     }
 
     internal static async Task<NetworkInfo> JoinAsync(string gatewayUrl, CancellationToken ct)
@@ -152,7 +161,8 @@ public sealed partial class ChainComponent : HostComponent
             throw new ComponentFaultException($"Gateway at {gatewayUrl} returned no network descriptor.");
         }
 
-        return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, null);
+        return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, null,
+            descriptor.ProtocolActivationsAddress);
     }
 
     private static readonly HttpClient ProbeHttp = new() { Timeout = TimeSpan.FromSeconds(1) };
@@ -196,20 +206,39 @@ public sealed partial class ChainComponent : HostComponent
 
     private static async Task<Deployment> DeployAsync(string foundryBin, string rpcUrl, CancellationToken ct)
     {
+        var output = await ForgeAsync(foundryBin, ct, "script", "script/Deploy.s.sol:Deploy", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast");
+        return new Deployment(Extract(output, "NodeRegistry"), Extract(output, "EpochRootRegistry"), rpcUrl, AnvilChainId, Extract(output, "ProtocolActivations"));
+    }
+
+    /// <summary>Deploys ProtocolActivations (issue #145) owned by the dev key, with no notice window (local dev).</summary>
+    private static async Task<string> DeployProtocolActivationsAsync(string foundryBin, string rpcUrl, CancellationToken ct)
+    {
+        var owner = new Nethereum.Signer.EthECKey(AnvilDevKey).GetPublicAddress();
+        var output = await ForgeAsync(foundryBin, ct, "create", "src/ProtocolActivations.sol:ProtocolActivations", "--rpc-url", rpcUrl,
+            "--private-key", AnvilDevKey, "--broadcast", "--constructor-args", owner, "0");
+        return Extract(output, "Deployed to");
+    }
+
+    private static async Task<string> ForgeAsync(string foundryBin, CancellationToken ct, params string[] args)
+    {
         var contractsDir = FindContractsDir()
             ?? throw new ComponentFaultException(
                 "LocalDev deploys contracts from a Symposia repo checkout (Blockchain/bootstrap-chain) and none was found. Run from the repo or set SYMPOSIA_REPO_ROOT.");
 
-        var forge = Process.Start(new ProcessStartInfo
+        var start = new ProcessStartInfo
         {
             FileName = FindFoundryTool(foundryBin, "forge"),
-            ArgumentList = { "script", "script/Deploy.s.sol:Deploy", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast" },
             WorkingDirectory = contractsDir,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-        }) ?? throw new ComponentFaultException("Failed to start forge.");
+        };
+        foreach (var arg in args)
+        {
+            start.ArgumentList.Add(arg);
+        }
 
+        var forge = Process.Start(start) ?? throw new ComponentFaultException("Failed to start forge.");
         var stdout = forge.StandardOutput.ReadToEndAsync(ct);
         var stderr = forge.StandardError.ReadToEndAsync(ct);
         try
@@ -227,8 +256,7 @@ public sealed partial class ChainComponent : HostComponent
             throw new ComponentFaultException($"Contract deployment failed: {(await stderr).Trim()} {(await stdout).Trim()}".Trim());
         }
 
-        var output = await stdout;
-        return new Deployment(Extract(output, "NodeRegistry"), Extract(output, "EpochRootRegistry"), rpcUrl, AnvilChainId);
+        return await stdout;
     }
 
     private static string Extract(string output, string label)
@@ -314,7 +342,8 @@ public sealed partial class ChainComponent : HostComponent
     }
 
     /// <summary>Deployed addresses, tagged with the chain they were deployed to (checked on load).</summary>
-    private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId);
+    private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId,
+        string? ProtocolActivationsAddress = null);
 
-    private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress);
+    private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null);
 }

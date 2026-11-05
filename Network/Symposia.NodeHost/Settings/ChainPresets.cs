@@ -2,7 +2,9 @@ using System.Text.Json;
 
 namespace Symposia.NodeHost.Settings;
 
-public sealed record ChainPreset(string Description, string RpcUrl, ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress)
+/// <param name="ProtocolActivationsAddress">The network's ProtocolActivations contract (issue #145); empty = none yet.</param>
+public sealed record ChainPreset(string Description, string RpcUrl, ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress,
+    string ProtocolActivationsAddress = "")
 {
     public bool IsDeployed =>
         !string.IsNullOrWhiteSpace(RpcUrl) && ChainId != 0 &&
@@ -23,7 +25,8 @@ public static class ChainPresets
             Pick(network.RpcUrl, preset.RpcUrl),
             network.ChainId != 0 ? network.ChainId : preset.ChainId,
             Pick(network.NodeRegistryAddress, preset.NodeRegistryAddress),
-            Pick(network.EpochRootRegistryAddress, preset.EpochRootRegistryAddress));
+            Pick(network.EpochRootRegistryAddress, preset.EpochRootRegistryAddress),
+            preset.ProtocolActivationsAddress);
     }
 
     private static string Pick(string over, string preset) => string.IsNullOrWhiteSpace(over) ? preset : over;

@@ -15,12 +15,23 @@ public sealed record NetworkNodeRow(string Node, string? Endpoint, string? Host,
 
     /// <summary>Null when the node didn't report one (older nodes, or unreachable).</summary>
     public GatewayHealth? Gateway { get; init; }
+
+    /// <summary>From the node's services document (#145); null when it has none (compute-only, or unreachable).</summary>
+    public NodeServices? Services { get; init; }
+
+    /// <summary>Upcoming activations this node isn't ready for (#145 FR6.3).</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
 }
+
+/// <summary>A scheduled protocol activation and how many storage nodes advertise the feature (#145 FR6.2).</summary>
+public sealed record ActivationReadiness(string Name, long ActivatesAt, bool InEffect, int Ready, int Total);
 
 /// <summary>
 /// The Network tab: every node in the registry with its self-reported storage and
 /// compute health. Remote nodes are polled in parallel with a short timeout and the
 /// whole result is cached for 5s, so open tabs cost one round of requests per 5s.
+/// Since #145 it also shows each node's protocol version and features, and the network's
+/// protocol activation schedule with how ready the storage nodes are for it.
 /// </summary>
 public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth health, IMemoryCache cache, ILogger<NetworkOverview> logger)
 {
@@ -61,7 +72,7 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
         if (client is null)
         {
             logger.LogDebug("Network overview: network component is {Status}; showing this node only", supervisor.Network.Status);
-            return Result(self, [], "This node isn't connected to a network yet. Choose one in Settings.");
+            return Result(self, [], ProtocolSchedule.None, "This node isn't connected to a network yet. Choose one in Settings.");
         }
 
         IReadOnlyList<RegisteredNode> members;
@@ -74,13 +85,16 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Network overview: could not list registered nodes from the gateway");
-                return Result(self, [], $"Gateway unavailable: {ex.Message}");
+                return Result(self, [], ProtocolSchedule.None, $"Gateway unavailable: {ex.Message}");
             }
         }
 
         logger.LogDebug("Network overview: registry has {Count} node(s); polling their health", members.Count);
         var started = System.Diagnostics.Stopwatch.StartNew();
+        var scheduleTask = ScheduleAsync(supervisor.Context.Network!.GatewayUrl);
         var rows = (await Task.WhenAll(members.Select(m => RowAsync(m, self)))).ToList();
+        var schedule = await scheduleTask;
+        rows = rows.Select(r => r with { Warnings = Unready(r.Services, schedule) }).ToList();
         var unreachable = rows.Count(r => r.Storage.Level == HealthLevel.Unknown);
         if (unreachable > 0)
         {
@@ -88,11 +102,64 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
         }
 
         logger.LogDebug("Network overview built in {ElapsedMs} ms", started.ElapsedMilliseconds);
-        return Result(self, rows, null);
+        return Result(self, rows, schedule, null);
+    }
+
+    private async Task<ProtocolSchedule> ScheduleAsync(string gatewayUrl)
+    {
+        try
+        {
+            return await Http.GetFromJsonAsync<ProtocolSchedule>(gatewayUrl.TrimEnd('/') + ProtocolSchedule.Path, Json) ?? ProtocolSchedule.None;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or NotSupportedException)
+        {
+            logger.LogWarning("Network overview: could not read the protocol schedule ({Error})", ex.Message);
+            return ProtocolSchedule.None;
+        }
+    }
+
+    /// <summary>Scheduled <c>storage.*</c> activations a storage node doesn't advertise yet.</summary>
+    internal static IReadOnlyList<string> Unready(NodeServices? services, ProtocolSchedule schedule)
+    {
+        if (services?.Storage is null)
+        {
+            return [];
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var warnings = schedule.Features
+            .Where(f => f.ActivatesAt > 0 && f.Name.StartsWith("storage.", StringComparison.Ordinal) && !services.Has(f.Name))
+            .Select(f => f.InEffect(now)
+                ? $"Refused by gateways: lacks {f.Name} (required since {DateTimeOffset.FromUnixTimeSeconds(f.ActivatesAt):u})"
+                : $"Will be refused at {DateTimeOffset.FromUnixTimeSeconds(f.ActivatesAt):u}: lacks {f.Name}")
+            .ToList();
+        var min = schedule.MinProtocolVersion;
+        if (services.ProtocolVersion < min.At(now))
+        {
+            warnings.Add($"Refused by gateways: protocol version {services.ProtocolVersion} is below the minimum {min.At(now)}");
+        }
+        else if (min.Pending > services.ProtocolVersion && min.PendingAt > 0)
+        {
+            warnings.Add($"Will be refused at {DateTimeOffset.FromUnixTimeSeconds(min.PendingAt):u}: protocol version {services.ProtocolVersion} is below {min.Pending}");
+        }
+
+        return warnings;
+    }
+
+    internal static IReadOnlyList<ActivationReadiness> Readiness(IReadOnlyList<NetworkNodeRow> rows, ProtocolSchedule schedule)
+    {
+        var storage = rows.Where(r => r.Services?.Storage is not null).ToList();
+        var now = DateTimeOffset.UtcNow;
+        return schedule.Features
+            .Where(f => f.ActivatesAt > 0)
+            .OrderBy(f => f.ActivatesAt)
+            .Select(f => new ActivationReadiness(f.Name, f.ActivatesAt, f.InEffect(now),
+                storage.Count(r => r.Services!.Has(f.Name)), storage.Count))
+            .ToList();
     }
 
     /// <summary>This node is always listed, even before it registers, with the reason it isn't on-chain yet.</summary>
-    private object Result(NodeHealthReport self, List<NetworkNodeRow> rows, string? error)
+    private object Result(NodeHealthReport self, List<NetworkNodeRow> rows, ProtocolSchedule schedule, string? error)
     {
         if (!rows.Any(r => r.Self))
         {
@@ -104,21 +171,32 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
                 self.Storage, self.Compute) { NotRegisteredReason = reason, Gateway = self.Gateway });
         }
 
-        return new { error, nodes = rows };
+        return new
+        {
+            error,
+            nodes = rows,
+            protocol = new
+            {
+                schedule.Configured,
+                minProtocolVersion = schedule.MinProtocolVersion,
+                activations = Readiness(rows, schedule),
+            },
+        };
     }
 
     private async Task<NetworkNodeRow> RowAsync(RegisteredNode member, NodeHealthReport self)
     {
         var host = Uri.TryCreate(member.Endpoint, UriKind.Absolute, out var uri) ? uri.Host : null;
-        if (string.Equals(member.Node, self.Node, StringComparison.OrdinalIgnoreCase))
-        {
-            return new NetworkNodeRow(member.Node, member.Endpoint, host, true, true, self.Storage, self.Compute) { Gateway = self.Gateway };
-        }
-
         if (uri is null || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
         {
             logger.LogWarning("Node {Node} registered an invalid endpoint {Endpoint}", member.Node, member.Endpoint);
             return Unknown(member, host, "Registered endpoint is not a valid URL");
+        }
+
+        var services = await ServicesAsync(member, uri);
+        if (string.Equals(member.Node, self.Node, StringComparison.OrdinalIgnoreCase))
+        {
+            return new NetworkNodeRow(member.Node, member.Endpoint, host, true, true, self.Storage, self.Compute) { Gateway = self.Gateway, Services = services };
         }
 
         var url = new Uri(uri, NodeHealth.Path);
@@ -136,7 +214,11 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
 
             logger.LogDebug("Node {Node} at {Url}: storage {Storage}, compute {Compute} ({ElapsedMs} ms)",
                 member.Node, url, report.Storage.Level, report.Compute.Level, started.ElapsedMilliseconds);
-            return new NetworkNodeRow(member.Node, member.Endpoint, host, false, true, report.Storage, report.Compute) { Gateway = report.Gateway };
+            return new NetworkNodeRow(member.Node, member.Endpoint, host, false, true, report.Storage, report.Compute)
+            {
+                Gateway = report.Gateway,
+                Services = services,
+            };
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or NotSupportedException)
         {
@@ -144,6 +226,27 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
             logger.LogWarning("Health check of node {Node} at {Url} failed after {ElapsedMs} ms: {Reason} ({Error})",
                 member.Node, url, started.ElapsedMilliseconds, reason, ex.Message);
             return Unknown(member, host, reason);
+        }
+    }
+
+    /// <summary>The node's services document, if it serves one and it answers for the right node.</summary>
+    private async Task<NodeServices?> ServicesAsync(RegisteredNode member, Uri endpoint)
+    {
+        try
+        {
+            using var response = await Http.GetAsync(new Uri(endpoint, NodeServices.Path));
+            if (!response.IsSuccessStatusCode)
+            {
+                return null; // compute-only nodes serve none
+            }
+
+            var services = await response.Content.ReadFromJsonAsync<NodeServices>(Json);
+            return services is not null && string.Equals(services.Node, member.Node, StringComparison.OrdinalIgnoreCase) ? services : null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or NotSupportedException)
+        {
+            logger.LogDebug("Services document of node {Node} unavailable ({Error})", member.Node, ex.Message);
+            return null;
         }
     }
 

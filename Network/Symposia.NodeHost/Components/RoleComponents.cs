@@ -47,11 +47,12 @@ public sealed class StorageRoleComponent : WebAppComponent
         var config = new Dictionary<string, string?>
         {
             ["StorageNode:ListenPort"] = storage.Port.ToString(),
-            ["StorageNode:GrpcPort"] = storage.GrpcPort.ToString(),
+            // Cleartext gRPC only during the overlap with the previous release (issue #145).
+            ["StorageNode:GrpcPort"] = storage.PlaintextGrpc ? storage.GrpcPort.ToString() : "0",
             // Only registered members of this network may call the storage API (issue #140).
             ["StorageNode:RequireCallerAuth"] = "true",
             // gRPC over TLS with a node-key-bound certificate, pinned by gateways (issue #142).
-            ["StorageNode:GrpcTls"] = "true",
+            ["StorageNode:GrpcTlsPort"] = storage.GrpcTlsPort.ToString(),
             ["StorageNode:TlsCertificatePath"] = Path.Combine(dir, "grpc-tls.pfx"),
             ["StorageNode:StorageRoot"] = Path.Combine(dir, "blobs"),
             ["StorageNode:ManifestDbPath"] = Path.Combine(dir, "manifest.db"),
@@ -199,8 +200,8 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:NodeIdentityKeyPath"] = context.Paths.NodeKey,
             ["Gateway:ChainId"] = network.ChainId.ToString(),
             ["Gateway:NodeRegistryAddress"] = network.NodeRegistryAddress,
-            // Never send object data to a storage node in cleartext (issue #142).
-            ["Gateway:RequireStorageTls"] = "true",
+            // Whether cleartext storage nodes are still acceptable is network policy, read from the
+            // chain's protocol activations through the Blockchain Gateway (issue #145), not a local switch.
             ["Gateway:Credentials:0:AccessKeyId"] = gateway.AccessKeyId,
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
             ["Gateway:Credentials:0:TenantId"] = "dev",

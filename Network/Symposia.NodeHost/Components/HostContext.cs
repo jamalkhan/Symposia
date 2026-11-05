@@ -10,7 +10,8 @@ public sealed record NetworkInfo(
     ulong ChainId,
     string NodeRegistryAddress,
     string EpochRootRegistryAddress,
-    string? RpcUrl);
+    string? RpcUrl,
+    string? ProtocolActivationsAddress = null);
 
 /// <summary>Shared state components read while starting.</summary>
 public sealed class HostContext

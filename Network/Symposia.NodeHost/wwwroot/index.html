@@ -64,6 +64,11 @@
         <p class="hint">Storage: green healthy, yellow under 40% free, red 20% free or less. Compute: green healthy, yellow over 20% CPU, red over 50%.
           Gateway: green when it reaches enough storage nodes for every object to have its copies, yellow while short or repairing, red when down. Grey means the role isn't configured or the node couldn't be reached. Hover a light for details.</p>
       </div>
+      <div class="card">
+        <h2>Protocol activations</h2>
+        <div id="network-protocol"></div>
+        <p class="hint">Gateways stop using storage nodes that don't advertise a feature once its activation time passes. Upgrade flagged nodes before then.</p>
+      </div>
     </section>
 
     <section id="view-settings" hidden>
@@ -101,7 +106,9 @@
           <label>Port <input type="number" name="Storage.Port"></label>
           <label>Advertised endpoint <input name="Storage.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt; (set your LAN/public address for other machines)"></label>
           <p class="hint" data-lan hidden>Other machines can't reach 127.0.0.1. <button type="button" data-use-lan="Storage">Use this machine's LAN address</button></p>
-          <label>gRPC port <small>(the blob gateway stores data through this; keep it LAN-only)</small> <input type="number" name="Storage.GrpcPort"></label>
+          <label>gRPC TLS port <small>(the blob gateway stores data through this; keep it LAN-only)</small> <input type="number" name="Storage.GrpcTlsPort"></label>
+          <label class="inline"><input type="checkbox" name="Storage.PlaintextGrpc"> Also serve gRPC in cleartext <small>(for gateways on the previous release; turn off once TLS is activated on chain)</small></label>
+          <label>Cleartext gRPC port <input type="number" name="Storage.GrpcPort"></label>
           <label>Capacity (GB) <input type="number" name="Storage.MaxCapacityGb" min="1"></label>
         </div>
 

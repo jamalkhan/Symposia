@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Protocol;
+using Symposia.Network.Node;
 
 namespace Symposia.BlobStorage.Gateway.Nodes;
 
@@ -27,15 +28,18 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private Timer? _probeTimer;
 
     private readonly IStorageRpcSigner? _signer;
+    private readonly INetworkPolicy? _policy;
     private readonly HashSet<string> _tlsSeen = new(StringComparer.OrdinalIgnoreCase);
 
     public NodeRegistry(
         IOptions<GatewayOptions> options,
         GatewayMetadataStore store,
         ILogger<NodeRegistry> logger,
-        IStorageRpcSigner? signer = null)
+        IStorageRpcSigner? signer = null,
+        INetworkPolicy? policy = null)
     {
         _signer = signer;
+        _policy = policy;
         _options = options;
         _store = store;
         _logger = logger;
@@ -143,17 +147,32 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         var now = DateTimeOffset.UtcNow;
         var added = new List<NodeConnection>();
         var migrations = new List<(string Url, string Id)>();
-        var requireTls = _options.Value.RequireStorageTls;
+        // TLS is required once storage.grpc.tls is activated on chain (#145), whatever the source.
+        var requireTls = _policy?.IsActive(ProtocolFeatures.StorageGrpcTls) == true;
         lock (_lock)
         {
             foreach (var d in descriptors)
             {
+                if (d.RefusedBecause is not null)
+                {
+                    // Refused by network policy (#145): stop using it now, not after the grace period.
+                    var refused = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                    if (refused is not null)
+                    {
+                        _logger.LogWarning("Dropping storage node {Node} ({Url}): {Reason}.", refused.Id, refused.Url, d.RefusedBecause);
+                        _nodes.Remove(refused);
+                        refused.Dispose();
+                    }
+
+                    continue;
+                }
+
                 // No downgrade (#142 review), whatever the source: never connect in cleartext when TLS is
                 // required, and never to a node in cleartext once it has been seen with a pinned certificate.
                 if (d.TlsFingerprint is null && (requireTls || _tlsSeen.Contains(d.Id)))
                 {
                     _logger.LogError("Refusing cleartext storage connection to {Node} at {Url} ({Why}).", d.Id, d.Url,
-                        requireTls ? "TLS is required" : "it previously served pinned TLS");
+                        requireTls ? "storage.grpc.tls is activated on this network" : "it previously served pinned TLS");
                     continue;
                 }
 

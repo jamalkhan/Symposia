@@ -11,6 +11,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The protocol feature registry (issue #145); ProtocolFeatures reads it. -->
+    <EmbeddedResource Include="../../protocol/features.json" LogicalName="Symposia.Protocol.features.json" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Nethereum.Web3" Version="4.29.0" />
   </ItemGroup>
 

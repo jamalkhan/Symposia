@@ -56,6 +56,29 @@ public static class NodeEndpoints
                     chainId = await chain.GetChainIdAsync(),
                     nodeRegistryAddress = chain.NodeRegistryAddress,
                     epochRootRegistryAddress = chain.EpochRootRegistryAddress,
+                    protocolActivationsAddress = string.IsNullOrEmpty(chain.ProtocolActivationsAddress) ? null : chain.ProtocolActivationsAddress,
+                });
+            }
+            catch (Exception ex) when (ex is HttpRequestException or RpcClientUnknownException or RpcResponseException)
+            {
+                return Results.Problem("The gateway cannot reach its chain RPC.", statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+        });
+
+        // Protocol activation schedule (issue #145): when each protocol feature becomes required,
+        // and the minimum protocol version. Times are Unix seconds; "now" is the chain's clock.
+        // Shape pinned by protocol/schemas/protocol-schedule.schema.json (#146).
+        app.MapGet("/v1/protocol", async (BootstrapChainClient chain) =>
+        {
+            try
+            {
+                var s = await chain.GetProtocolScheduleAsync();
+                return Results.Ok(new
+                {
+                    configured = !string.IsNullOrEmpty(chain.ProtocolActivationsAddress),
+                    now = s.Now,
+                    minProtocolVersion = new { effective = s.MinVersion, pending = s.PendingMinVersion, pendingAt = s.PendingMinVersionAt },
+                    features = s.Features.Select(f => new { name = f.Name, activatesAt = f.ActivatesAt }),
                 });
             }
             catch (Exception ex) when (ex is HttpRequestException or RpcClientUnknownException or RpcResponseException)
