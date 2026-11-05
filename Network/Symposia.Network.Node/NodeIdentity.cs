@@ -125,6 +125,14 @@ public sealed class NodeIdentity
     public StorageRpcToken SignStorageRpc(string audience, string method, long unixSeconds) =>
         StorageRpcAuth.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, audience, method, unixSeconds);
 
+    /// <summary>Signs a 5-minute telemetry heartbeat for gossip (issue #75), bound to this node's network.</summary>
+    public Telemetry.SignedTelemetry<Telemetry.HeartbeatSample> SignHeartbeat(Telemetry.HeartbeatSample sample) =>
+        Telemetry.TelemetrySigning.Sign(Key, sample, _options.ChainId, _options.NodeRegistryAddress);
+
+    /// <summary>Signs a verifier attestation about a peer (issue #75).</summary>
+    public Telemetry.SignedTelemetry<Telemetry.Attestation> SignAttestation(Telemetry.Attestation attestation) =>
+        Telemetry.TelemetrySigning.Sign(Key, attestation, _options.ChainId, _options.NodeRegistryAddress);
+
     /// <summary>
     /// Signs an arbitrary digest with this node's key, in the packed r||s||v
     /// layout the chain contracts expect (issue #109, AC7).

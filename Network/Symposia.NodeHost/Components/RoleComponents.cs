@@ -57,6 +57,9 @@ public sealed class StorageRoleComponent : WebAppComponent
             ["StorageNode:StorageRoot"] = Path.Combine(dir, "blobs"),
             ["StorageNode:ManifestDbPath"] = Path.Combine(dir, "manifest.db"),
             ["StorageNode:MaxCapacityBytes"] = storage.MaxCapacityBytes.ToString(),
+            // 5-minute signed heartbeats that feed reward scoring (issue #75).
+            ["StorageNode:Telemetry:Enabled"] = storage.Heartbeats.ToString(),
+            ["StorageNode:Telemetry:GenesisUnixSeconds"] = storage.EpochGenesisUnixSeconds.ToString(),
         };
         RoleNetwork.Add(config, "StorageNode", context, HostContext.EndpointFor(storage.AdvertisedEndpoint, storage.Port));
         return config;

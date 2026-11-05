@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Symposia.BlobStorage.StorageNode.Grpc;
 using Symposia.BlobStorage.StorageNode.Storage;
 using Symposia.Network.Node;
+using Symposia.Network.Node.Telemetry;
 
 namespace Symposia.BlobStorage.StorageNode;
 
@@ -73,6 +74,9 @@ public static class StorageNodeApp
         // Node identity, on-chain registration, peer discovery, and handshake (issue #129),
         // configured from this node's own "StorageNode" section.
         builder.Services.AddNodeNetwork(builder.Configuration.GetSection("StorageNode"));
+        // Signed 5-minute heartbeats with this node's capacity readings (issue #75).
+        builder.Services.AddSingleton<IHeartbeatMetricsSource, StorageHeartbeatMetricsSource>();
+        builder.Services.AddTelemetryHeartbeats(builder.Configuration.GetSection("StorageNode"));
         // Storage RPCs only from registered members of this node's network (issue #140).
         if (nodeOptions.RequireCallerAuth)
         {

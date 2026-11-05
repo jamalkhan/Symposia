@@ -118,6 +118,12 @@ public sealed class StorageSettings
     /// this node (the #145 overlap). Turn off once <c>storage.grpc.tls</c> is activated on chain.
     /// </summary>
     public bool PlaintextGrpc { get; set; } = true;
+
+    /// <summary>Emit a signed heartbeat every 5 minutes for reward scoring (issue #75).</summary>
+    public bool Heartbeats { get; set; } = true;
+
+    /// <summary>The network's epoch genesis (Unix seconds), matching the chain's <c>epoch.genesisTimestamp</c>.</summary>
+    public long EpochGenesisUnixSeconds { get; set; }
 }
 
 /// <summary>
