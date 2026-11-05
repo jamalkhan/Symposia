@@ -92,7 +92,7 @@ public sealed class ReplicaConsistencyTests : IDisposable
         var store = Store();
         store.PutObject(Record("b", "k", "http://10.0.0.5:6180", "http://10.0.0.6:6180"));
         store.EnqueueNodeDeletion("cid-gone", "http://10.0.0.6:6180");
-        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, new NetworkPolicy(Options(), NullLogger<NetworkPolicy>.Instance));
 
         // First sight of each registry node migrates #135-era URL references to its address.
         nodes.Sync([new("0xA", "http://10.0.0.5:6180"), new("0xB", "http://10.0.0.6:6180")]);
@@ -111,7 +111,7 @@ public sealed class ReplicaConsistencyTests : IDisposable
     public void UrlReusedByAnotherNode_IsNotCreditedWithThePreviousNodesCopies()
     {
         var store = Store();
-        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, new NetworkPolicy(Options(), NullLogger<NetworkPolicy>.Instance));
         nodes.Sync([new("0xA", "http://10.0.0.5:6180")]);
         store.PutObject(Record("b", "k", "0xA"));
 
@@ -132,7 +132,7 @@ public sealed class ReplicaConsistencyTests : IDisposable
             ProbeIntervalSeconds = 3600,
             NodeGracePeriodSeconds = 1,
         });
-        using var nodes = new NodeRegistry(options, store, NullLogger<NodeRegistry>.Instance);
+        using var nodes = new NodeRegistry(options, store, NullLogger<NodeRegistry>.Instance, new NetworkPolicy(options, NullLogger<NetworkPolicy>.Instance));
         nodes.Sync([new("0xA", "http://10.0.0.5:6180"), new("0xB", "http://10.0.0.6:6180")]);
 
         await Task.Delay(1200);

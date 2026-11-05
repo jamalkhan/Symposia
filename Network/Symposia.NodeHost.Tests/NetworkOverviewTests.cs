@@ -27,6 +27,9 @@ public sealed class NetworkOverviewTests
 
         Assert.Equal(2, warnings.Count);
         Assert.Contains(warnings, w => w.StartsWith("Will be refused") && w.Contains(ProtocolFeatures.StorageGrpcTls));
+        // Same judgement as gateways: a pre-#145 document is read by what it serves.
+        var legacy = new NodeServices("0xA", new NodeServices.StorageService("https://10.0.0.1:6180"));
+        Assert.Empty(NetworkOverview.Unready(legacy, Schedule(new ProtocolSchedule.Activation(ProtocolFeatures.StorageGrpcTls, Past))));
         Assert.Contains(warnings, w => w.StartsWith("Refused by gateways") && w.Contains("storage.other"));
     }
 

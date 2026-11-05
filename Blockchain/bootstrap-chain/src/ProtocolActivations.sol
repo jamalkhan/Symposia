@@ -88,14 +88,15 @@ contract ProtocolActivations {
     }
 
     /// @notice Schedules a rise of the minimum protocol version nodes must advertise. Replaces a
-    /// pending rise that has not taken effect, but only with a higher version or a later time.
+    /// pending rise that has not taken effect, with an equal or higher version, never earlier.
     function scheduleMinProtocolVersion(uint32 version, uint64 activatesAt) external onlyOwner {
         _settleVersion();
         if (version <= _effectiveVersion) revert VersionNotHigher(_effectiveVersion);
         _requireNotice(activatesAt);
         if (_pendingVersion != 0) {
             if (version < _pendingVersion) revert VersionNotHigher(_pendingVersion);
-            if (version == _pendingVersion && activatesAt < _pendingVersionAt) revert EarlierThanScheduled(_pendingVersionAt);
+            // Never earlier, even for a higher version: operators were promised the pending deadline.
+            if (activatesAt < _pendingVersionAt) revert EarlierThanScheduled(_pendingVersionAt);
         }
 
         _pendingVersion = version;

@@ -33,159 +33,134 @@ public interface INetworkPolicy
     AdmitResult AdmitStorageNode(string node, NodeServices services);
 }
 
-public sealed class NetworkPolicy(IOptions<GatewayOptions> options, ILogger<NetworkPolicy> logger, TimeProvider? clock = null) : INetworkPolicy
+public sealed class NetworkPolicy : INetworkPolicy
 {
-    private const string StorageScope = "storage.";
-    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly IOptions<GatewayOptions> _options;
+    private readonly ILogger<NetworkPolicy> _logger;
+    private readonly Metadata.GatewayMetadataStore? _store;
+    private readonly TimeProvider _clock;
     private readonly Lock _lock = new();
     private ProtocolSchedule _schedule = ProtocolSchedule.None;
 
-    // Fail closed (AC8): requirements seen in effect stay in effect for this process, whatever
-    // later reads say, so an unreachable or misbehaving Blockchain Gateway can't relax them.
+    // Fail closed (AC8): requirements seen in effect stay in effect, whatever later reads say, so an
+    // unreachable or misbehaving Blockchain Gateway can't relax them. Persisted (when a store is given)
+    // so a restart during a Blockchain Gateway outage doesn't relax them either (#145 review).
     private readonly HashSet<string> _seenActive = new(StringComparer.Ordinal);
     private int _seenMinVersion;
+
+    public NetworkPolicy(IOptions<GatewayOptions> options, ILogger<NetworkPolicy> logger,
+        Metadata.GatewayMetadataStore? store = null, TimeProvider? clock = null)
+    {
+        _options = options;
+        _logger = logger;
+        _store = store;
+        _clock = clock ?? TimeProvider.System;
+        if (store is not null)
+        {
+            var (features, minVersion) = store.LoadProtocolRequirements();
+            _seenActive.UnionWith(features);
+            _seenMinVersion = minVersion;
+            if (features.Count > 0 || minVersion > 0)
+            {
+                logger.LogInformation("Protocol requirements remembered from earlier runs: {Features}; minimum version {Min}.",
+                    string.Join(", ", features), minVersion);
+            }
+        }
+    }
 
     public ProtocolSchedule Current
     {
         get { lock (_lock) return _schedule; }
     }
 
-    private DateTimeOffset Now => _clock.GetUtcNow();
-
     /// <summary>Applies a freshly read schedule. Returns true if anything changed.</summary>
-    public bool Apply(ProtocolSchedule schedule)
+    internal bool Apply(ProtocolSchedule schedule)
     {
+        schedule = schedule.Sanitized();
+        List<string> newlyActive;
+        int minVersion;
+        bool changed;
         lock (_lock)
         {
-            var now = Now;
-            foreach (var f in schedule.Features.Where(f => f.InEffect(now)))
+            var now = _clock.GetUtcNow();
+            newlyActive = schedule.Features.Where(f => f.InEffect(now) && _seenActive.Add(f.Name)).Select(f => f.Name).ToList();
+            var previousMin = _seenMinVersion;
+            _seenMinVersion = Math.Max(_seenMinVersion, schedule.MinProtocolVersion.At(now));
+            minVersion = _seenMinVersion;
+            if (minVersion != previousMin)
             {
-                _seenActive.Add(f.Name);
+                newlyActive.Add("");
             }
 
-            _seenMinVersion = Math.Max(_seenMinVersion, schedule.MinProtocolVersion.At(now));
             // Records compare lists by reference, so compare the parts that matter ("now" always moves).
-            var changed = _schedule.Configured != schedule.Configured
+            changed = _schedule.Configured != schedule.Configured
                 || _schedule.MinProtocolVersion != schedule.MinProtocolVersion
                 || !_schedule.Features.SequenceEqual(schedule.Features);
             _schedule = schedule;
-            return changed;
         }
+
+        if (newlyActive.Count > 0)
+        {
+            _store?.SaveProtocolRequirements(newlyActive.Where(f => f.Length > 0), minVersion);
+        }
+
+        return changed;
     }
 
     public bool IsActive(string feature)
     {
         lock (_lock)
         {
-            return _seenActive.Contains(feature) || _schedule.Features.Any(f => f.Name == feature && f.InEffect(Now));
-        }
-    }
-
-    private int MinVersionNow()
-    {
-        lock (_lock)
-        {
-            return Math.Max(_seenMinVersion, _schedule.MinProtocolVersion.At(Now));
+            var now = _clock.GetUtcNow();
+            return _seenActive.Contains(feature) || _schedule.Features.Any(f => f.Name == feature && f.InEffect(now));
         }
     }
 
     public AdmitResult AdmitStorageNode(string node, NodeServices services)
     {
-        var warnings = new List<string>();
-        var storage = services.Storage;
-        if (storage is null)
-        {
-            return AdmitResult.Refuse("it offers no storage service", warnings);
-        }
-
-        var tlsUrl = storage.TlsUrl;
-        var plaintextUrl = storage.PlaintextUrl;
-        var features = Advertised(services, tlsUrl, plaintextUrl);
-        var now = Now;
+        // One consistent snapshot for the whole decision.
         ProtocolSchedule schedule;
+        string[] seen;
+        int floor;
+        var now = _clock.GetUtcNow();
         lock (_lock)
         {
             schedule = _schedule;
+            seen = [.. _seenActive];
+            floor = _seenMinVersion;
         }
 
-        var required = schedule.Features.Where(f => f.Name.StartsWith(StorageScope, StringComparison.Ordinal))
-            .Select(f => f.Name).Where(IsActive).Union(SeenActiveStorageFeatures()).ToList();
-        var missing = required.Where(f => !features.Contains(f)).ToList();
-        if (missing.Count > 0)
+        var storage = services.Storage;
+        if (storage is null)
         {
-            return AdmitResult.Refuse($"it lacks required protocol feature(s) {string.Join(", ", missing)}", warnings);
+            return AdmitResult.Refuse("it offers no storage service", []);
         }
 
-        var minVersion = MinVersionNow();
-        if (services.ProtocolVersion < minVersion)
+        var verdict = ProtocolRequirements.EvaluateStorageNode(services, schedule, now, seen, floor);
+        if (verdict.Refused)
         {
-            return AdmitResult.Refuse($"it speaks protocol version {services.ProtocolVersion}, below the network minimum {minVersion}", warnings);
+            return AdmitResult.Refuse(string.Join("; ", verdict.RefusedBecause), verdict.Upcoming);
         }
 
-        foreach (var upcoming in schedule.Features.Where(f => f.Name.StartsWith(StorageScope, StringComparison.Ordinal)
-                     && f.ActivatesAt > 0 && !f.InEffect(now) && !features.Contains(f.Name)))
-        {
-            warnings.Add($"it lacks {upcoming.Name}, which becomes required at {DateTimeOffset.FromUnixTimeSeconds(upcoming.ActivatesAt):u}");
-        }
-
-        var pending = schedule.MinProtocolVersion;
-        if (pending.Pending > services.ProtocolVersion && pending.PendingAt > now.ToUnixTimeSeconds())
-        {
-            warnings.Add($"it speaks protocol version {services.ProtocolVersion}; version {pending.Pending} becomes the minimum at {DateTimeOffset.FromUnixTimeSeconds(pending.PendingAt):u}");
-        }
-
-        if (tlsUrl is not null)
+        if (storage.TlsUrl is { } tlsUrl)
         {
             // Pin only a fingerprint the node's registry key vouches for (#142). A bad proof is an attack
             // or a broken node; never a reason to fall back to cleartext (#145 QA TC-32).
-            var o = options.Value;
+            var o = _options.Value;
             var invalid = StorageTlsProof.Validate(o.ChainId, o.NodeRegistryAddress, node, storage.TlsFingerprint,
                 storage.TlsNotAfter, storage.TlsProof, now);
             return invalid is null
-                ? new AdmitResult(new StorageNodeDescriptor(node, tlsUrl, storage.TlsFingerprint!.ToLowerInvariant()), null, warnings)
-                : AdmitResult.Refuse($"it offers TLS storage but {invalid}", warnings);
+                ? new AdmitResult(new StorageNodeDescriptor(node, tlsUrl, storage.TlsFingerprint!.ToLowerInvariant()), null, verdict.Upcoming)
+                : AdmitResult.Refuse($"it offers TLS storage but {invalid}", verdict.Upcoming);
         }
 
-        return plaintextUrl is not null
-            ? new AdmitResult(new StorageNodeDescriptor(node, plaintextUrl), null, warnings)
-            : AdmitResult.Refuse("it advertises no storage gRPC address", warnings);
+        return storage.PlaintextUrl is { } plaintextUrl
+            ? new AdmitResult(new StorageNodeDescriptor(node, plaintextUrl), null, verdict.Upcoming)
+            : AdmitResult.Refuse("it advertises no storage gRPC address", verdict.Upcoming);
     }
 
-    private IEnumerable<string> SeenActiveStorageFeatures()
-    {
-        lock (_lock)
-        {
-            return _seenActive.Where(f => f.StartsWith(StorageScope, StringComparison.Ordinal)).ToList();
-        }
-    }
-
-    /// <summary>
-    /// The features a node offers. Documents from before #145 carry no list; infer the transports from
-    /// the URLs they publish so those nodes are judged on what they actually serve.
-    /// </summary>
-    private static HashSet<string> Advertised(NodeServices services, string? tlsUrl, string? plaintextUrl)
-    {
-        var features = new HashSet<string>(services.Features ?? [], StringComparer.Ordinal);
-        if (services.Features is null)
-        {
-            if (tlsUrl is not null)
-            {
-                features.Add(ProtocolFeatures.StorageGrpcTls);
-            }
-
-            if (plaintextUrl is not null)
-            {
-                features.Add(ProtocolFeatures.StorageGrpcPlaintext);
-            }
-        }
-
-        return features;
-    }
-
-    internal void LogUnconfiguredOnce()
-    {
-        logger.LogInformation("This network has no ProtocolActivations contract; no protocol features are required.");
-    }
+    internal void LogUnconfiguredOnce() =>
+        _logger.LogInformation("This network has no ProtocolActivations contract; no protocol features are required.");
 }
 
 /// <summary>
@@ -243,10 +218,12 @@ public sealed class ProtocolScheduleSyncService(
                         : $"{f.Name} at {DateTimeOffset.FromUnixTimeSeconds(f.ActivatesAt):u}")));
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException
-                                   && !stopping.IsCancellationRequested)
+        catch (Exception ex) when (!stopping.IsCancellationRequested)
         {
-            logger.LogWarning("Could not read the protocol schedule ({Error}); keeping the last known one.", ex.Message);
+            // Anything else too (#145 review): a bad answer must never stop the gateway; requirements
+            // already in effect stay enforced.
+            logger.LogWarning(ex is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException ? null : ex,
+                "Could not read the protocol schedule ({Error}); keeping the last known one.", ex.Message);
         }
     }
 }

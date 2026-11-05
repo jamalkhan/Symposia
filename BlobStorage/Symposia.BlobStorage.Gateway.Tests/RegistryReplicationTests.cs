@@ -136,7 +136,7 @@ public sealed class RegistryReplicationTests : IDisposable
         });
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
-        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, new NetworkPolicy(Options(), NullLogger<NetworkPolicy>.Instance));
         var source = new RegistryNodeSource(registry, http, new NetworkPolicy(Options(), NullLogger<NetworkPolicy>.Instance), Options(), NullLogger<RegistryNodeSource>.Instance);
 
         nodes.Sync(await source.DiscoverAsync(CancellationToken.None));

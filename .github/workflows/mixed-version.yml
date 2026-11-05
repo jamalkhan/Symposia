@@ -28,7 +28,7 @@ jobs:
       - name: Find the release baseline
         id: baseline
         run: |
-          tag=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          tag=$(tools/protocol-compat/bases.sh pull_request "${{ github.base_ref || 'master' }}" "" | sed -n "s/^tag=//p")
           echo "tag=$tag" >>"$GITHUB_OUTPUT"
           [ -n "$tag" ] || echo "::notice::No release tag yet: no N-1 baseline to test against. Tag master as v<release> to enable this check."
       - uses: actions/setup-dotnet@v4

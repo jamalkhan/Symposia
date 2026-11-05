@@ -53,7 +53,10 @@ Each feature records its history: `[{ "stage": ..., "release": ... }]`. Rules ch
    - Bump `protocolVersion` if the change alters node-to-node behaviour.
 2. **Release N+1 or later:** append `required` at that release. Code may now rely on the feature once it is activated.
 3. **Governance** schedules the activation on each network: Dev first, then Testnet, then Mainnet. See [Activating a feature](#activating-a-feature) below.
-4. **The release after `required`:** append `retired` to the *old* feature, and delete its code.
+4. **The release after `required`:** append `retired` to the *old* feature, and delete its code. Include every compatibility shim that only existed for the old feature. For `storage.grpc.plaintext`, that means:
+   - the cleartext listener and the *Also serve gRPC in cleartext* setting;
+   - the `https://`-in-`grpc` shim in `NodeServices.StorageService.TlsUrl`;
+   - the pre-#145 feature inference in `ProtocolRequirements.Advertised`.
 
 Worked example (#142 → #145): `storage.grpc.tls` (offered 0.1.0) replaces `storage.grpc.plaintext`.
 1. Storage nodes serve both ports.
@@ -68,22 +71,26 @@ Worked example (#142 → #145): `storage.grpc.tls` (offered 0.1.0) replaces `sto
 - **Changes:** an activation can be postponed or cancelled before it takes effect. It can never be moved earlier, and it is permanent once in effect. The minimum version only rises.
 - **Record:** every change emits an event.
 - **Reading:** the Blockchain Gateway serves the schedule at `GET /v1/protocol` and the contract address in `GET /v1/network`.
-- **Gateway enforcement** (`NetworkPolicy`):
+- **Gateway enforcement** (`NetworkPolicy`, judged by the shared `ProtocolRequirements` that the Network tab also uses):
   - Before activation, a node lacking the feature is used, and a warning is logged on each refresh.
-  - After activation, the node is refused and dropped immediately.
-  - Activations the gateway has seen in effect are never forgotten, even if the Blockchain Gateway later becomes unreachable or reports otherwise.
+  - After activation, the node is refused and dropped from routing on the next refresh. Its replicas stop counting toward an object's copies, and a repair sweep starts right away to re-replicate onto nodes that remain. Its connection stays open for 60 s so calls already in flight can finish. If the drop leaves fewer healthy nodes than the write quorum, the gateway logs an error, because uploads will fail.
+  - Activations the gateway has seen in effect are never forgotten: not if the Blockchain Gateway later becomes unreachable or reports otherwise, and not across restarts (they are stored in the gateway's metadata database).
+  - **Clock:** each gateway judges activation times against its own UTC clock, so gateways must run NTP. Seconds of skew don't matter against a notice window of days. Chain time isn't used because an idle L3 or anvil chain mints no blocks, so its latest block timestamp can lag wall-clock time without limit.
   - A bad TLS proof refuses the node; it is never a reason to fall back to cleartext.
 
 ### Activating a feature
 
-1. Check readiness: Node Host → **Network** tab → *Protocol activations* shows each scheduled feature with "N of M storage nodes ready", and flags nodes that will be refused.
+1. Check readiness: Node Host → **Network** tab → *Protocol activations* shows each scheduled feature with "N of M storage nodes ready", and flags nodes that will be refused. Don't let an activation take effect while the nodes that are ready number fewer than the write quorum, plus enough to keep each object's minimum copies. Every lagging node is cut off at the same moment.
 2. Schedule it, as the owner:
    ```sh
    cast send <ProtocolActivations> 'schedule(string,uint64)' storage.grpc.tls <unix-time> \
      --rpc-url <rpc> --private-key <owner-key>
    ```
 3. Announce the time to operators. The `FeatureScheduled` event is the public record.
-4. To postpone, call `schedule` again with a later time. To withdraw, call `cancel(name)`. Both work only before the activation takes effect.
+4. To postpone, call `schedule` again with a later time. To withdraw, call `cancel(name)`. Both work only before the activation takes effect. A cancelled feature can be scheduled again, with a fresh notice window.
+5. Raising the minimum version (`scheduleMinProtocolVersion`) follows the same rules. A pending rise can be replaced with an equal or higher version, but its deadline never moves earlier.
+
+`minNotice` is fixed when the contract is deployed. Use 0 only on LocalDev chains. Testnet and Mainnet deployments must set `PROTOCOL_MIN_NOTICE` to at least 7 days (604800).
 
 ## The checks
 
@@ -97,9 +104,9 @@ Each check names its rule in the failure message. Fix the change, not the check.
 | **Golden fixtures** | `protocol-compat.yml` `fixtures` + `ProtocolContractTests` | A fixture in `protocol/fixtures/` deleted or edited; a fixture that no longer parses or validates; a C# record property missing from its schema | Fixtures are history: add a new one for the new shape and keep the old ones passing; add the property to the schema |
 | **Feature registry lifecycle** | `protocol-compat.yml` `registry` | The [lifecycle rules](#lifecycle) | Append a history entry at the next release; retire only after the replacement was required in an earlier release |
 | **Feature constants** | `ProtocolContractTests` | A `ProtocolFeatures` constant missing from the registry, a non-retired registry feature with no constant, or a retired feature still referenced | Keep `ProtocolFeatures.cs` and `features.json` in step |
-| **No local policy switches** | `ProtocolContractTests` | A new public `bool Require*` property on an `*Options` type | Put peer-acceptance rules in `NetworkPolicy`, driven by an activation. If the switch is genuinely node-local, add it to `protocol/options-allowlist.json` with a reason (CODEOWNERS review) |
-| **Contract storage layout** | `protocol-compat.yml` `storage-layout` | An existing slot changed, moved or retyped in an upgradeable (`GovernedUpgradeable`) contract; a stale snapshot | Only append state variables; run `tools/protocol-compat/storage-layout.sh --write` and commit the snapshot |
-| **Destructive migrations** | `protocol-compat.yml` `migrations` | Added `DROP TABLE`, `DROP COLUMN` or `RENAME` in metadata or migration code | Expand/contract: add the new column, dual-write, stop reading the old one, then drop it in a later release. A maintainer applies the `migration-contract-approved` label for the final drop |
+| **No local policy switches** | `ProtocolContractTests` | A new public `bool` property named `Require*`, `Allow*`, `Accept*`, `Skip*`, `Disable*`, `Insecure*` or `Trust*` on an `*Options` type. This is a naming rule; reviewers catch switches named otherwise | Put peer-acceptance rules in `NetworkPolicy`, driven by an activation. If the switch is genuinely node-local, add it to `protocol/options-allowlist.json` with a reason (CODEOWNERS review) |
+| **Contract storage layout** | `protocol-compat.yml` `storage-layout` | In an upgradeable (`GovernedUpgradeable`, ERC-7201) contract: a storage struct field removed, retyped or inserted before existing fields; a storage-location constant changed; a stale snapshot | Only append struct fields; run `tools/protocol-compat/storage-layout.sh --write` and commit the snapshot. Field types are compared by position, which also covers packing, since packing changes only with type or order |
+| **Destructive migrations** (advisory) | `protocol-compat.yml` `migrations` | Added `DROP TABLE/COLUMN/INDEX/VIEW/TRIGGER/CONSTRAINT`, `RENAME`, `ALTER COLUMN … TYPE`, `TRUNCATE`, or `ADD COLUMN … NOT NULL` without a default, in metadata or migration code, including SQL split across lines or concatenated. It doesn't see SQL built dynamically, data backfills (`UPDATE`/`DELETE`) or migrations elsewhere. CODEOWNERS review of `Metadata/` is the real control | Expand/contract: add the new column (nullable or with a default), dual-write, stop reading the old one, then drop it in a later release. A maintainer applies the `migration-contract-approved` label for the final drop |
 | **Mixed-version cluster** | `mixed-version.yml` | Release N and N-1 hosts that can't upload, download, replicate or repair together | Restore N-1 behaviour behind the overlap; see the smoke log artifact |
 | **Maintainer review** | `CODEOWNERS` + `protocol-change` label | Semantic changes no tool can see: same field with a new meaning, new timing, new ordering | Explain the compatibility story in the PR template |
 

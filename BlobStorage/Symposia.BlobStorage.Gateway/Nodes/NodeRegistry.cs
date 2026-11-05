@@ -28,15 +28,15 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private Timer? _probeTimer;
 
     private readonly IStorageRpcSigner? _signer;
-    private readonly INetworkPolicy? _policy;
+    private readonly INetworkPolicy _policy;
     private readonly HashSet<string> _tlsSeen = new(StringComparer.OrdinalIgnoreCase);
 
     public NodeRegistry(
         IOptions<GatewayOptions> options,
         GatewayMetadataStore store,
         ILogger<NodeRegistry> logger,
-        IStorageRpcSigner? signer = null,
-        INetworkPolicy? policy = null)
+        INetworkPolicy policy,
+        IStorageRpcSigner? signer = null)
     {
         _signer = signer;
         _policy = policy;
@@ -148,7 +148,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         var added = new List<NodeConnection>();
         var migrations = new List<(string Url, string Id)>();
         // TLS is required once storage.grpc.tls is activated on chain (#145), whatever the source.
-        var requireTls = _policy?.IsActive(ProtocolFeatures.StorageGrpcTls) == true;
+        var requireTls = _policy.IsActive(ProtocolFeatures.StorageGrpcTls);
+        var dropped = new List<NodeConnection>();
         lock (_lock)
         {
             foreach (var d in descriptors)
@@ -161,7 +162,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                     {
                         _logger.LogWarning("Dropping storage node {Node} ({Url}): {Reason}.", refused.Id, refused.Url, d.RefusedBecause);
                         _nodes.Remove(refused);
-                        refused.Dispose();
+                        dropped.Add(refused);
                     }
 
                     continue;
@@ -232,6 +233,11 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
             }
         }
 
+        if (dropped.Count > 0)
+        {
+            AfterDrop(dropped);
+        }
+
         foreach (var (url, id) in migrations)
         {
             var migrated = _store.RenameReplicaUrl(url, id);
@@ -249,6 +255,34 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
     /// <summary>Raised when a node becomes healthy (new or back online); used to start a repair sweep at once.</summary>
     public event Action<NodeConnection>? NodeBecameHealthy;
+
+    /// <summary>Raised after nodes are dropped by network policy, so repair re-replicates their objects promptly.</summary>
+    public event Action<IReadOnlyList<NodeConnection>>? NodesDropped;
+
+    /// <summary>How long a dropped node's connection stays open for calls already in flight.</summary>
+    internal static TimeSpan DrainDelay { get; set; } = TimeSpan.FromSeconds(60);
+
+    private void AfterDrop(IReadOnlyList<NodeConnection> dropped)
+    {
+        // Refusals are synchronous across the network at an activation (#145 review): say loudly when
+        // they leave too few nodes to write, and let in-flight calls finish before closing channels.
+        var healthy = All.Count(n => n.IsHealthy);
+        var quorum = _options.Value.WriteQuorumCount;
+        if (healthy < quorum)
+        {
+            _logger.LogError("Only {Healthy} healthy storage node(s) remain after dropping {Dropped}; writes need {Quorum}. Uploads will fail until nodes upgrade.",
+                healthy, string.Join(", ", dropped.Select(n => n.Id)), quorum);
+        }
+
+        NodesDropped?.Invoke(dropped);
+        _ = Task.Delay(DrainDelay).ContinueWith(_ =>
+        {
+            foreach (var node in dropped)
+            {
+                node.Dispose();
+            }
+        }, TaskScheduler.Default);
+    }
 
     // ── Health probing ────────────────────────────────────────────────────────
 

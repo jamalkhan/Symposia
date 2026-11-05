@@ -15,6 +15,13 @@ public sealed record ProtocolSchedule(
 
     public static readonly ProtocolSchedule None = new(false, 0, new MinVersion(0, 0, 0), []);
 
+    /// <summary>Drops malformed entries (null or empty names) a misbehaving source might send.</summary>
+    public ProtocolSchedule Sanitized() => this with
+    {
+        MinProtocolVersion = MinProtocolVersion ?? new MinVersion(0, 0, 0),
+        Features = (Features ?? []).Where(f => f is not null && !string.IsNullOrWhiteSpace(f.Name)).ToList(),
+    };
+
     /// <param name="ActivatesAt">0 = not scheduled (never scheduled, or cancelled).</param>
     public sealed record Activation(string Name, long ActivatesAt)
     {

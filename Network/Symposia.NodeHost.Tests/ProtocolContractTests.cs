@@ -163,7 +163,7 @@ public sealed class ProtocolContractTests
     // ── No local peer-policy switches ─────────────────────────────────────────
 
     [Fact]
-    public void OptionsTypes_HaveNoUnreviewedRequireSwitches()
+    public void OptionsTypes_HaveNoUnreviewedPolicySwitches()
     {
         var allowlist = Load("protocol/options-allowlist.json")["allowed"]!.AsArray()
             .ToDictionary(e => e!["property"]!.GetValue<string>(), e => e!["reason"]!.GetValue<string>());
@@ -173,7 +173,7 @@ public sealed class ProtocolContractTests
             .SelectMany(a => a.GetTypes())
             .Where(t => t.IsPublic && t.Name.EndsWith("Options", StringComparison.Ordinal))
             .SelectMany(t => t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                .Where(p => p.PropertyType == typeof(bool) && p.Name.StartsWith("Require", StringComparison.Ordinal))
+                .Where(p => p.PropertyType == typeof(bool) && PolicySwitchPrefixes.Any(prefix => p.Name.StartsWith(prefix, StringComparison.Ordinal)))
                 .Select(p => $"{t.FullName}.{p.Name}"))
             .ToHashSet();
 
@@ -185,6 +185,12 @@ public sealed class ProtocolContractTests
         var stale = allowlist.Keys.Except(found).ToList();
         Assert.True(stale.Count == 0, $"protocol/options-allowlist.json lists properties that no longer exist: {string.Join(", ", stale)}");
     }
+
+    /// <summary>
+    /// Names that usually mean "decide which peers are acceptable". A naming rule, not a semantic one:
+    /// reviewers still catch switches named otherwise (#146 review).
+    /// </summary>
+    private static readonly string[] PolicySwitchPrefixes = ["Require", "Allow", "Accept", "Skip", "Disable", "Insecure", "Trust"];
 
     private static IEnumerable<Assembly> NodeAssemblies() =>
         Directory.GetFiles(AppContext.BaseDirectory, "Symposia.*.dll")

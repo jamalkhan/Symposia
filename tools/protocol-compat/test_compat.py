@@ -160,6 +160,17 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(compat.scan_migrations("+++ b/BlobStorage/Gw/Metadata/Store.cs\n-DROP TABLE old\n"), [])
         self.assertEqual(compat.scan_migrations("+++ b/docs/x.md\n+DROP TABLE old\n"), [])
         self.assertEqual(compat.scan_migrations("+++ b/BlobStorage/Gw/Metadata/Store.cs\n+ALTER TABLE t ADD COLUMN x TEXT\n"), [])
+        self.assertEqual(compat.scan_migrations("+++ b/BlobStorage/Gw/Metadata/Store.cs\n+ALTER TABLE t ADD COLUMN n INTEGER NOT NULL DEFAULT 0\n"), [])
+        self.assertEqual(compat.scan_migrations("+++ b/BlobStorage/Gw/Metadata/Store.cs\n+DELETE FROM gc_queue WHERE cid = $c\n"), [])
+
+    def test_wider_destructive_forms_are_caught(self):
+        for sql in ["DROP INDEX ix_objects", "ALTER TABLE t ALTER COLUMN size TYPE int", "TRUNCATE gc_queue",
+                    "ALTER TABLE t ADD COLUMN owner TEXT NOT NULL", "DROP VIEW v"]:
+            self.assertTrue(compat.scan_migrations(f"+++ b/x/Metadata/S.cs\n+{sql}\n"), sql)
+
+    def test_statements_split_across_lines_or_concatenated_are_caught(self):
+        diff = '+++ b/x/Metadata/S.cs\n+    cmd.CommandText = "ALTER TABLE objects " +\n+        "DROP COLUMN etag_override";\n'
+        self.assertEqual(len(compat.scan_migrations(diff)), 1)
 
 
 if __name__ == "__main__":

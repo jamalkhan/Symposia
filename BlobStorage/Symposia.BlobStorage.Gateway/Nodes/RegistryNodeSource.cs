@@ -27,7 +27,7 @@ public sealed class RegistryNodeSource(
         var members = await registry.ListNodesAsync(ct);
         logger.LogDebug("Registry lists {Count} node(s); resolving storage services.", members.Count);
 
-        var found = new Dictionary<string, StorageNodeDescriptor>(StringComparer.OrdinalIgnoreCase);
+        var found = new Dictionary<string, StorageNodeDescriptor>(StringComparer.OrdinalIgnoreCase); // by node ID
         await Parallel.ForEachAsync(members, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (member, token) =>
         {
             var descriptor = await DescribeAsync(member, token);
@@ -35,7 +35,7 @@ public sealed class RegistryNodeSource(
             {
                 lock (found)
                 {
-                    found[descriptor.RefusedBecause is null ? descriptor.Url : "refused:" + descriptor.Id] = descriptor;
+                    found[descriptor.Id] = descriptor;
                 }
             }
         });

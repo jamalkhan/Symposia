@@ -118,7 +118,10 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
         }
     }
 
-    /// <summary>Scheduled <c>storage.*</c> activations a storage node doesn't advertise yet.</summary>
+    /// <summary>
+    /// Requirements a storage node fails now or will fail at an upcoming activation, judged by the same
+    /// <see cref="ProtocolRequirements"/> gateways enforce, so this tab can't disagree with them.
+    /// </summary>
     internal static IReadOnlyList<string> Unready(NodeServices? services, ProtocolSchedule schedule)
     {
         if (services?.Storage is null)
@@ -126,24 +129,10 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
             return [];
         }
 
-        var now = DateTimeOffset.UtcNow;
-        var warnings = schedule.Features
-            .Where(f => f.ActivatesAt > 0 && f.Name.StartsWith("storage.", StringComparison.Ordinal) && !services.Has(f.Name))
-            .Select(f => f.InEffect(now)
-                ? $"Refused by gateways: lacks {f.Name} (required since {DateTimeOffset.FromUnixTimeSeconds(f.ActivatesAt):u})"
-                : $"Will be refused at {DateTimeOffset.FromUnixTimeSeconds(f.ActivatesAt):u}: lacks {f.Name}")
+        var verdict = ProtocolRequirements.EvaluateStorageNode(services, schedule, DateTimeOffset.UtcNow);
+        return verdict.RefusedBecause.Select(r => $"Refused by gateways: {r}")
+            .Concat(verdict.Upcoming.Select(u => $"Will be refused: {u}"))
             .ToList();
-        var min = schedule.MinProtocolVersion;
-        if (services.ProtocolVersion < min.At(now))
-        {
-            warnings.Add($"Refused by gateways: protocol version {services.ProtocolVersion} is below the minimum {min.At(now)}");
-        }
-        else if (min.Pending > services.ProtocolVersion && min.PendingAt > 0)
-        {
-            warnings.Add($"Will be refused at {DateTimeOffset.FromUnixTimeSeconds(min.PendingAt):u}: protocol version {services.ProtocolVersion} is below {min.Pending}");
-        }
-
-        return warnings;
     }
 
     internal static IReadOnlyList<ActivationReadiness> Readiness(IReadOnlyList<NetworkNodeRow> rows, ProtocolSchedule schedule)
@@ -151,10 +140,10 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
         var storage = rows.Where(r => r.Services?.Storage is not null).ToList();
         var now = DateTimeOffset.UtcNow;
         return schedule.Features
-            .Where(f => f.ActivatesAt > 0)
+            .Where(f => f.ActivatesAt > 0 && f.Name.StartsWith(ProtocolRequirements.StorageScope, StringComparison.Ordinal))
             .OrderBy(f => f.ActivatesAt)
             .Select(f => new ActivationReadiness(f.Name, f.ActivatesAt, f.InEffect(now),
-                storage.Count(r => r.Services!.Has(f.Name)), storage.Count))
+                storage.Count(r => ProtocolRequirements.Advertised(r.Services!).Contains(f.Name)), storage.Count))
             .ToList();
     }
 

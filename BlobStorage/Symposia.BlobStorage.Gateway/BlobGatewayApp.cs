@@ -126,6 +126,8 @@ public static class BlobGatewayApp
         // A node coming online (new, or back from an outage) gets missing copies straight away (issue #135).
         var replicationMonitor = app.Services.GetRequiredService<ReplicationMonitor>();
         app.Services.GetRequiredService<NodeRegistry>().NodeBecameHealthy += _ => replicationMonitor.RequestSweep();
+        // Nodes refused by network policy (#145): re-replicate their objects now, not at the next scan.
+        app.Services.GetRequiredService<NodeRegistry>().NodesDropped += _ => replicationMonitor.RequestSweep();
 
         // ── SigV4 middleware ──────────────────────────────────────────────────────────
 

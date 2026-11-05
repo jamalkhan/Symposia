@@ -232,19 +232,36 @@ def diff_storage_layout(base: dict[str, Any], head: dict[str, Any], contract: st
 
 # ── Migrations ─────────────────────────────────────────────────────────────────
 
-DESTRUCTIVE = re.compile(r"\b(DROP\s+(TABLE|COLUMN)|RENAME\s+(TO|COLUMN))\b", re.IGNORECASE)
+DESTRUCTIVE = re.compile(
+    r"\b(DROP\s+(TABLE|COLUMN|INDEX|VIEW|TRIGGER|CONSTRAINT)"
+    r"|RENAME\s+(TO|COLUMN)"
+    r"|ALTER\s+COLUMN\b[^;]*?\bTYPE\b"
+    r"|TRUNCATE\b"
+    r"|ADD\s+(COLUMN\s+)?\w+\s+\w+[^;,]*?\bNOT\s+NULL\b(?![^;,]*\bDEFAULT\b))",
+    re.IGNORECASE)
 MIGRATION_PATHS = re.compile(r"(/Metadata/|/Migrations?/|ManifestStore\.cs$|\.sql$)")
 
 
 def scan_migrations(diff: str) -> list[str]:
-    """Added lines in metadata/migration code that drop or rename schema objects."""
-    problems: list[str] = []
+    """Added code in metadata/migration files that drops, renames, retypes or truncates schema objects,
+    or adds a NOT NULL column without a default (breaks the previous release's writers).
+
+    Advisory, not proof: statements are matched across each file's added lines joined together (so SQL
+    split over lines or string concatenations is still seen), but SQL built dynamically or living in
+    other paths is not. CODEOWNERS review of metadata code is the real control (#146 review)."""
+    added: dict[str, list[str]] = {}
     current = None
     for line in diff.splitlines():
         if line.startswith("+++ "):
             current = line[6:] if line.startswith("+++ b/") else None
-        elif line.startswith("+") and current and MIGRATION_PATHS.search(current) and DESTRUCTIVE.search(line):
-            problems.append(f"{current}: destructive schema change: {line[1:].strip()}")
+        elif line.startswith("+") and current and MIGRATION_PATHS.search(current):
+            added.setdefault(current, []).append(line[1:])
+    problems: list[str] = []
+    for path, lines in added.items():
+        text = " ".join(l.strip() for l in lines)
+        text = re.sub(r'"\s*\+\s*"', "", text)  # "ALTER TABLE x " + "DROP COLUMN y"
+        for m in DESTRUCTIVE.finditer(text):
+            problems.append(f"{path}: destructive schema change: {m.group(0).strip()}")
     return problems
 
 

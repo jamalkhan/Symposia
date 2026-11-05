@@ -118,6 +118,15 @@ contract ProtocolActivationsTest is Test {
         assertEq(pending, 3);
     }
 
+    function test_minVersion_higherVersionCannotBringTheDeadlineForward() public {
+        vm.startPrank(GOV);
+        pa.scheduleMinProtocolVersion(2, _at(NOTICE * 4));
+        vm.expectRevert(abi.encodeWithSelector(ProtocolActivations.EarlierThanScheduled.selector, _at(NOTICE * 4)));
+        pa.scheduleMinProtocolVersion(3, _at(NOTICE));
+        pa.scheduleMinProtocolVersion(3, _at(NOTICE * 4));
+        vm.stopPrank();
+    }
+
     function test_scheduleTwice_noDuplicate() public {
         vm.startPrank(GOV);
         pa.schedule("x", _at(NOTICE));

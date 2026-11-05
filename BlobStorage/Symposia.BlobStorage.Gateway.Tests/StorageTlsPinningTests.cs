@@ -92,7 +92,7 @@ public sealed class StorageTlsPinningTests : IDisposable
     {
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
-        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, policy: Policy(tlsActive: true));
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, Policy(tlsActive: true));
         nodes.Sync([new StorageNodeDescriptor("http://static:6180", "http://static:6180")]);
         Assert.Empty(nodes.All);
     }
@@ -103,12 +103,15 @@ public sealed class StorageTlsPinningTests : IDisposable
     {
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
-        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, policy: Policy(tlsActive: false));
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, Policy(tlsActive: false));
         nodes.Sync([new StorageNodeDescriptor("0xA", "https://10.0.0.1:6280", "aa")]);
 
+        IReadOnlyList<NodeConnection>? dropped = null;
+        nodes.NodesDropped += d => dropped = d; // the gateway wires this to an immediate repair sweep
         nodes.Sync([StorageNodeDescriptor.Refused("0xA", "it lacks required protocol feature(s) storage.x")]);
 
         Assert.Empty(nodes.All);
+        Assert.Equal("0xA", Assert.Single(dropped!).Id);
     }
 
     [Fact]
@@ -116,7 +119,7 @@ public sealed class StorageTlsPinningTests : IDisposable
     {
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
-        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, policy: Policy(tlsActive: false));
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, Policy(tlsActive: false));
         nodes.Sync([new StorageNodeDescriptor("0xA", "https://10.0.0.1:6180", "aa")]);
 
         nodes.Sync([new StorageNodeDescriptor("0xA", "http://10.0.0.1:6180")]); // e.g. a rewritten services document
@@ -130,7 +133,7 @@ public sealed class StorageTlsPinningTests : IDisposable
     {
         var store = new GatewayMetadataStore(Options());
         store.Initialize();
-        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance);
+        using var nodes = new NodeRegistry(Options(), store, NullLogger<NodeRegistry>.Instance, new NetworkPolicy(Options(), NullLogger<NetworkPolicy>.Instance));
         nodes.Sync([new StorageNodeDescriptor("0xA", "https://10.0.0.1:6180", "aa")]);
         var before = Assert.Single(nodes.All);
 

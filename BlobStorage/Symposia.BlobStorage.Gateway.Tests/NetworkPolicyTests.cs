@@ -126,6 +126,52 @@ public sealed class NetworkPolicyTests
         Assert.Null(policy.AdmitStorageNode(Node, Current(version: 1)).Node);
     }
 
+    // #145 review (Lenny 1): restarting while the Blockchain Gateway is down must not relax requirements.
+    [Fact]
+    public void RequirementsSeenInEffect_SurviveARestart()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "sym145p-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var options = Microsoft.Extensions.Options.Options.Create(new GatewayOptions
+            {
+                ChainId = Chain, NodeRegistryAddress = Registry, MetadataDbPath = Path.Combine(dir, "meta.db"),
+            });
+            var store = new Metadata.GatewayMetadataStore(options);
+            store.Initialize();
+            var before = new NetworkPolicy(options, NullLogger<NetworkPolicy>.Instance, store);
+            before.Apply(new ProtocolSchedule(true, 0, new ProtocolSchedule.MinVersion(1, 0, 0),
+                [new ProtocolSchedule.Activation(ProtocolFeatures.StorageGrpcTls, Past)]));
+
+            var after = new NetworkPolicy(options, NullLogger<NetworkPolicy>.Instance, store); // restart, schedule unreadable
+            Assert.True(after.IsActive(ProtocolFeatures.StorageGrpcTls));
+            Assert.Null(after.AdmitStorageNode(Node, Legacy()).Node);
+            Assert.Null(after.AdmitStorageNode(Node, Current(version: 0)).Node);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    // #145 review (Lenny 4): garbage from the Blockchain Gateway is ignored, not fatal.
+    [Fact]
+    public void MalformedScheduleEntries_AreIgnored()
+    {
+        var policy = Policy();
+        policy.Apply(new ProtocolSchedule(true, 0, null!, [null!, new ProtocolSchedule.Activation(null!, Past), new ProtocolSchedule.Activation("", Past)]));
+        Assert.NotNull(policy.AdmitStorageNode(Node, Current()).Node);
+    }
+
+    [Fact]
+    public void ARefusedNode_IsAdmittedAgainOnceItUpgrades()
+    {
+        var policy = Policy(new ProtocolSchedule.Activation(ProtocolFeatures.StorageGrpcTls, Past));
+        Assert.Null(policy.AdmitStorageNode(Node, Legacy()).Node);
+        Assert.NotNull(policy.AdmitStorageNode(Node, Current()).Node);
+    }
+
     [Fact]
     public void BadTlsProof_RefusesTheNode_InsteadOfFallingBackToCleartext()
     {
