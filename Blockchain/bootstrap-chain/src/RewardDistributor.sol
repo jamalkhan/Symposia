@@ -10,6 +10,7 @@ import {IProtocolConfig} from "./config/IProtocolConfig.sol";
 import {ConfigKeys} from "./config/ConfigKeys.sol";
 import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
 import {IFoundationRewardHook} from "./interfaces/IFoundationRewardHook.sol";
+import {INetworkRewardsEmission} from "./interfaces/INetworkRewardsEmission.sol";
 
 /// @title RewardDistributor
 /// @notice Implements FR-4 of issue #52 and reconciles/completes it against
@@ -308,6 +309,13 @@ contract RewardDistributor is GovernedUpgradeable {
 
     // --- Epoch sealing ---
 
+    /// @notice IEpochClock (#73): timestamp at which `epoch` ends.
+    function epochEndTimestamp(uint256 epoch) public view returns (uint256) {
+        uint256 genesis = config().getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP);
+        uint256 length = config().getUint(ConfigKeys.EPOCH_LENGTH);
+        return genesis + (epoch + 1) * length;
+    }
+
     function epochFinalityDeadline(uint256 epoch) public view returns (uint256) {
         uint256 genesis = config().getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP);
         uint256 length = config().getUint(ConfigKeys.EPOCH_LENGTH);
@@ -323,7 +331,7 @@ contract RewardDistributor is GovernedUpgradeable {
         if ($.seals[epoch].sealed_) revert EpochAlreadySealed(epoch);
         if (block.timestamp < epochFinalityDeadline(epoch)) revert FinalityWindowNotElapsed(epoch);
 
-        uint256 emission = config().getUint(ConfigKeys.REWARD_EMISSION_PER_EPOCH);
+        uint256 emission = _epochEmission(epoch);
         uint256 capacityBps = config().getUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS);
         uint256 capacityAmount = (emission * capacityBps) / 10_000;
 
@@ -367,6 +375,16 @@ contract RewardDistributor is GovernedUpgradeable {
 
         $.seals[epoch] = EpochSeal({sealed_: true, sealedAt: block.timestamp});
         emit EpochSealed(epoch, n, totalDistributed);
+    }
+
+    /// @notice SYM available to distribute for `epoch`. With an emission
+    /// source configured (#73) this triggers the idempotent mint into this
+    /// contract and uses the delivered amount; otherwise it falls back to the
+    /// flat `REWARD_EMISSION_PER_EPOCH` (pre-#73 deployments and tests).
+    function _epochEmission(uint256 epoch) internal returns (uint256) {
+        address source = config().getAddress(ConfigKeys.REWARD_EMISSION_SOURCE);
+        if (source == address(0)) return config().getUint(ConfigKeys.REWARD_EMISSION_PER_EPOCH);
+        return INetworkRewardsEmission(source).emitForEpoch(epoch);
     }
 
     /// @notice #53 FR2.2/FR2.3: per-node epoch score. If the node used the

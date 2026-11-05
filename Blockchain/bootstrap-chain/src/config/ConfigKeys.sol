@@ -54,6 +54,9 @@ library ConfigKeys {
     bytes32 internal constant REWARD_RESERVE_SWEEP_EPOCHS = keccak256("reward.reserve.sweepEpochs");
     bytes32 internal constant REWARD_FINALITY_WINDOW = keccak256("reward.finalityWindow");
     bytes32 internal constant REWARD_METRIC_SIGNER = keccak256("reward.metric.signer");
+    /// @notice NetworkRewardsEmission (#73). When set, `sealEpoch` pulls the
+    /// epoch's emission from it instead of `REWARD_EMISSION_PER_EPOCH`.
+    bytes32 internal constant REWARD_EMISSION_SOURCE = keccak256("reward.emissionSource");
 
     function rewardTypeWeight(uint8 nodeType) internal pure returns (bytes32) {
         return keccak256(abi.encode("reward.typeWeight", nodeType));
