@@ -105,20 +105,39 @@ public sealed class EpochSealChain : IEpochSealChain
         return reporters;
     }
 
-    public Task SealAsync(ulong epoch, IReadOnlyList<string> nodes, CancellationToken ct) =>
-        _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<SealEpochFunction>()
+    public async Task SealAsync(ulong epoch, IReadOnlyList<string> nodes, CancellationToken ct)
+    {
+        var receipt = await _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<SealEpochFunction>()
             .SendRequestAndWaitForReceiptAsync(_distributor, new SealEpochFunction { Epoch = epoch, Nodes = [.. nodes] }, ct), ct);
+        // A mined revert (e.g. another sealer won the race) must not count as a seal.
+        if (receipt.Status?.Value != 1)
+        {
+            throw new InvalidOperationException($"sealEpoch({epoch}) reverted in {receipt.TransactionHash}.");
+        }
+    }
+
+    /// <summary>Log queries are paged so a long chain never exceeds a provider's block-range or result cap.</summary>
+    private const ulong LogPageBlocks = 5_000;
 
     /// <param name="epochIsFirstTopic">Report events index (node, epoch); record events index (epoch, node).</param>
     private async Task<IEnumerable<string>> NodesAsync<TEvent>(string contract, ulong epoch, Func<TEvent, string> node, bool epochIsFirstTopic = false)
         where TEvent : IEventDTO, new()
     {
         var ev = _web3.Eth.GetEvent<TEvent>(contract);
-        // An empty topic array matches any node; the other indexed topic pins the epoch.
-        var filter = epochIsFirstTopic
-            ? ev.CreateFilterInput<BigInteger>([epoch], _fromBlock, BlockParameter.CreateLatest())
-            : ev.CreateFilterInput<object, BigInteger>([], [epoch], _fromBlock, BlockParameter.CreateLatest());
-        var logs = await ev.GetAllChangesAsync(filter);
-        return logs.Select(l => node(l.Event));
+        var latest = (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+        var from = _fromBlock.BlockNumber is { } start ? (ulong)start.Value : 0UL;
+        var nodes = new List<string>();
+        for (; from <= latest; from += LogPageBlocks)
+        {
+            var to = new BlockParameter(new Nethereum.Hex.HexTypes.HexBigInteger(Math.Min(latest, from + LogPageBlocks - 1)));
+            var page = new BlockParameter(new Nethereum.Hex.HexTypes.HexBigInteger(from));
+            // An empty topic array matches any node; the other indexed topic pins the epoch.
+            var filter = epochIsFirstTopic
+                ? ev.CreateFilterInput<BigInteger>([epoch], page, to)
+                : ev.CreateFilterInput<object, BigInteger>([], [epoch], page, to);
+            nodes.AddRange((await ev.GetAllChangesAsync(filter)).Select(l => node(l.Event)));
+        }
+
+        return nodes;
     }
 }

@@ -167,3 +167,55 @@ public sealed class LedgerServiceTests
     public void FormatSym_IsExact(string wei, string expected) =>
         Assert.Equal(expected, LedgerService.FormatSym(BigInteger.Parse(wei)));
 }
+
+/// <summary>Review fixes (Frank #1, #2): partial-chunk failures and confirmation depth.</summary>
+public sealed class LedgerScanSafetyTests
+{
+    private sealed class FlakySource : ILedgerLogSource
+    {
+        public bool FailTimestamps { get; set; }
+
+        public ulong Latest { get; set; } = 10;
+
+        public Task<ulong> LatestBlockAsync(CancellationToken ct) => Task.FromResult(Latest);
+
+        public Task<ulong> StartBlockAsync(CancellationToken ct) => Task.FromResult(0UL);
+
+        public Task<IReadOnlyList<LedgerLog>> LogsAsync(string node, ulong from, ulong to, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<LedgerLog>>(new LedgerLog[]
+            {
+                new ServiceRegisteredLog(1, 0, "0xa", 0, BigInteger.One),
+                new ServiceRegisteredLog(2, 0, "0xb", 8, BigInteger.One),
+            }.Where(l => l.Block >= from && l.Block <= to).ToList());
+
+        public Task<long> BlockTimestampAsync(ulong block, CancellationToken ct) =>
+            FailTimestamps && block == 2 ? throw new HttpRequestException("timeout") : Task.FromResult(1L);
+
+        public Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct) => Task.FromResult(BigInteger.Zero);
+    }
+
+    [Fact]
+    public async Task FailureMidChunk_DoesNotDuplicateRows()
+    {
+        var source = new FlakySource { FailTimestamps = true };
+        var ledger = new LedgerService(() => source, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", () => null);
+        await Assert.ThrowsAsync<HttpRequestException>(() => ledger.SnapshotAsync(default));
+
+        source.FailTimestamps = false;
+        var snap = await ledger.SnapshotAsync(default);
+
+        Assert.Equal(2, snap.Entries.Count);
+    }
+
+    [Fact]
+    public async Task StopsConfirmationsBehindTheHead()
+    {
+        var source = new FlakySource { Latest = 13 };
+        var ledger = new LedgerService(() => source, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", () => null, confirmations: 12);
+
+        var snap = await ledger.SnapshotAsync(default);
+
+        Assert.Single(snap.Entries);
+        Assert.Equal(1UL, snap.ScannedToBlock);
+    }
+}

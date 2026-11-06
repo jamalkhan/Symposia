@@ -85,6 +85,9 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
         _web3.Eth.GetContractQueryHandler<RecordChunkWrittenFunction>()
             .QueryAsync<bool>(options.TelemetryRegistryAddress, new RecordChunkWrittenFunction { Epoch = epoch, Chunk = chunk });
 
+    public async Task<int> RecordChunkCountAsync(ulong epoch, CancellationToken ct) =>
+        (int)await Uint<RecordChunkCountFunction>(options.TelemetryRegistryAddress, new RecordChunkCountFunction { Epoch = epoch });
+
     public Task<bool> RecordsFinalizedAsync(ulong epoch, CancellationToken ct) =>
         _web3.Eth.GetContractQueryHandler<RecordsFinalizedFunction>()
             .QueryAsync<bool>(options.TelemetryRegistryAddress, new RecordsFinalizedFunction { Epoch = epoch });
@@ -151,6 +154,13 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
         [Parameter("bytes32", "blobAddress", 2)] public byte[] BlobAddress { get; set; } = [];
         [Parameter("uint32", "sampleCount", 3)] public uint SampleCount { get; set; }
         [Parameter("uint64", "committedAt", 4)] public ulong CommittedAt { get; set; }
+    }
+
+    [Function("recordChunkCount", "uint256")]
+    private sealed class RecordChunkCountFunction : FunctionMessage
+    {
+        [Parameter("uint256", "epoch", 1)]
+        public BigInteger Epoch { get; set; }
     }
 
     [Function("recordChunkWritten", "bool")]

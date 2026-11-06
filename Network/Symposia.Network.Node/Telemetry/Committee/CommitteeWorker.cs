@@ -224,7 +224,12 @@ public sealed class CommitteeWorker(
             return; // a committed batch isn't fetchable yet: never sign partial data
         }
 
-        var perTx = Math.Max(1, await chain.RecordsPerTxAsync(ct));
+        // Once a chunk has landed, its count is fixed on-chain: chunk the same way even if
+        // governance changed recordsPerTx since, or the remaining chunks would never be accepted.
+        var fixedCount = await chain.RecordChunkCountAsync(epoch, ct);
+        var perTx = fixedCount > 0 && records.Count > 0
+            ? (records.Count + fixedCount - 1) / fixedCount
+            : Math.Max(1, await chain.RecordsPerTxAsync(ct));
         var chunks = records.Count == 0 ? [[]] : records.Chunk(perTx).Select(c => (IReadOnlyList<AggregatedMetricInput>)c).ToList();
         for (var i = 0; i < chunks.Count; i++)
         {
@@ -243,9 +248,17 @@ public sealed class CommitteeWorker(
                 .Select(r => (r.Member, r.Signature)), threshold);
             if (signatures is not null)
             {
-                await relay.SubmitRecordsAsync(epoch, i, chunks.Count, chunks[i], signatures, ct);
-                Metrics.RecordChunks.Increment();
-                logger.LogInformation("Submitted records chunk {Chunk}/{Count} for epoch {Epoch}.", i + 1, chunks.Count, epoch);
+                try
+                {
+                    await relay.SubmitRecordsAsync(epoch, i, chunks.Count, chunks[i], signatures, ct);
+                    Metrics.RecordChunks.Increment();
+                    logger.LogInformation("Submitted records chunk {Chunk}/{Count} for epoch {Epoch}.", i + 1, chunks.Count, epoch);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Usually another member won the race (ChunkAlreadyWritten); keep going with the other chunks.
+                    logger.LogInformation(ex, "Records chunk {Chunk}/{Count} for epoch {Epoch} not submitted; continuing.", i + 1, chunks.Count, epoch);
+                }
             }
         }
     }

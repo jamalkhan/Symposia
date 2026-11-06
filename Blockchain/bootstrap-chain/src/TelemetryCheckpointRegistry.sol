@@ -451,6 +451,11 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         return _ts().recordCount[epoch];
     }
 
+    /// @notice Chunk count fixed by `epoch`'s first chunk (0 = none yet); later chunks must match it.
+    function recordChunkCount(uint256 epoch) external view returns (uint256) {
+        return _ts().recordChunkCount[epoch];
+    }
+
     function recordChunkWritten(uint256 epoch, uint256 chunkIndex) external view returns (bool) {
         return _ts().recordChunkWritten[epoch][chunkIndex];
     }

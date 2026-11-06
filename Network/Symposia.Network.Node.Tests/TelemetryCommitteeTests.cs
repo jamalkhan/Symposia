@@ -398,6 +398,8 @@ internal sealed class FakeTelemetryChain(List<string> members, int threshold, Te
 
     public Task<int> RecordsPerTxAsync(CancellationToken ct) => Task.FromResult(200);
 
+    public Task<int> RecordChunkCountAsync(ulong epoch, CancellationToken ct) => Task.FromResult(Chunks.Any(c => c.Item1 == epoch) ? 1 : 0);
+
     public Task<bool> RecordChunkWrittenAsync(ulong epoch, int chunk, CancellationToken ct) => Task.FromResult(Chunks.Contains((epoch, chunk)));
 
     public Task<bool> RecordsFinalizedAsync(ulong epoch, CancellationToken ct) => Task.FromResult(Finalized.Contains(epoch));

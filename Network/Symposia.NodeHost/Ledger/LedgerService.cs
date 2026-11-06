@@ -41,7 +41,8 @@ public sealed record LedgerSnapshot(bool Available, string? Reason, IReadOnlyLis
 /// Service. Scans <c>eth_getLogs</c> in chunks from the registry's deployment block, then only new blocks
 /// on later loads (an in-memory cursor; one scan at a time).
 /// </summary>
-public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string node, Func<string?> unavailableReason)
+/// <param name="confirmations">Blocks behind the head to stop at, so a reorg can't leave orphaned rows behind.</param>
+public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string node, Func<string?> unavailableReason, ulong confirmations = 0)
 {
     public const ulong ChunkSize = 5_000;
 
@@ -93,12 +94,20 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
 
     private async Task ScanAsync(ILedgerLogSource source, CancellationToken ct)
     {
-        var latest = await source.LatestBlockAsync(ct);
+        var head = await source.LatestBlockAsync(ct);
+        if (head < confirmations)
+        {
+            return;
+        }
+
+        var latest = head - confirmations;
         var from = _cursor is { } c ? c + 1 : await source.StartBlockAsync(ct);
         while (from <= latest)
         {
             var to = Math.Min(latest, from + ChunkSize - 1);
             var logs = await source.LogsAsync(node, from, to, ct);
+            // A chunk lands together with its cursor: a failure part-way leaves nothing behind to duplicate.
+            var chunk = new List<LedgerEntry>();
             foreach (var log in logs.OrderBy(l => l.Block).ThenBy(l => l.LogIndex))
             {
                 if (!_timestamps.TryGetValue(log.Block, out var ts))
@@ -109,10 +118,11 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
 
                 if (Map(log, ts) is { } entry)
                 {
-                    _entries.Add(entry);
+                    chunk.Add(entry);
                 }
             }
 
+            _entries.AddRange(chunk);
             _cursor = to;
             from = to + 1;
         }

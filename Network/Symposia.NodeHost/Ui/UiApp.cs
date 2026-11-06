@@ -335,7 +335,8 @@ public static class UiApp
             _ => null,
         };
 
-        return new Ledger.LedgerService(Source, nodeAddress, Unavailable);
+        // Local anvil has no reorgs; real chains stay a few blocks behind the head.
+        return new Ledger.LedgerService(Source, nodeAddress, Unavailable, context.Network?.ChainId == 31337 ? 0UL : 12UL);
     }
 
     private static void CheckEndpoint(string service, string endpoint, List<string> errors)

@@ -31,6 +31,9 @@ public interface ITelemetryChain
 
     Task<bool> RecordChunkWrittenAsync(ulong epoch, int chunk, CancellationToken ct);
 
+    /// <summary>Chunk count fixed on-chain by the epoch's first chunk; 0 until one lands.</summary>
+    Task<int> RecordChunkCountAsync(ulong epoch, CancellationToken ct);
+
     Task<bool> RecordsFinalizedAsync(ulong epoch, CancellationToken ct);
 }
 
