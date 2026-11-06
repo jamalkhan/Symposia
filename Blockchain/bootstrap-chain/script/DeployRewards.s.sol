@@ -14,6 +14,7 @@ import {ReliabilityRegistry} from "../src/ReliabilityRegistry.sol";
 import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.sol";
 import {NetworkRewardsEmission} from "../src/NetworkRewardsEmission.sol";
 import {EpochController} from "../src/EpochController.sol";
+import {ScoringWeights} from "../src/ScoringWeights.sol";
 import {IEpochClock} from "../src/interfaces/IEpochClock.sol";
 import {IFeeTreasury} from "../src/interfaces/IFeeTreasury.sol";
 import {ISYMMinter} from "../src/interfaces/ISYMMinter.sol";
@@ -47,6 +48,7 @@ contract DeployRewards is Script {
     struct Deployment {
         MockProtocolConfig config;
         EpochController epochs;
+        ScoringWeights weights;
         SYMToken token;
         StakingNodeRegistry registry;
         SlashingController slashing;
@@ -80,6 +82,7 @@ contract DeployRewards is Script {
 
         d.registry = StakingNodeRegistry(_proxy(address(new StakingNodeRegistry()), abi.encodeCall(StakingNodeRegistry.initialize, (cfg))));
         d.slashing = SlashingController(_proxy(address(new SlashingController()), abi.encodeCall(SlashingController.initialize, (cfg))));
+        d.weights = ScoringWeights(_proxy(address(new ScoringWeights()), abi.encodeCall(ScoringWeights.initialize, (cfg))));
         d.rewards = RewardDistributor(_proxy(address(new RewardDistributor()), abi.encodeCall(RewardDistributor.initialize, (cfg))));
         d.reliability = ReliabilityRegistry(_proxy(address(new ReliabilityRegistry()), abi.encodeCall(ReliabilityRegistry.initialize, (cfg))));
         d.telemetry = TelemetryCheckpointRegistry(
@@ -130,6 +133,10 @@ contract DeployRewards is Script {
         // Rewards (#73, #80).
         cfg.setAddress(ConfigKeys.REWARD_EMISSION_SOURCE, address(d.emission));
         cfg.setAddress(ConfigKeys.REWARD_RELIABILITY_REGISTRY, address(d.reliability));
+        // #76: score storage nodes from finalized telemetry; fall back to signed reports after 24h.
+        cfg.setAddress(ConfigKeys.REWARD_SCORING_WEIGHTS, address(d.weights));
+        cfg.setAddress(ConfigKeys.REWARD_TELEMETRY_REGISTRY, address(d.telemetry));
+        cfg.setUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT, 24 hours);
         cfg.setAddress(ConfigKeys.REWARD_METRIC_SIGNER, roles.metricSigner);
         cfg.setUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS, 9_200);
         cfg.setUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS, 800);
@@ -203,6 +210,7 @@ contract DeployRewards is Script {
     function _log(Deployment memory d) internal pure {
         console.log("ProtocolConfig:", address(d.config));
         console.log("EpochController:", address(d.epochs));
+        console.log("ScoringWeights:", address(d.weights));
         console.log("SYMToken:", address(d.token));
         console.log("StakingNodeRegistry:", address(d.registry));
         console.log("SlashingController:", address(d.slashing));
@@ -217,6 +225,7 @@ contract DeployRewards is Script {
         vm.serializeUint(k, "chainId", block.chainid);
         vm.serializeAddress(k, "ProtocolConfig", address(d.config));
         vm.serializeAddress(k, "EpochController", address(d.epochs));
+        vm.serializeAddress(k, "ScoringWeights", address(d.weights));
         vm.serializeAddress(k, "SYMToken", address(d.token));
         vm.serializeAddress(k, "StakingNodeRegistry", address(d.registry));
         vm.serializeAddress(k, "SlashingController", address(d.slashing));

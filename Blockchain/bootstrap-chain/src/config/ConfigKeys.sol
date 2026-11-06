@@ -122,6 +122,8 @@ library ConfigKeys {
     /// @notice How long settlement waits for an epoch's telemetry records before falling back to
     /// signed metric reports (#76/#158).
     bytes32 internal constant REWARD_RECORDS_MAX_WAIT = keccak256("reward.recordsMaxWait");
+    /// @notice ScoringWeights: per-type factor weight tables (#76).
+    bytes32 internal constant REWARD_SCORING_WEIGHTS = keccak256("reward.scoringWeights");
 
     // --- SlashingController ---
     bytes32 internal constant SLASHING_STAGE3_PCT_PER_EPOCH_BPS = keccak256("slashing.stage3.pctPerEpochBps");

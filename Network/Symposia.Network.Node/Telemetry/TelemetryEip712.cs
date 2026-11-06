@@ -42,6 +42,8 @@ public sealed class AggregatedMetricInput
     [Parameter("uint16", "attestationCount", 6)] public ushort AttestationCount { get; set; }
     [Parameter("uint16", "firstCheckpoint", 7)] public ushort FirstCheckpoint { get; set; }
     [Parameter("uint16", "lastCheckpoint", 8)] public ushort LastCheckpoint { get; set; }
+    [Parameter("uint64", "availableBytes", 9)] public ulong AvailableBytes { get; set; }
+    [Parameter("uint64", "usedBytes", 10)] public ulong UsedBytes { get; set; }
 
     public static AggregatedMetricInput From(AggregatedMetricRecord r) => new()
     {
@@ -53,6 +55,8 @@ public sealed class AggregatedMetricInput
         AttestationCount = r.AttestationCount,
         FirstCheckpoint = r.FirstCheckpoint,
         LastCheckpoint = r.LastCheckpoint,
+        AvailableBytes = r.AvailableBytes,
+        UsedBytes = r.UsedBytes,
     };
 }
 

@@ -75,6 +75,10 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         uint16 attestationCount;
         uint16 firstCheckpoint;
         uint16 lastCheckpoint;
+        // #76: storage capacity (median of the node's self-reported heartbeats), for the
+        // available/used storage factors. Zero for non-storage nodes.
+        uint64 availableBytes;
+        uint64 usedBytes;
     }
 
     /// @notice The per-node epoch metric record consumed by #76/#79/#80.
@@ -90,6 +94,8 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         bool eligible;
         bool divergenceFlag;
         bool exists;
+        uint64 availableBytes; // #76, appended for upgrade safety
+        uint64 usedBytes;
     }
 
     /// @custom:storage-location erc7201:symposia.TelemetryCheckpointRegistry
@@ -107,6 +113,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         mapping(uint256 => mapping(uint256 => bool)) recordChunkWritten;
         mapping(uint256 => uint256) recordChunksWritten;
         mapping(uint256 => uint64) recordsFinalizedAt;
+        mapping(uint256 => uint256) recordCount; // #76: distinct nodes with a record per epoch
     }
 
     // keccak256(abi.encode(uint256(keccak256("symposia.TelemetryCheckpointRegistry")) - 1)) & ~bytes32(uint256(0xff))
@@ -403,8 +410,11 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
                 lastCheckpoint: r.lastCheckpoint,
                 eligible: eligible,
                 divergenceFlag: divergent,
-                exists: true
+                exists: true,
+                availableBytes: r.availableBytes,
+                usedBytes: r.usedBytes
             });
+            $.recordCount[epoch] += 1;
             emit AggregatedRecordWritten(epoch, r.node, compliance, eligible, divergent);
         }
     }
@@ -430,6 +440,11 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
 
     function recordsFinalizedAt(uint256 epoch) external view returns (uint256) {
         return _ts().recordsFinalizedAt[epoch];
+    }
+
+    /// @notice Distinct nodes with a record for `epoch`; settlement must cover all of them (#76).
+    function recordCount(uint256 epoch) external view returns (uint256) {
+        return _ts().recordCount[epoch];
     }
 
     function recordChunkWritten(uint256 epoch, uint256 chunkIndex) external view returns (bool) {

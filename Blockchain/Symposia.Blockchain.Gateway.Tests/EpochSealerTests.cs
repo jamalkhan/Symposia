@@ -20,7 +20,18 @@ public sealed class EpochSealerTests
 
         public Task<ulong> NextSealableEpochAsync(CancellationToken ct) => Task.FromResult(Next);
 
-        public Task<bool> IsEpochFinalAsync(ulong epoch, CancellationToken ct) => Task.FromResult(AnyFinal && epoch <= FinalThrough);
+        public Dictionary<ulong, List<string>> RecordNodes = [];
+        public Dictionary<ulong, ulong> RecordCountOverride = [];
+
+        public Task<bool> CanSealAsync(ulong epoch, CancellationToken ct) => Task.FromResult(AnyFinal && epoch <= FinalThrough);
+
+        public Task<bool> SettlesFromTelemetryAsync(ulong epoch, CancellationToken ct) => Task.FromResult(RecordNodes.ContainsKey(epoch));
+
+        public Task<IReadOnlyCollection<string>> RecordNodesAsync(ulong epoch, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyCollection<string>>(RecordNodes.GetValueOrDefault(epoch, []));
+
+        public Task<ulong> RecordCountAsync(ulong epoch, CancellationToken ct) =>
+            Task.FromResult(RecordCountOverride.TryGetValue(epoch, out var c) ? c : (ulong)RecordNodes.GetValueOrDefault(epoch, []).Count);
 
         public Task<ulong> ReporterCountAsync(ulong epoch, CancellationToken ct) =>
             Task.FromResult(CountOverride.TryGetValue(epoch, out var c) ? c : (ulong)Reporters.GetValueOrDefault(epoch, []).Count);
@@ -99,6 +110,28 @@ public sealed class EpochSealerTests
     {
         var chain = new FakeChain { FinalThrough = 0, FailSeal = true };
         await Assert.ThrowsAsync<InvalidOperationException>(() => Sealer(chain).RunOnceAsync(default));
+    }
+
+    [Fact]
+    public async Task TelemetryEpochsIncludeRecordNodesOnce()
+    {
+        var chain = new FakeChain
+        {
+            FinalThrough = 0,
+            Reporters = { [0] = ["0xa"] },
+            RecordNodes = { [0] = ["0xA", "0xb"] }, // 0xa both reported and has a record
+        };
+
+        Assert.Equal(1, await Sealer(chain).RunOnceAsync(default));
+        Assert.Equal(["0xa", "0xb"], chain.Seals[0].Nodes.Select(n => n.ToLowerInvariant()));
+    }
+
+    [Fact]
+    public async Task StopsWhenRecordLogsDisagreeWithTheRegistry()
+    {
+        var chain = new FakeChain { FinalThrough = 0, RecordNodes = { [0] = ["0xa"] }, RecordCountOverride = { [0] = 2 } };
+        Assert.Equal(0, await Sealer(chain).RunOnceAsync(default));
+        Assert.Empty(chain.Seals);
     }
 
     [Fact]

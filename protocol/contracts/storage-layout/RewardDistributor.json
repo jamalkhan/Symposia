@@ -34,6 +34,10 @@
       {
         "type": "uint128",
         "name": "amount"
+      },
+      {
+        "type": "uint64",
+        "name": "score"
       }
     ],
     "EpochSeal": [
@@ -94,6 +98,10 @@
       {
         "type": "uint256",
         "name": "undistributed"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => uint256[]))",
+        "name": "factorRaw"
       }
     ],
     "NodeCalc": [
@@ -128,6 +136,10 @@
       {
         "type": "SettlementReason",
         "name": "reason"
+      },
+      {
+        "type": "uint256[]",
+        "name": "raw"
       }
     ]
   },

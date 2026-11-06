@@ -26,7 +26,9 @@ public sealed record AggregatedMetricRecord(
     uint HeartbeatsExpected,
     ushort AttestationCount,
     ushort FirstCheckpoint,
-    ushort LastCheckpoint)
+    ushort LastCheckpoint,
+    ulong AvailableBytes = 0,
+    ulong UsedBytes = 0)
 {
     public ushort HeartbeatComplianceBps =>
         HeartbeatsExpected == 0 ? (ushort)0 : (ushort)((ulong)HeartbeatsReceived * 10_000 / HeartbeatsExpected);
@@ -142,8 +144,11 @@ public sealed class EpochMetricAggregator(TelemetrySchedule schedule, ulong chai
 
         var first = heartbeats.Count == 0 ? (ushort)0 : schedule.CheckpointOf(heartbeats[0].SampleIndex);
         var last = heartbeats.Count == 0 ? (ushort)0 : schedule.CheckpointOf(heartbeats[^1].SampleIndex);
+        // Capacity (#76 storage factors): robust median of what the node reported, like the other self-reported fields.
+        var available = heartbeats.Count == 0 ? 0 : RobustAggregator.Aggregate(heartbeats.Select(h => h.AvailableBytes).ToList());
+        var used = heartbeats.Count == 0 ? 0 : RobustAggregator.Aggregate(heartbeats.Select(h => h.UsedBytes).ToList());
         return new AggregatedMetricRecord(nodeId, epoch, self, verifier, received, expected,
-            (ushort)Math.Min(attested.Count, ushort.MaxValue), first, last);
+            (ushort)Math.Min(attested.Count, ushort.MaxValue), first, last, available, used);
     }
 
     /// <summary>

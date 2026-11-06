@@ -35,6 +35,7 @@ public sealed class TelemetryCommitteeChainTests(RewardsChainFixture chain) : IC
       {"type":"function","name":"minStakeFor","inputs":[{"name":"t","type":"uint8"},{"name":"c","type":"uint256"}],"outputs":[{"type":"uint256"}],"stateMutability":"view"},
       {"type":"function","name":"register","inputs":[{"name":"t","type":"uint8"},{"name":"c","type":"uint256"},{"name":"r","type":"bytes32"},{"name":"s","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
       {"type":"function","name":"recordVerification","inputs":[{"name":"n","type":"address"},{"name":"p","type":"bool"},{"name":"e","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
+      {"type":"function","name":"reserveBalanceOf","inputs":[{"name":"a","type":"address"}],"outputs":[{"type":"uint256"}],"stateMutability":"view"},
       {"type":"function","name":"recordsFinalized","inputs":[{"name":"e","type":"uint256"}],"outputs":[{"type":"bool"}],"stateMutability":"view"},
       {"type":"function","name":"getEpochMetricRecord","inputs":[{"name":"n","type":"address"},{"name":"e","type":"uint256"}],"outputs":[{"type":"tuple","components":[
         {"name":"selfReported","type":"tuple","components":[{"name":"a","type":"uint32"},{"name":"b","type":"uint64"},{"name":"c","type":"uint64"},{"name":"d","type":"uint64"},{"name":"e","type":"uint64"},{"name":"f","type":"uint32"},{"name":"g","type":"uint32"}]},
@@ -128,6 +129,23 @@ public sealed class TelemetryCommitteeChainTests(RewardsChainFixture chain) : IC
         var fields = (List<Nethereum.ABI.FunctionEncoding.ParameterOutput>)record[0].Result;
         Assert.Equal(new BigInteger(24), (BigInteger)fields.Single(f => f.Parameter.Name == "heartbeatsReceived").Result);
         Assert.True((bool)fields.Single(f => f.Parameter.Name == "eligible").Result);
+
+        // #76: with records final, the sealer settles epoch 0 from telemetry. The node is the only storage
+        // node (score 1.0), but 24 of 288 heartbeats is under the 90% gate, so its pay is held in reserve.
+        var gatewayOptions = Options.Create(new GatewayOptions
+        {
+            RpcUrl = chain.RpcUrl,
+            RelayerPrivateKey = RewardsChainFixture.DeployerKey,
+            RewardDistributorAddress = a["RewardDistributor"],
+            EpochControllerAddress = a["EpochController"],
+            TelemetryRegistryAddress = registry,
+        });
+        var sealer = new Symposia.Blockchain.Gateway.Sealing.EpochSealer(
+            new Symposia.Blockchain.Gateway.Sealing.EpochSealChain(gatewayOptions, new Symposia.Blockchain.Gateway.Chain.RelayerAccount(gatewayOptions)),
+            gatewayOptions, NullLogger<Symposia.Blockchain.Gateway.Sealing.EpochSealer>.Instance);
+        Assert.Equal(1, await sealer.RunOnceAsync(default));
+        var rewards = deployer.Eth.GetContract(Abi, a["RewardDistributor"]);
+        Assert.True(await rewards.GetFunction("reserveBalanceOf").CallAsync<BigInteger>(node) > 0);
     }
 
     private async Task Warp(long timestamp)

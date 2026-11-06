@@ -1,0 +1,23 @@
+{
+  "structs": {
+    "Table": [
+      {
+        "type": "uint64",
+        "name": "effectiveEpoch"
+      },
+      {
+        "type": "uint16[]",
+        "name": "weightsBps"
+      }
+    ],
+    "ScoringStorage": [
+      {
+        "type": "mapping(uint8 => Table[])",
+        "name": "history"
+      }
+    ]
+  },
+  "locations": {
+    "SCORING_STORAGE_LOCATION": "0xda8f36459100d4361670ed13a354f6f798c61bc0368e76bd36a357bf11af3200"
+  }
+}

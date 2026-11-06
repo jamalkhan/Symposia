@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {GovernedUpgradeable} from "./governance/GovernedUpgradeable.sol";
+import {IProtocolConfig} from "./config/IProtocolConfig.sol";
+import {ConfigKeys} from "./config/ConfigKeys.sol";
+import {IEpochController} from "./interfaces/IEpochController.sol";
+
+/// @title ScoringWeights
+/// @notice Type-specific factor weight tables for epoch scoring (issue #76,
+/// tokenomics-mvp.md §6.3). Factor order and direction are protocol constants per
+/// type; governance may change only the weights. A change takes effect at the next
+/// epoch, and the history is append-only, so a sealed epoch is always scored with the
+/// table that was in force for it.
+///
+/// Factor order per node type (L = lower is better):
+/// - Storage (0): retrieval time L, uptime, latency/TTFB L, I/O throughput, bandwidth,
+///   available storage, used storage
+/// - OLTP (1): uptime, query latency L, commit success, CPU reliability, connection capacity
+/// - Analytics (2): uptime, query latency L, bytes-scanned efficiency, memory reliability, availability
+/// - Consensus (3): uptime, participation, propagation latency L, correctness
+/// - Serverless (4): accept uptime, invoke success, p95 invoke latency L, sandbox health, throughput
+contract ScoringWeights is GovernedUpgradeable {
+    uint8 public constant TYPE_COUNT = 5;
+    uint256 internal constant BPS = 10_000;
+
+    struct Table {
+        uint64 effectiveEpoch;
+        uint16[] weightsBps;
+    }
+
+    /// @custom:storage-location erc7201:symposia.ScoringWeights
+    struct ScoringStorage {
+        mapping(uint8 => Table[]) history;
+    }
+
+    // keccak256(abi.encode(uint256(keccak256("symposia.ScoringWeights")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant SCORING_STORAGE_LOCATION =
+        0xda8f36459100d4361670ed13a354f6f798c61bc0368e76bd36a357bf11af3200;
+
+    event WeightsSet(uint8 indexed nodeType, uint256 indexed effectiveEpoch, uint16[] weightsBps);
+
+    error UnknownNodeType(uint8 nodeType);
+    error InvalidWeights(uint8 nodeType);
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice Seeds the locked §6.3 tables, effective from epoch 0.
+    function initialize(IProtocolConfig initialConfig) external initializer {
+        __GovernedUpgradeable_init(initialConfig);
+        _push(0, 0, _u16([uint256(3_000), 2_000, 1_500, 1_000, 1_000, 800, 700]));
+        _push(1, 0, _u16([uint256(2_500), 2_500, 2_000, 1_500, 1_500]));
+        _push(2, 0, _u16([uint256(2_000), 2_500, 2_000, 2_000, 1_500]));
+        _push(3, 0, _u16([uint256(3_500), 3_000, 2_000, 1_500]));
+        _push(4, 0, _u16([uint256(2_000), 2_500, 2_000, 1_500, 2_000]));
+    }
+
+    /// @notice Tier 3: new weights for `nodeType`, effective from the next epoch. Calling
+    /// again before then replaces the pending table.
+    function setWeights(uint8 nodeType, uint16[] calldata weightsBps) external onlyTimelock {
+        uint256 next = IEpochController(config().getAddress(ConfigKeys.EPOCH_CONTROLLER)).currentEpoch() + 1;
+        _push(nodeType, uint64(next), weightsBps);
+    }
+
+    function factorCount(uint8 nodeType) public pure returns (uint256) {
+        if (nodeType == 0) return 7;
+        if (nodeType == 3) return 4;
+        if (nodeType < TYPE_COUNT) return 5;
+        revert UnknownNodeType(nodeType);
+    }
+
+    /// @notice Which factors of `nodeType` are lower-is-better, in table order.
+    function directions(uint8 nodeType) public pure returns (bool[] memory lower) {
+        lower = new bool[](factorCount(nodeType));
+        if (nodeType == 0) {
+            lower[0] = true; // retrieval time
+            lower[2] = true; // latency / TTFB
+        } else if (nodeType == 1 || nodeType == 2) {
+            lower[1] = true; // query latency
+        } else if (nodeType == 3) {
+            lower[2] = true; // propagation latency
+        } else {
+            lower[2] = true; // p95 invoke latency
+        }
+    }
+
+    /// @notice The weights in force for `nodeType` in `epoch`, with factor directions.
+    function weightsFor(uint8 nodeType, uint256 epoch) external view returns (uint16[] memory weightsBps, bool[] memory lower) {
+        Table[] storage h = _s().history[nodeType];
+        if (h.length == 0) revert UnknownNodeType(nodeType);
+        uint256 i = h.length;
+        while (i > 1 && h[i - 1].effectiveEpoch > epoch) --i;
+        return (h[i - 1].weightsBps, directions(nodeType));
+    }
+
+    function historyLength(uint8 nodeType) external view returns (uint256) {
+        return _s().history[nodeType].length;
+    }
+
+    function _push(uint8 nodeType, uint64 effectiveEpoch, uint16[] memory weightsBps) private {
+        if (weightsBps.length != factorCount(nodeType)) revert InvalidWeights(nodeType);
+        uint256 sum;
+        for (uint256 i; i < weightsBps.length; ++i) sum += weightsBps[i];
+        if (sum != BPS) revert InvalidWeights(nodeType);
+
+        Table[] storage h = _s().history[nodeType];
+        if (h.length > 0 && h[h.length - 1].effectiveEpoch == effectiveEpoch) {
+            h[h.length - 1].weightsBps = weightsBps; // pending, not yet in force
+        } else {
+            h.push(Table(effectiveEpoch, weightsBps));
+        }
+        emit WeightsSet(nodeType, effectiveEpoch, weightsBps);
+    }
+
+    function _u16(uint256[7] memory w) private pure returns (uint16[] memory out) {
+        out = new uint16[](7);
+        for (uint256 i; i < 7; ++i) out[i] = uint16(w[i]);
+    }
+
+    function _u16(uint256[5] memory w) private pure returns (uint16[] memory out) {
+        out = new uint16[](5);
+        for (uint256 i; i < 5; ++i) out[i] = uint16(w[i]);
+    }
+
+    function _u16(uint256[4] memory w) private pure returns (uint16[] memory out) {
+        out = new uint16[](4);
+        for (uint256 i; i < 4; ++i) out[i] = uint16(w[i]);
+    }
+
+    function _s() private pure returns (ScoringStorage storage $) {
+        bytes32 slot = SCORING_STORAGE_LOCATION;
+        assembly {
+            $.slot := slot
+        }
+    }
+}

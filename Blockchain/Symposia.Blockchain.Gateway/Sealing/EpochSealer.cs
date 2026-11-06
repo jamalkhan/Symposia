@@ -3,11 +3,12 @@ using Microsoft.Extensions.Options;
 namespace Symposia.Blockchain.Gateway.Sealing;
 
 /// <summary>
-/// Settles every epoch whose finality window has closed, oldest first (issue #72). The
-/// distributor requires the full set of reporting nodes, so the sealer gathers them from report
-/// events and cross-checks the count against the distributor's own tally before sending; if the
-/// two disagree (for example an RPC that trims logs) it stops and retries next pass rather than
-/// submitting a set the contract would reject.
+/// Settles every epoch the distributor will accept, oldest first (issue #72; #76 adds the
+/// telemetry gate). The distributor requires every node that reported, plus every node with a
+/// telemetry record when it settles from telemetry, so the sealer gathers both from events and
+/// cross-checks each against its on-chain count before sending. If either disagrees (for example
+/// an RPC that trims logs), it stops and retries next pass rather than submitting a set the
+/// contract would reject.
 /// </summary>
 public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> options, ILogger<EpochSealer> logger)
 {
@@ -20,12 +21,12 @@ public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> 
         while (sealedCount < _maxPerPass && !ct.IsCancellationRequested)
         {
             var epoch = await chain.NextSealableEpochAsync(ct);
-            if (!await chain.IsEpochFinalAsync(epoch, ct))
+            if (!await chain.CanSealAsync(epoch, ct))
             {
-                break;
+                break; // finality not passed, or telemetry records still pending within the fallback wait
             }
 
-            var reporters = (await chain.ReportersAsync(epoch, ct)).OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToList();
+            var reporters = await chain.ReportersAsync(epoch, ct);
             var expected = await chain.ReporterCountAsync(epoch, ct);
             if ((ulong)reporters.Count != expected)
             {
@@ -35,11 +36,28 @@ public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> 
                 break;
             }
 
+            var nodes = new HashSet<string>(reporters, StringComparer.OrdinalIgnoreCase);
+            if (await chain.SettlesFromTelemetryAsync(epoch, ct))
+            {
+                var recordNodes = await chain.RecordNodesAsync(epoch, ct);
+                var recordCount = await chain.RecordCountAsync(epoch, ct);
+                if ((ulong)recordNodes.Count != recordCount)
+                {
+                    logger.LogWarning(
+                        "Not sealing epoch {Epoch}: found {Found} telemetry records in logs but the registry counts {Expected}; retrying next pass.",
+                        epoch, recordNodes.Count, recordCount);
+                    break;
+                }
+
+                nodes.UnionWith(recordNodes);
+            }
+
+            var sortedNodes = nodes.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToList();
             try
             {
-                await chain.SealAsync(epoch, reporters, ct);
+                await chain.SealAsync(epoch, sortedNodes, ct);
                 sealedCount++;
-                logger.LogInformation("Sealed epoch {Epoch} with {Count} reporting nodes.", epoch, reporters.Count);
+                logger.LogInformation("Sealed epoch {Epoch} with {Count} nodes.", epoch, sortedNodes.Count);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

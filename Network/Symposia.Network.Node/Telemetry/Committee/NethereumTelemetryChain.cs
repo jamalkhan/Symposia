@@ -202,16 +202,16 @@ public static class TelemetryRelayWire
     }
 
     public sealed record RecordWire(string Node, MetricWire SelfReported, MetricWire VerifierAttested, uint HeartbeatsReceived,
-        uint HeartbeatsExpected, ushort AttestationCount, ushort FirstCheckpoint, ushort LastCheckpoint)
+        uint HeartbeatsExpected, ushort AttestationCount, ushort FirstCheckpoint, ushort LastCheckpoint, ulong AvailableBytes = 0, ulong UsedBytes = 0)
     {
         public static RecordWire From(AggregatedMetricInput r) => new(r.Node, MetricWire.From(r.SelfReported), MetricWire.From(r.VerifierAttested),
-            r.HeartbeatsReceived, r.HeartbeatsExpected, r.AttestationCount, r.FirstCheckpoint, r.LastCheckpoint);
+            r.HeartbeatsReceived, r.HeartbeatsExpected, r.AttestationCount, r.FirstCheckpoint, r.LastCheckpoint, r.AvailableBytes, r.UsedBytes);
 
         public AggregatedMetricInput ToInput() => new()
         {
             Node = Node, SelfReported = SelfReported.ToInput(), VerifierAttested = VerifierAttested.ToInput(),
             HeartbeatsReceived = HeartbeatsReceived, HeartbeatsExpected = HeartbeatsExpected, AttestationCount = AttestationCount,
-            FirstCheckpoint = FirstCheckpoint, LastCheckpoint = LastCheckpoint,
+            FirstCheckpoint = FirstCheckpoint, LastCheckpoint = LastCheckpoint, AvailableBytes = AvailableBytes, UsedBytes = UsedBytes,
         };
     }
 }

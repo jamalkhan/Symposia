@@ -80,6 +80,14 @@
       {
         "type": "uint16",
         "name": "lastCheckpoint"
+      },
+      {
+        "type": "uint64",
+        "name": "availableBytes"
+      },
+      {
+        "type": "uint64",
+        "name": "usedBytes"
       }
     ],
     "AggregatedMetricRecord": [
@@ -126,6 +134,14 @@
       {
         "type": "bool",
         "name": "exists"
+      },
+      {
+        "type": "uint64",
+        "name": "availableBytes"
+      },
+      {
+        "type": "uint64",
+        "name": "usedBytes"
       }
     ],
     "TelemetryStorage": [
@@ -176,6 +192,10 @@
       {
         "type": "mapping(uint256 => uint64)",
         "name": "recordsFinalizedAt"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "recordCount"
       }
     ]
   },

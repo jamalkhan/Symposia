@@ -25,7 +25,8 @@ public sealed class EpochSealerChainTests(RewardsChainFixture chain) : IClassFix
       {"type":"function","name":"recordVerification","inputs":[{"name":"n","type":"address"},{"name":"p","type":"bool"},{"name":"e","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
       {"type":"function","name":"submitMetricReport","inputs":[{"name":"n","type":"address"},{"name":"e","type":"uint256"},{"name":"s","type":"uint256"},{"name":"h","type":"uint256"},{"name":"sig","type":"bytes"}],"outputs":[],"stateMutability":"nonpayable"},
       {"type":"function","name":"nextSealableEpoch","inputs":[],"outputs":[{"type":"uint256"}],"stateMutability":"view"},
-      {"type":"function","name":"finalityDeadline","inputs":[{"name":"e","type":"uint256"}],"outputs":[{"type":"uint256"}],"stateMutability":"view"}
+      {"type":"function","name":"finalityDeadline","inputs":[{"name":"e","type":"uint256"}],"outputs":[{"type":"uint256"}],"stateMutability":"view"},
+      {"type":"function","name":"telemetryDeadline","inputs":[{"name":"e","type":"uint256"}],"outputs":[{"type":"uint256"}],"stateMutability":"view"}
     ]
     """;
 
@@ -50,8 +51,9 @@ public sealed class EpochSealerChainTests(RewardsChainFixture chain) : IClassFix
         await Send(deployer, a["RewardDistributor"], "submitMetricReport", node, BigInteger.Zero, new BigInteger(100), new BigInteger(10_000),
             SignMetric(a["RewardDistributor"], node, 0, 100, 10_000));
 
-        var deadline = await Call<BigInteger>(deployer, a["EpochController"], "finalityDeadline", BigInteger.One);
-        await SetNextBlockTimestamp((ulong)deadline + 1);
+        // No committee runs here, so epochs settle from signed reports once the records wait (24h) passes (#76).
+        var deadline = await Call<BigInteger>(deployer, a["TelemetryCheckpointRegistry"], "telemetryDeadline", BigInteger.One);
+        await SetNextBlockTimestamp((ulong)deadline + 24 * 3600 + 1);
 
         var sealer = new EpochSealer(
             new EpochSealChain(Options.Create(Gateway()), new Symposia.Blockchain.Gateway.Chain.RelayerAccount(Options.Create(Gateway()))),
@@ -61,7 +63,7 @@ public sealed class EpochSealerChainTests(RewardsChainFixture chain) : IClassFix
 
         Assert.Equal(new BigInteger(2), await Call<BigInteger>(deployer, a["RewardDistributor"], "nextSealableEpoch"));
         Assert.True(await Call<BigInteger>(deployer, a["SYMToken"], "balanceOf", node) > balanceBefore);
-        Assert.Equal(0, await sealer.RunOnceAsync(default)); // epoch 2 is still open
+        Assert.Equal(0, await sealer.RunOnceAsync(default)); // epoch 2 is still waiting for records
     }
 
     private GatewayOptions Gateway() => new()
@@ -70,6 +72,7 @@ public sealed class EpochSealerChainTests(RewardsChainFixture chain) : IClassFix
         RelayerPrivateKey = RewardsChainFixture.DeployerKey,
         RewardDistributorAddress = chain.Addresses["RewardDistributor"],
         EpochControllerAddress = chain.Addresses["EpochController"],
+        TelemetryRegistryAddress = chain.Addresses["TelemetryCheckpointRegistry"],
     };
 
     private static byte[] SignMetric(string distributor, string node, ulong epoch, ulong score, ulong heartbeatBps)
