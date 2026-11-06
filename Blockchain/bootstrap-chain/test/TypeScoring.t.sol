@@ -192,8 +192,8 @@ contract ScoringWeightsTest is Test {
         vm.expectRevert();
         w.setWeights(3, wrongLength); // not the timelock
 
-        vm.expectRevert(abi.encodeWithSelector(ScoringWeights.UnknownNodeType.selector, 5));
-        w.factorCount(5);
+        vm.expectRevert(abi.encodeWithSelector(ScoringWeights.UnknownNodeType.selector, 6));
+        w.factorCount(6); // Email IP Address has no table: it never earns
     }
 }
 

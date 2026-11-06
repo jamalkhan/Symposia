@@ -131,7 +131,7 @@ contract RewardDistributor is GovernedUpgradeable {
     enum SettlementReason {
         None,
         Paid, // positive payout, auto-paid or held per the heartbeat gate (see Payout/ReserveCredit)
-        ExcludedType, // Verifier / EmailIP / Compute: not in the capacity emission flow
+        ExcludedType, // EmailIP (never), Compute (fee-funded) and services without defined economics
         Ineligible, // failed region-verification, stake or metric-report gate, or zero score
         ZeroStagePenalty, // Stage 3/4: multiplier 0
         ZeroAmount // eligible but rounded to 0 (or reliability 0)
@@ -513,6 +513,16 @@ contract RewardDistributor is GovernedUpgradeable {
         return t < 5;
     }
 
+    uint8 internal constant VERIFIER = uint8(INodeRegistry.NodeType.Verifier);
+    uint8 internal constant EMAIL_IP = uint8(INodeRegistry.NodeType.EmailIP);
+
+    /// @notice Services paid from emission: the capacity services (92%) and Verifier
+    /// (8%, #81). Email IP Address is hardcoded out: no config can route SYM to it.
+    function _isPaidService(uint8 t) internal pure returns (bool) {
+        if (t == EMAIL_IP) return false;
+        return _isCapacityService(t) || t == VERIFIER;
+    }
+
     /// @dev Per-node working state for one `sealEpoch` call.
     struct NodeCalc {
         address node;
@@ -543,7 +553,8 @@ contract RewardDistributor is GovernedUpgradeable {
     /// score sum of eligible nodes. Shares cut by reliability or stage
     /// penalties (Stage 3/4 = 0) are forfeited, not redistributed to peers,
     /// so per-type payouts are always `<= typePool`. Forfeited and rounding
-    /// amounts, and the 8% verifier share until #81, stay in this contract.
+    /// amounts stay in this contract. Verifiers (#81) are paid the same way from the
+    /// 8% verifier slice, scored on uptime, coverage and accuracy.
     function sealEpoch(uint256 epoch, address[] calldata nodes) external whenNotPaused {
         RewardStorage storage $ = _rewardStorage();
         if ($.seals[epoch].sealed_) revert EpochAlreadySealed(epoch);
@@ -558,6 +569,9 @@ contract RewardDistributor is GovernedUpgradeable {
 
         uint256 emission = _epochEmission(epoch);
         uint256 capacityAmount = (emission * config().getUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS)) / 10_000;
+        // #81: the verifier slice (tokenomics-mvp.md §5.5), floored; remainders and an
+        // epoch with no eligible verifier leave it in `undistributed`.
+        uint256 verifierAmount = (emission * config().getUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS)) / 10_000;
 
         NodeCalc[] memory calc = _scoreNodes(epoch, nodes, source == EpochSource.Telemetry);
 
@@ -567,8 +581,8 @@ contract RewardDistributor is GovernedUpgradeable {
             if (calc[i].reason == SettlementReason.None) typeSum[calc[i].nodeType] += calc[i].score;
         }
         for (uint8 t = 0; t < SERVICE_TYPE_COUNT; t++) {
-            if (typeSum[t] == 0 || !_isCapacityService(t)) continue;
-            typePool[t] = _typePoolAmount(t, capacityAmount);
+            if (typeSum[t] == 0 || !_isPaidService(t)) continue;
+            typePool[t] = t == VERIFIER ? verifierAmount : _typePoolAmount(t, capacityAmount);
             _distributeType(calc, t, typeSum[t], typePool[t]);
         }
 
@@ -617,8 +631,8 @@ contract RewardDistributor is GovernedUpgradeable {
             }
         }
 
-        // Everything received for the epoch but not assigned to a node (verifier
-        // share until #81, forfeits, ineligible and empty type pools, rounding).
+        // Everything received for the epoch but not assigned to a node (forfeits,
+        // ineligible and empty pools, an epoch without eligible verifiers, rounding).
         // Held reserve credits count as assigned: they are owed to the node.
         uint256 leftover = emission - totalDistributed;
         if (leftover > 0) {
@@ -722,7 +736,7 @@ contract RewardDistributor is GovernedUpgradeable {
         if (r.exists && service == INodeRegistry.NodeType.Storage && address(registry) != address(0)) {
             _ingestRecord(epoch, c, r);
         }
-        if (!_isCapacityService(c.nodeType)) {
+        if (!_isPaidService(c.nodeType)) {
             c.reason = SettlementReason.ExcludedType;
             return reported;
         }
@@ -870,7 +884,7 @@ contract RewardDistributor is GovernedUpgradeable {
         return _rewardStorage().undistributed;
     }
 
-    /// @notice Governed release of unassigned SYM (e.g. to #81's verifier
+    /// @notice Governed release of unassigned SYM (e.g. an unclaimed verifier
     /// path or the ecosystem treasury). Bounded by the ledger, so it can
     /// never touch held reserves owed to nodes.
     function sweepUndistributed(address to, uint256 amount) external onlyTimelock {

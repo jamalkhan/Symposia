@@ -20,6 +20,7 @@ import {IEpochController} from "./interfaces/IEpochController.sol";
 /// - Analytics (2): uptime, query latency L, bytes-scanned efficiency, memory reliability, availability
 /// - Consensus (3): uptime, participation, propagation latency L, correctness
 /// - Serverless (4): accept uptime, invoke success, p95 invoke latency L, sandbox health, throughput
+/// - Verifier (5, #81): uptime, coverage (assigned checks completed), accuracy (attestations upheld)
 contract ScoringWeights is GovernedUpgradeable {
     uint8 public constant TYPE_COUNT = 5;
     uint256 internal constant BPS = 10_000;
@@ -56,6 +57,17 @@ contract ScoringWeights is GovernedUpgradeable {
         _push(2, 0, _u16([uint256(2_000), 2_500, 2_000, 2_000, 1_500]));
         _push(3, 0, _u16([uint256(3_500), 3_000, 2_000, 1_500]));
         _push(4, 0, _u16([uint256(2_000), 2_500, 2_000, 1_500, 2_000]));
+        _seedNodeServiceTables();
+    }
+
+    /// @notice Adds the Node Service tables introduced after the first deploy (#81/#159)
+    /// to a proxy initialized before them. No-op for tables that already exist.
+    function initializeNodeServiceTables() external reinitializer(2) {
+        _seedNodeServiceTables();
+    }
+
+    function _seedNodeServiceTables() private {
+        if (_s().history[5].length == 0) _push(5, 0, _u16([uint256(4_000), 3_000, 3_000])); // Verifier
     }
 
     /// @notice Tier 3: new weights for `nodeType`, effective from the next epoch. Calling
@@ -69,6 +81,7 @@ contract ScoringWeights is GovernedUpgradeable {
         if (nodeType == 0) return 7;
         if (nodeType == 3) return 4;
         if (nodeType < TYPE_COUNT) return 5;
+        if (nodeType == 5) return 3; // Verifier
         revert UnknownNodeType(nodeType);
     }
 
@@ -82,9 +95,10 @@ contract ScoringWeights is GovernedUpgradeable {
             lower[1] = true; // query latency
         } else if (nodeType == 3) {
             lower[2] = true; // propagation latency
-        } else {
+        } else if (nodeType == 4) {
             lower[2] = true; // p95 invoke latency
         }
+        // Verifier (5): every factor is higher-is-better.
     }
 
     /// @notice The weights in force for `nodeType` in `epoch`, with factor directions.
@@ -123,6 +137,11 @@ contract ScoringWeights is GovernedUpgradeable {
     function _u16(uint256[5] memory w) private pure returns (uint16[] memory out) {
         out = new uint16[](5);
         for (uint256 i; i < 5; ++i) out[i] = uint16(w[i]);
+    }
+
+    function _u16(uint256[3] memory w) private pure returns (uint16[] memory out) {
+        out = new uint16[](3);
+        for (uint256 i; i < 3; ++i) out[i] = uint16(w[i]);
     }
 
     function _u16(uint256[4] memory w) private pure returns (uint16[] memory out) {

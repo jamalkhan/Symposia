@@ -129,6 +129,7 @@ contract DeployRewards is Script {
         cfg.setUint(ConfigKeys.REGISTRY_UNSTAKE_COOLDOWN, 21 days);
         cfg.setUint(ConfigKeys.registryStakeBase(0), 100e18); // Storage: 100 SYM + 1 SYM/TB
         cfg.setUint(ConfigKeys.registryStakePerUnit(0), 1e18);
+        cfg.setUint(ConfigKeys.registryStakeBase(5), 500e18); // Verifier: 5x the Storage base (#81)
 
         // Rewards (#73, #80).
         cfg.setAddress(ConfigKeys.REWARD_EMISSION_SOURCE, address(d.emission));

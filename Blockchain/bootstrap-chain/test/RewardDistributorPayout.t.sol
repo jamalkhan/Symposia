@@ -172,7 +172,8 @@ contract RewardDistributorPayoutTest is CoreProtocolTestBase {
         assertEq(uint8(_reason(0, storageNodes[1])), uint8(RewardDistributor.SettlementReason.Ineligible));
     }
 
-    function test_VerifierEmailIpAndComputeExcluded() public {
+    /// #81: verifiers are paid from their own 8% slice; Email IP and Compute stay excluded.
+    function test_VerifierPaidFromItsSliceEmailIpAndComputeExcluded() public {
         address verifier = makeAddr("verifierNode");
         address emailIp = makeAddr("emailIpNode");
         address compute = makeAddr("computeNode");
@@ -186,11 +187,13 @@ contract RewardDistributorPayoutTest is CoreProtocolTestBase {
         }
         _seal(0, nodes); // previously reverted on the Compute ordinal
         assertEq(rewards.payoutOf(0, storageNodes[0]), POOL);
-        for (uint256 i = 1; i < 4; ++i) {
+        assertEq(rewards.payoutOf(0, verifier), (EMISSION * 800) / 10_000, "sole verifier takes the 8% slice");
+        assertEq(uint8(_reason(0, verifier)), uint8(RewardDistributor.SettlementReason.Paid));
+        assertTrue(rel.isFinalized(verifier, 0));
+        for (uint256 i = 2; i < 4; ++i) {
             assertEq(rewards.payoutOf(0, nodes[i]), 0);
             assertEq(uint8(_reason(0, nodes[i])), uint8(RewardDistributor.SettlementReason.ExcludedType));
         }
-        assertFalse(rel.isFinalized(verifier, 0));
     }
 
     function test_MultiTypePoolsRespectWeights() public {
