@@ -32,7 +32,8 @@ public sealed class RewardsChainFixture : IAsyncLifetime
             RedirectStandardError = true,
         }) ?? throw new InvalidOperationException("Failed to start anvil.");
 
-        using var http = new HttpClient();
+        // Bounded (#174): anvil gets 10 s to answer, whether it errors or never listens.
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
         for (var i = 0; ; i++)
         {
             try
@@ -44,8 +45,13 @@ public sealed class RewardsChainFixture : IAsyncLifetime
                     break;
                 }
             }
-            catch (HttpRequestException) when (i < 100)
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
             {
+            }
+
+            if (i >= 100)
+            {
+                throw new InvalidOperationException($"anvil did not answer on {RpcUrl} within 10 seconds.");
             }
 
             await Task.Delay(100);
@@ -61,8 +67,21 @@ public sealed class RewardsChainFixture : IAsyncLifetime
         };
         using var forge = Process.Start(deploy) ?? throw new InvalidOperationException("Failed to start forge.");
         var stdout = forge.StandardOutput.ReadToEndAsync();
-        var stderr = await forge.StandardError.ReadToEndAsync();
-        await forge.WaitForExitAsync();
+        var stderrTask = forge.StandardError.ReadToEndAsync();
+        using (var limit = new CancellationTokenSource(TimeSpan.FromMinutes(5)))
+        {
+            try
+            {
+                await forge.WaitForExitAsync(limit.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                forge.Kill(entireProcessTree: true);
+                throw new TimeoutException("DeployRewards did not finish within 5 minutes.");
+            }
+        }
+
+        var stderr = await stderrTask;
         if (forge.ExitCode != 0)
         {
             throw new InvalidOperationException($"DeployRewards failed:\n{await stdout}\n{stderr}");

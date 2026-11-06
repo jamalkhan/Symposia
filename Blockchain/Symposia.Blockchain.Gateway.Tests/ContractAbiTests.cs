@@ -79,7 +79,19 @@ public sealed class ContractAbiTests
         {
             var forge = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin", "forge");
             using var build = Process.Start(new ProcessStartInfo(forge, "build") { WorkingDirectory = dir, RedirectStandardOutput = true, RedirectStandardError = true })!;
-            build.WaitForExit();
+            // Drain both pipes: forge's lint output fills the buffer otherwise and it blocks forever (#174).
+            var stdout = build.StandardOutput.ReadToEndAsync();
+            var stderr = build.StandardError.ReadToEndAsync();
+            if (!build.WaitForExit(TimeSpan.FromMinutes(5)))
+            {
+                build.Kill(entireProcessTree: true);
+                throw new TimeoutException("forge build did not finish within 5 minutes.");
+            }
+
+            if (build.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"forge build failed:\n{stdout.Result}\n{stderr.Result}");
+            }
         }
 
         return Contracts.SelectMany(c => JsonDocument.Parse(File.ReadAllText(ArtifactPath(dir, c))).RootElement.GetProperty("abi").EnumerateArray().Select(e => e.Clone())).ToList();
