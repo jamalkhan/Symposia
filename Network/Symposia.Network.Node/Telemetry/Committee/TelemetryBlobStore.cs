@@ -105,9 +105,58 @@ public sealed class S3TelemetryBlobStore(HttpClient http, TelemetryBlobOptions o
 /// </summary>
 public sealed class CachingTelemetryBlobStore(string? directory, ITelemetryBlobStore? backing) : ITelemetryBlobStore
 {
-    private const int MaxInMemory = 256; // ~2 epochs of windows; older batches come back from disk or the backing store
+    internal const int MaxInMemory = 256; // ~2 epochs of windows; older batches come back from disk or the backing store
 
-    private readonly ConcurrentDictionary<string, byte[]> _memory = new();
+    // Least-recently-used eviction (#163): a busy epoch's batches stay hot instead of the whole cache flushing at once.
+    private readonly object _lock = new();
+    private readonly Dictionary<string, LinkedListNode<(string Key, byte[] Content)>> _index = [];
+    private readonly LinkedList<(string Key, byte[] Content)> _lru = new();
+
+    internal int InMemoryCount
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _index.Count;
+            }
+        }
+    }
+
+    private bool TryRecall(string key, out byte[] content)
+    {
+        lock (_lock)
+        {
+            if (_index.TryGetValue(key, out var node))
+            {
+                _lru.Remove(node);
+                _lru.AddFirst(node);
+                content = node.Value.Content;
+                return true;
+            }
+        }
+
+        content = [];
+        return false;
+    }
+
+    private void Remember(string key, byte[] content)
+    {
+        lock (_lock)
+        {
+            if (_index.TryGetValue(key, out var existing))
+            {
+                _lru.Remove(existing);
+            }
+            else if (_index.Count >= MaxInMemory)
+            {
+                _index.Remove(_lru.Last!.Value.Key);
+                _lru.RemoveLast();
+            }
+
+            _index[key] = _lru.AddFirst((key, content));
+        }
+    }
 
     public async Task PutAsync(byte[] address, byte[] content, CancellationToken ct)
     {
@@ -126,19 +175,22 @@ public sealed class CachingTelemetryBlobStore(string? directory, ITelemetryBlobS
     public async Task<byte[]?> GetAsync(byte[] address, CancellationToken ct)
     {
         var key = address.ToHex();
-        if (_memory.TryGetValue(key, out var cached))
+        if (TryRecall(key, out var cached))
         {
             return cached;
         }
 
-        if (directory is not null && File.Exists(Path.Combine(directory, key)))
+        var path = directory is null ? null : Path.Combine(directory, key);
+        if (path is not null && File.Exists(path))
         {
-            var bytes = await File.ReadAllBytesAsync(Path.Combine(directory, key), ct);
+            var bytes = await File.ReadAllBytesAsync(path, ct);
             if (TelemetryBatchCodec.Address(bytes).AsSpan().SequenceEqual(address))
             {
-                _memory[key] = bytes;
+                Remember(key, bytes);
                 return bytes;
             }
+
+            File.Delete(path); // corrupt or torn: refetch below rather than keep failing on it
         }
 
         var fetched = backing is null ? null : await backing.GetAsync(address, ct);
@@ -153,16 +205,14 @@ public sealed class CachingTelemetryBlobStore(string? directory, ITelemetryBlobS
     private async Task StoreLocalAsync(byte[] address, byte[] content, CancellationToken ct)
     {
         var key = address.ToHex();
-        if (_memory.Count >= MaxInMemory)
-        {
-            _memory.Clear();
-        }
-
-        _memory[key] = content;
+        Remember(key, content);
         if (directory is not null)
         {
+            // Temp file + rename, so a crash never leaves a partial blob under its address.
             Directory.CreateDirectory(directory);
-            await File.WriteAllBytesAsync(Path.Combine(directory, key), content, ct);
+            var tmp = Path.Combine(directory, $"{key}.{Guid.NewGuid():N}.tmp");
+            await File.WriteAllBytesAsync(tmp, content, ct);
+            File.Move(tmp, Path.Combine(directory, key), overwrite: true);
         }
     }
 }
