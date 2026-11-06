@@ -314,6 +314,17 @@ contract NodeServicesTest is CoreProtocolTestBase {
         rewards.sealEpoch(epoch, nodes);
     }
 
+    function test_FirstReportBlockIsTheFirstReportOnly() public {
+        _twoCapacityServices();
+        assertEq(rewards.firstReportBlock(0), 0);
+        vm.roll(100);
+        rewards.submitServiceMetricReport(node, STORAGE, 0, 100, 9_500, _signService(STORAGE, 0, 100, 9_500));
+        vm.roll(150);
+        rewards.submitServiceMetricReport(node, OLTP, 0, 100, 9_500, _signService(OLTP, 0, 100, 9_500));
+        assertEq(rewards.firstReportBlock(0), 100);
+        assertEq(rewards.firstReportBlock(1), 0);
+    }
+
     function test_AccountOfPrimaryIsTheNode() public {
         _twoCapacityServices();
         assertEq(rewards.accountOf(node, STORAGE), node);
@@ -327,6 +338,7 @@ contract NodeServicesTest is CoreProtocolTestBase {
         rewards.submitServiceMetricReport(node, OLTP, 0, 100, 9_500, _signService(OLTP, 0, 100, 9_500));
         assertEq(rewards.reporterCount(0), 2, "one per service account");
         assertEq(rewards.reportingNodeCount(0), 1, "one node");
+        assertEq(rewards.firstReportBlock(0), block.number, "#165: first report block");
 
         uint256 before = token.balanceOf(node);
         _seal(0);

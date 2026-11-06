@@ -6,6 +6,22 @@ namespace Symposia.Blockchain.Gateway.Sealing;
 
 // RewardDistributor (#80) and EpochController (#72) ABI surface used by the epoch sealer.
 
+/// <summary>#165: block of an epoch's first metric report (0 = none).</summary>
+[Function("firstReportBlock", "uint256")]
+public sealed class FirstReportBlockFunction : FunctionMessage
+{
+    [Parameter("uint256", "epoch", 1)]
+    public BigInteger Epoch { get; set; }
+}
+
+/// <summary>#165: block of an epoch's first records chunk (0 = none).</summary>
+[Function("firstRecordBlock", "uint256")]
+public sealed class FirstRecordBlockFunction : FunctionMessage
+{
+    [Parameter("uint256", "epoch", 1)]
+    public BigInteger Epoch { get; set; }
+}
+
 [Function("nextSealableEpoch", "uint256")]
 public sealed class NextSealableEpochFunction : FunctionMessage;
 
