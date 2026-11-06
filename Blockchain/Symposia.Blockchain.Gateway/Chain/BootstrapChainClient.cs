@@ -98,14 +98,13 @@ public sealed class BootstrapChainClient
     /// </summary>
     public async Task<string> RegisterAsync(string node, string endpoint, ulong nonce, byte[] signature)
     {
-        var receipt = await _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<RegisterFunction>()
-            .SendRequestAndWaitForReceiptAsync(_nodeRegistryAddress, new RegisterFunction
-            {
-                Node = node,
-                Endpoint = endpoint,
-                RegistrationNonce = nonce,
-                Signature = signature,
-            }));
+        var receipt = await _relayer.SendAsync(_nodeRegistryAddress, new RegisterFunction
+        {
+            Node = node,
+            Endpoint = endpoint,
+            RegistrationNonce = nonce,
+            Signature = signature,
+        });
         return receipt.TransactionHash;
     }
 
@@ -145,14 +144,13 @@ public sealed class BootstrapChainClient
     }
 
     public async Task<string> SubmitRootAsync(string node, ulong epoch, byte[] root, byte[] signature) =>
-        (await _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<SubmitRootFunction>()
-            .SendRequestAndWaitForReceiptAsync(_epochRootRegistryAddress, new SubmitRootFunction
-            {
-                Node = node,
-                Epoch = epoch,
-                Root = root,
-                Signature = signature,
-            }))).TransactionHash;
+        (await _relayer.SendAsync(_epochRootRegistryAddress, new SubmitRootFunction
+        {
+            Node = node,
+            Epoch = epoch,
+            Root = root,
+            Signature = signature,
+        })).TransactionHash;
 
     public async Task<(ulong Epoch, byte[] Root)?> TryGetLatestRootAsync(string node)
     {

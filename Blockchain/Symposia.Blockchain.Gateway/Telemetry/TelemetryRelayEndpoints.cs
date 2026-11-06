@@ -136,8 +136,7 @@ public static class TelemetryRelayEndpoints
     {
         try
         {
-            var receipt = await relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<TFunction>()
-                .SendRequestAndWaitForReceiptAsync(registry, function, ct), ct);
+            var receipt = await relayer.SendAsync(registry, function, ct);
             return receipt.Status.Value == 1
                 ? Results.Ok(new { transactionHash = receipt.TransactionHash })
                 : Results.Problem($"Transaction {receipt.TransactionHash} reverted.", statusCode: StatusCodes.Status502BadGateway);

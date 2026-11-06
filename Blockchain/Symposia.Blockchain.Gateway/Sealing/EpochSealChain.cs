@@ -128,8 +128,7 @@ public sealed class EpochSealChain : IEpochSealChain
 
     public async Task SealAsync(ulong epoch, IReadOnlyList<string> nodes, CancellationToken ct)
     {
-        var receipt = await _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<SealEpochFunction>()
-            .SendRequestAndWaitForReceiptAsync(_distributor, new SealEpochFunction { Epoch = epoch, Nodes = [.. nodes] }, ct), ct);
+        var receipt = await _relayer.SendAsync(_distributor, new SealEpochFunction { Epoch = epoch, Nodes = [.. nodes] }, ct);
         // A mined revert (e.g. another sealer won the race) must not count as a seal.
         if (receipt.Status?.Value != 1)
         {
