@@ -506,11 +506,12 @@ contract RewardDistributor is GovernedUpgradeable {
     uint8 internal constant SERVICE_TYPE_COUNT = 11;
 
     /// @notice Capacity Node Services that share the 92% emission (tokenomics-mvp.md
-    /// §5.5): Storage, OLTP, Analytics, Consensus, Serverless (ordinals 0-4).
+    /// §5.5): Storage, OLTP, Analytics, Consensus, Serverless (ordinals 0-4), and the
+    /// Blob Gateway (8, #160 strawman), each with its own type pool.
     /// Verifier (8%, #81), EmailIP (0%, never) and Compute (fee-funded, #90) are
     /// excluded from this flow, as are services whose economics aren't defined yet.
     function _isCapacityService(uint8 t) internal pure returns (bool) {
-        return t < 5;
+        return t < 5 || t == uint8(INodeRegistry.NodeType.BlobGateway);
     }
 
     uint8 internal constant VERIFIER = uint8(INodeRegistry.NodeType.Verifier);

@@ -50,6 +50,29 @@ contract DeployRewardsTest is DeployRewards, Test {
         assertEq(d.config.owner(), deployer);
     }
 
+    /// #81/#159/#160: Node Service economics the NodeHost catalog mirrors.
+    function test_NodeServiceEconomics() public view {
+        assertEq(d.config.getUint(ConfigKeys.rewardTypeWeight(0)), 9_000, "Storage pool");
+        assertEq(d.config.getUint(ConfigKeys.rewardTypeWeight(8)), 1_000, "Blob Gateway pool");
+        assertEq(d.config.getUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS), 9_200);
+        assertEq(d.config.getUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS), 800);
+        assertEq(d.config.getUint(ConfigKeys.registryStakeBase(5)), 500e18, "Verifier = 5x Storage base");
+        assertEq(d.config.getUint(ConfigKeys.registryStakeBase(8)), 40e18, "Blob Gateway flat stake");
+        assertEq(d.config.getUint(ConfigKeys.registryStakePerUnit(8)), 0);
+        assertEq(d.config.getUint(ConfigKeys.rewardTypeWeight(6)), 0, "Email IP Address never earns");
+        (uint16[] memory bg, bool[] memory lower) = d.weights.weightsFor(8, 0);
+        assertEq(bg.length, 4);
+        assertEq(bg[0], 3_000);
+        assertEq(bg[1], 3_000);
+        assertEq(bg[2], 2_000);
+        assertEq(bg[3], 2_000);
+        assertTrue(lower[2] && !lower[0] && !lower[1] && !lower[3], "only p95 latency is lower-is-better");
+        (uint16[] memory v,) = d.weights.weightsFor(5, 0);
+        assertEq(v[0], 4_000);
+        assertEq(v[1], 3_000);
+        assertEq(v[2], 3_000);
+    }
+
     function test_EmissionIsTheOnlyLargeMinter() public view {
         assertEq(d.token.totalSupply(), 0);
         assertEq(d.token.MAX_SUPPLY(), 10_000_000_000e18);
@@ -73,10 +96,11 @@ contract DeployRewardsTest is DeployRewards, Test {
         nodes[0] = node;
         d.rewards.sealEpoch(0, nodes);
 
-        // 100% heartbeat, so reliability stays 1.0x and the lone node takes the whole capacity share.
+        // 100% heartbeat, so reliability stays 1.0x and the lone node takes the whole Storage pool:
+        // 90% of the 92% capacity share (#160: the other 10% is the Blob Gateway pool).
         uint256 scheduled = d.emission.primaryEmission(0);
         assertEq(d.emission.emittedAmount(0), scheduled);
-        assertApproxEqAbs(d.token.balanceOf(node) - before, (scheduled * 9_200) / 10_000, 2);
+        assertApproxEqAbs(d.token.balanceOf(node) - before, (((scheduled * 9_200) / 10_000) * 9_000) / 10_000, 2);
     }
 
     function _signMetric(address who, uint256 epoch, uint256 score, uint256 heartbeatBps) internal view returns (bytes memory) {

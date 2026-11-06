@@ -21,6 +21,7 @@ import {IEpochController} from "./interfaces/IEpochController.sol";
 /// - Consensus (3): uptime, participation, propagation latency L, correctness
 /// - Serverless (4): accept uptime, invoke success, p95 invoke latency L, sandbox health, throughput
 /// - Verifier (5, #81): uptime, coverage (assigned checks completed), accuracy (attestations upheld)
+/// - Blob Gateway (8, #160 strawman): uptime, request success rate, p95 latency L, bytes served
 contract ScoringWeights is GovernedUpgradeable {
     uint8 public constant TYPE_COUNT = 5;
     uint256 internal constant BPS = 10_000;
@@ -68,6 +69,7 @@ contract ScoringWeights is GovernedUpgradeable {
 
     function _seedNodeServiceTables() private {
         if (_s().history[5].length == 0) _push(5, 0, _u16([uint256(4_000), 3_000, 3_000])); // Verifier
+        if (_s().history[8].length == 0) _push(8, 0, _u16([uint256(3_000), 3_000, 2_000, 2_000])); // Blob Gateway
     }
 
     /// @notice Tier 3: new weights for `nodeType`, effective from the next epoch. Calling
@@ -82,6 +84,7 @@ contract ScoringWeights is GovernedUpgradeable {
         if (nodeType == 3) return 4;
         if (nodeType < TYPE_COUNT) return 5;
         if (nodeType == 5) return 3; // Verifier
+        if (nodeType == 8) return 4; // Blob Gateway
         revert UnknownNodeType(nodeType);
     }
 
@@ -97,6 +100,8 @@ contract ScoringWeights is GovernedUpgradeable {
             lower[2] = true; // propagation latency
         } else if (nodeType == 4) {
             lower[2] = true; // p95 invoke latency
+        } else if (nodeType == 8) {
+            lower[2] = true; // p95 request latency
         }
         // Verifier (5): every factor is higher-is-better.
     }

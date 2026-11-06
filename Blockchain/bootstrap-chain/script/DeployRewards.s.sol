@@ -130,6 +130,7 @@ contract DeployRewards is Script {
         cfg.setUint(ConfigKeys.registryStakeBase(0), 100e18); // Storage: 100 SYM + 1 SYM/TB
         cfg.setUint(ConfigKeys.registryStakePerUnit(0), 1e18);
         cfg.setUint(ConfigKeys.registryStakeBase(5), 500e18); // Verifier: 5x the Storage base (#81)
+        cfg.setUint(ConfigKeys.registryStakeBase(8), 40e18); // Blob Gateway: flat, no capacity term (#160 strawman)
 
         // Rewards (#73, #80).
         cfg.setAddress(ConfigKeys.REWARD_EMISSION_SOURCE, address(d.emission));
@@ -141,7 +142,9 @@ contract DeployRewards is Script {
         cfg.setAddress(ConfigKeys.REWARD_METRIC_SIGNER, roles.metricSigner);
         cfg.setUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS, 9_200);
         cfg.setUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS, 800);
-        cfg.setUint(ConfigKeys.rewardTypeWeight(0), 10_000); // Storage is the only paid type so far
+        // #160 strawman: Storage and Blob Gateway are the only paid capacity services so far.
+        cfg.setUint(ConfigKeys.rewardTypeWeight(0), 9_000);
+        cfg.setUint(ConfigKeys.rewardTypeWeight(8), 1_000);
         cfg.setUint(ConfigKeys.REWARD_MULT_MIN, 0);
         cfg.setUint(ConfigKeys.REWARD_MULT_MAX, 10_000);
         cfg.setUint(ConfigKeys.REWARD_HEARTBEAT_THRESHOLD_BPS, 9_000);
