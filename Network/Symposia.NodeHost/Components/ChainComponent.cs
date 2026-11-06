@@ -116,15 +116,16 @@ public sealed partial class ChainComponent : HostComponent
             context.Logger.LogInformation("Deployed ProtocolActivations at {Address} on the existing local chain.", deployment.ProtocolActivationsAddress);
         }
 
-        if (string.IsNullOrEmpty(deployment.RewardDistributorAddress) || string.IsNullOrEmpty(deployment.StakingRegistryAddress)
+        if (string.IsNullOrEmpty(deployment.RewardDistributorAddress) || deployment.RewardsVersion < RewardsStackVersion
             || !await HasCodeAsync(rpcUrl, deployment.RewardDistributorAddress, ct))
         {
             // Rewards stack (#70-#80) with its epoch controller (#72), so the hosted gateway's epoch sealer has something to settle.
-            // Deployments from before #161 didn't record the staking registry, so they redeploy once.
+            // A stack from an older build (lower RewardsVersion) lacks functions the gateway and host now call, so it redeploys.
             var (distributor, epochs, telemetry, staking) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, ct);
             deployment = deployment with
             {
                 RewardDistributorAddress = distributor, EpochControllerAddress = epochs, TelemetryRegistryAddress = telemetry, StakingRegistryAddress = staking,
+                RewardsVersion = RewardsStackVersion,
             };
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
             context.Logger.LogInformation("Deployed the rewards contracts (RewardDistributor {Distributor}, EpochController {Epochs}).", distributor, epochs);
@@ -371,7 +372,14 @@ public sealed partial class ChainComponent : HostComponent
     /// <summary>Deployed addresses, tagged with the chain they were deployed to (checked on load).</summary>
     private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId,
         string? ProtocolActivationsAddress = null, string? RewardDistributorAddress = null, string? EpochControllerAddress = null,
-        string? TelemetryRegistryAddress = null, string? StakingRegistryAddress = null);
+        string? TelemetryRegistryAddress = null, string? StakingRegistryAddress = null, int RewardsVersion = 0);
+
+    /// <summary>
+    /// Bump whenever the rewards contracts gain a function the gateway or host calls, so existing local
+    /// chains redeploy the rewards stack instead of failing against old bytecode. 1 = #161 (staking
+    /// registry address), 2 = #165/#166 (firstReportBlock, per-service stages, external libraries).
+    /// </summary>
+    internal const int RewardsStackVersion = 2;
 
     private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null);
 }

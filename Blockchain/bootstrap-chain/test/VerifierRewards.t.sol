@@ -144,6 +144,12 @@ contract VerifierRewardsTest is CoreProtocolTestBase {
         vm.prank(timelockAddr);
         weights.initializeNodeServiceTables();
         assertEq(weights.historyLength(5), 1, "already seeded at initialize");
+        vm.prank(timelockAddr);
+        vm.expectRevert();
+        weights.initializeNodeServiceTables();
+    }
+
+    function test_RevertWhen_NodeServiceTablesReinitializerIsNotTheTimelock() public {
         vm.expectRevert();
         weights.initializeNodeServiceTables();
     }
