@@ -188,7 +188,7 @@ contract StoragePenaltyStateMachine is GovernedUpgradeable, IStoragePenaltyState
             // implies (no prior stage3/stage4 history carried over), rather
             // than continuing to apply ongoing Stage 4 slashing against a
             // node that has already re-onboarded.
-            if (_registry().statusOf(node) != INodeRegistry.NodeStatus.Banned) {
+            if (_registry().serviceStatusOf(node, INodeRegistry.NodeType.Storage) != INodeRegistry.NodeStatus.Banned) {
                 delete $.states[node];
                 $.epochMultiplierBps[node][epoch] = _stageMultBps(Stage.Stage0Healthy);
                 StoragePenaltyState storage fresh = $.states[node];
@@ -413,7 +413,7 @@ contract StoragePenaltyStateMachine is GovernedUpgradeable, IStoragePenaltyState
         bool freshEntry = s.stage != Stage.Stage3Suspended;
         if (freshEntry) {
             s.stage3EpisodeId += 1;
-            s.stage3EntryStake = _registry().stakeOf(node);
+            s.stage3EntryStake = _registry().serviceStakeOf(node, INodeRegistry.NodeType.Storage);
             s.stage3CumulativeSlashedBps = 0;
         }
 
@@ -524,7 +524,7 @@ contract StoragePenaltyStateMachine is GovernedUpgradeable, IStoragePenaltyState
         StoragePenaltyState storage s = $.states[node];
         Stage previousStage = s.stage;
 
-        uint256 currentStake = _registry().stakeOf(node);
+        uint256 currentStake = _registry().serviceStakeOf(node, INodeRegistry.NodeType.Storage);
         uint256 immediateBps = config().getUint(ConfigKeys.STORAGE_PENALTY_STAGE4_IMMEDIATE_BPS);
         uint256 immediateAmount = (currentStake * immediateBps) / 10_000;
 

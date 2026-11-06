@@ -307,7 +307,11 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
             revert SelfCheckpointNotYetAllowed(epoch, checkpointIndex);
         }
         INodeRegistry registry = INodeRegistry(config().getAddress(ConfigKeys.REGISTRY_ADDRESS));
-        if (address(registry) == address(0) || registry.statusOf(node) != INodeRegistry.NodeStatus.Active) {
+        // Self-checkpoints cover storage heartbeats, so the Storage service must be Active (#159).
+        if (
+            address(registry) == address(0)
+                || registry.serviceStatusOf(node, INodeRegistry.NodeType.Storage) != INodeRegistry.NodeStatus.Active
+        ) {
             revert NotActiveNode(node);
         }
         if ($.selfCheckpoints[epoch][checkpointIndex][node].committedAt != 0) {

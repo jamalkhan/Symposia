@@ -9,9 +9,13 @@ import {INodeRegistry} from "../src/interfaces/INodeRegistry.sol";
 import {EpochController} from "../src/EpochController.sol";
 import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.sol";
 
-/// @dev Only `statusOf` is exercised by the registry under test.
+/// @dev Only the Storage service status is exercised by the registry under test (#159).
 contract StatusOnlyRegistry {
     mapping(address => INodeRegistry.NodeStatus) public statusOf;
+
+    function serviceStatusOf(address node, INodeRegistry.NodeType service) external view returns (INodeRegistry.NodeStatus) {
+        return service == INodeRegistry.NodeType.Storage ? statusOf[node] : INodeRegistry.NodeStatus.Unregistered;
+    }
 
     function set(address node, INodeRegistry.NodeStatus s) external {
         statusOf[node] = s;

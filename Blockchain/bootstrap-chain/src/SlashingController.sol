@@ -262,11 +262,12 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
         whenNotPaused
         returns (uint256)
     {
-        return _applySlashAmount(node, amount);
+        // #159: storage penalties hit the node's Storage service only.
+        return _applyServiceSlashAmount(node, INodeRegistry.NodeType.Storage, amount);
     }
 
     function forceDeregisterStorageNode(address node) external onlyStoragePenaltyStateMachine whenNotPaused {
-        _registry().banNode(node, block.timestamp);
+        _registry().banService(node, INodeRegistry.NodeType.Storage, block.timestamp);
     }
 
     // --- Compute penalty state machine hook (issue #91) ---
@@ -277,7 +278,8 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
         whenNotPaused
         returns (uint256)
     {
-        return _applySlashAmount(node, amount);
+        // #159: compute penalties hit the node's Compute service only.
+        return _applyServiceSlashAmount(node, INodeRegistry.NodeType.Compute, amount);
     }
 
     // --- Token disposition ---
@@ -294,6 +296,17 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
         address recipient = _dispositionRecipient();
         _registry().applySlash(node, amount, recipient);
         return amount;
+    }
+
+    function _applyServiceSlashAmount(address node, INodeRegistry.NodeType service, uint256 amount)
+        internal
+        returns (uint256)
+    {
+        if (amount == 0) return 0;
+        uint256 stake = _registry().serviceStakeOf(node, service);
+        uint256 applied = amount > stake ? stake : amount;
+        _registry().applyServiceSlash(node, service, applied, _dispositionRecipient());
+        return applied;
     }
 
     function _dispositionRecipient() internal view returns (address) {

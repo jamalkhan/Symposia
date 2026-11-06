@@ -102,6 +102,14 @@
       {
         "type": "mapping(uint256 => mapping(address => uint256[]))",
         "name": "factorRaw"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => bool))",
+        "name": "nodeReported"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "reportingNodeCount"
       }
     ],
     "NodeCalc": [
@@ -140,6 +148,10 @@
       {
         "type": "uint256[]",
         "name": "raw"
+      },
+      {
+        "type": "address",
+        "name": "account"
       }
     ]
   },

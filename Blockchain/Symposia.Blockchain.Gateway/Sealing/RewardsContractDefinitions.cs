@@ -9,7 +9,8 @@ namespace Symposia.Blockchain.Gateway.Sealing;
 [Function("nextSealableEpoch", "uint256")]
 public sealed class NextSealableEpochFunction : FunctionMessage;
 
-[Function("reporterCount", "uint256")]
+/// <summary>Distinct reporting nodes (#159); <c>reporterCount</c> counts per-service reward accounts.</summary>
+[Function("reportingNodeCount", "uint256")]
 public sealed class ReporterCountFunction : FunctionMessage
 {
     [Parameter("uint256", "epoch", 1)]
