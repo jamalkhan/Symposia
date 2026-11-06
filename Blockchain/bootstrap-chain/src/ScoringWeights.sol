@@ -68,7 +68,7 @@ contract ScoringWeights is GovernedUpgradeable {
 
     /// @notice Adds the Node Service tables introduced after the first deploy (#81/#159)
     /// to a proxy initialized before them. No-op for tables that already exist.
-    function initializeNodeServiceTables() external reinitializer(2) {
+    function initializeNodeServiceTables() external reinitializer(2) onlyTimelock {
         _seedNodeServiceTables();
     }
 
