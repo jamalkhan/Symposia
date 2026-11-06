@@ -42,6 +42,9 @@ contract DeployRewardsTest is DeployRewards, Test {
         assertEq(d.config.getAddress(ConfigKeys.REGISTRY_ADDRESS), address(d.registry));
         assertEq(address(d.emission.token()), address(d.token));
         assertEq(d.emission.rewardDistributor(), address(d.rewards));
+        assertEq(d.config.getAddress(ConfigKeys.EPOCH_CONTROLLER), address(d.epochs));
+        assertEq(address(d.emission.epochClock()), address(d.epochs));
+        assertEq(d.epochs.finalityWindow(), 15 minutes);
         assertEq(d.config.owner(), deployer);
     }
 

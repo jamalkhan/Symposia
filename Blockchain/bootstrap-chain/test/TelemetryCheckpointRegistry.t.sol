@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {MockProtocolConfig} from "../src/config/MockProtocolConfig.sol";
 import {ConfigKeys} from "../src/config/ConfigKeys.sol";
 import {INodeRegistry} from "../src/interfaces/INodeRegistry.sol";
+import {EpochController} from "../src/EpochController.sol";
 import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.sol";
 
 /// @dev Only `statusOf` is exercised by the registry under test.
@@ -47,9 +48,9 @@ contract TelemetryCheckpointRegistryTest is Test {
         vm.startPrank(configOwner);
         cfg.setAddress(ConfigKeys.GOVERNANCE_TIMELOCK, timelock);
         cfg.setAddress(ConfigKeys.REGISTRY_ADDRESS, address(nodes));
-        cfg.setUint(ConfigKeys.EPOCH_LENGTH, EPOCH);
-        cfg.setUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP, genesis);
-        cfg.setUint(ConfigKeys.REWARD_FINALITY_WINDOW, FINALITY);
+        cfg.setAddress(
+            ConfigKeys.EPOCH_CONTROLLER, address(new EpochController(cfg, uint64(genesis), uint32(EPOCH), uint32(FINALITY)))
+        );
         cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, 30 minutes);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_UPTIME_BPS, 1_000);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_LATENCY_BPS, 5_000);
@@ -136,7 +137,7 @@ contract TelemetryCheckpointRegistryTest is Test {
     }
 
     function _afterFinality(uint256 epoch) internal {
-        vm.warp(genesis + (epoch + 1) * EPOCH + FINALITY);
+        vm.warp(genesis + (epoch + 1) * EPOCH + FINALITY + 1); // the deadline second itself is still in-window (#72)
     }
 
     // --- committee ---
@@ -217,6 +218,12 @@ contract TelemetryCheckpointRegistryTest is Test {
         vm.warp(genesis + EPOCH + FINALITY - 1); // epoch 0 over, finality window still open
         _commit(0, 23, keccak256("late"));
         assertEq(reg.checkpointCount(0), 1);
+    }
+
+    function test_CheckpointAtExactDeadlineAccepted() public {
+        vm.warp(genesis + EPOCH + FINALITY);
+        _commit(0, 23, keccak256("on time"));
+        assertGt(reg.getCheckpoint(0, 23).committedAt, 0);
     }
 
     function test_RevertWhen_CheckpointAfterFinality() public {

@@ -288,6 +288,7 @@ contract RewardDistributorSealGuardsTest is RewardDistributorPayoutTest {
     }
 
     function test_RevertWhen_SealOutOfOrder() public {
+        vm.warp(epochs.epochStart(1));
         _report(storageNodes[0], 1, 100);
         vm.warp(rewards.epochFinalityDeadline(1) + 1);
         // Skipping ahead is rejected: epoch 0 must be sealed first.

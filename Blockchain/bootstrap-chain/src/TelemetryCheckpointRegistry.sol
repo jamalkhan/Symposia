@@ -8,6 +8,7 @@ import {GovernedUpgradeable} from "./governance/GovernedUpgradeable.sol";
 import {IProtocolConfig} from "./config/IProtocolConfig.sol";
 import {ConfigKeys} from "./config/ConfigKeys.sol";
 import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
+import {IEpochController} from "./interfaces/IEpochController.sol";
 
 /// @title TelemetryCheckpointRegistry
 /// @notice On-chain half of the sub-epoch metrics pipeline (issue #75).
@@ -205,7 +206,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         bytes[] calldata signatures
     ) external whenNotPaused {
         _checkIndex(checkpointIndex);
-        if (block.timestamp >= epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
+        if (block.timestamp > epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
         if (merkleRoot == bytes32(0) || sampleCount == 0) revert EmptyCheckpoint();
         TelemetryStorage storage $ = _ts();
         if ($.checkpoints[epoch][checkpointIndex].committedAt != 0) {
@@ -238,7 +239,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         uint32 sampleCount
     ) external whenNotPaused {
         _checkIndex(checkpointIndex);
-        if (block.timestamp >= epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
+        if (block.timestamp > epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
         if (merkleRoot == bytes32(0) || sampleCount == 0) revert EmptyCheckpoint();
         TelemetryStorage storage $ = _ts();
         if ($.checkpoints[epoch][checkpointIndex].committedAt != 0) {
@@ -310,7 +311,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         external
         whenNotPaused
     {
-        if (block.timestamp < epochFinalityDeadline(epoch)) revert FinalityWindowNotElapsed(epoch);
+        if (block.timestamp <= epochFinalityDeadline(epoch)) revert FinalityWindowNotElapsed(epoch);
         bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(AGGREGATE_TYPEHASH, epoch, hashRecords(inputs))));
         _requireThreshold(digest, signatures);
 
@@ -377,15 +378,16 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     }
 
     // ---------------------------------------------------------------------
-    // Epoch timing (same config keys and formula as RewardDistributor)
+    // Epoch timing (EpochController, #72)
     // ---------------------------------------------------------------------
 
-    // TODO(#72): move epoch math into the epoch controller / a shared EpochMath library
-    // (duplicated in RewardDistributor.epochFinalityDeadline).
+    /// @notice Last second (inclusive) at which records for `epoch` are accepted.
     function epochFinalityDeadline(uint256 epoch) public view returns (uint256) {
-        IProtocolConfig cfg = config();
-        return cfg.getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP) + (epoch + 1) * cfg.getUint(ConfigKeys.EPOCH_LENGTH)
-            + cfg.getUint(ConfigKeys.REWARD_FINALITY_WINDOW);
+        return _epochs().finalityDeadline(epoch);
+    }
+
+    function _epochs() internal view returns (IEpochController) {
+        return IEpochController(config().getAddress(ConfigKeys.EPOCH_CONTROLLER));
     }
 
     function checkpointsPerEpoch() public view returns (uint256) {
@@ -395,10 +397,10 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
 
     /// @notice End timestamp of checkpoint window `index` within `epoch`.
     function checkpointWindowEnd(uint256 epoch, uint256 index) public view returns (uint256) {
-        IProtocolConfig cfg = config();
-        uint256 length = cfg.getUint(ConfigKeys.EPOCH_LENGTH);
-        return cfg.getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP) + epoch * length
-            + ((index + 1) * length) / checkpointsPerEpoch();
+        IEpochController epochs = _epochs();
+        uint256 start = epochs.epochStart(epoch);
+        uint256 length = epochs.epochEnd(epoch) - start;
+        return start + ((index + 1) * length) / checkpointsPerEpoch();
     }
 
     // ---------------------------------------------------------------------

@@ -13,12 +13,13 @@ import {RewardDistributor} from "../src/RewardDistributor.sol";
 import {ReliabilityRegistry} from "../src/ReliabilityRegistry.sol";
 import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.sol";
 import {NetworkRewardsEmission} from "../src/NetworkRewardsEmission.sol";
+import {EpochController} from "../src/EpochController.sol";
 import {IEpochClock} from "../src/interfaces/IEpochClock.sol";
 import {IFeeTreasury} from "../src/interfaces/IFeeTreasury.sol";
 import {ISYMMinter} from "../src/interfaces/ISYMMinter.sol";
 
 /// @notice Deploys and wires the node-rewards stack (issues #70, #73, #75, #79, #80):
-/// SYM token, staking registry, slashing, reward distributor, reliability, telemetry
+/// epoch controller (#72), SYM token, staking registry, slashing, reward distributor, reliability, telemetry
 /// checkpoints and the emission schedule. Separate from Deploy.s.sol, which stays the
 /// Phase 0 set the Gateway and NodeHost LocalDev depend on.
 ///
@@ -45,6 +46,7 @@ contract DeployRewards is Script {
 
     struct Deployment {
         MockProtocolConfig config;
+        EpochController epochs;
         SYMToken token;
         StakingNodeRegistry registry;
         SlashingController slashing;
@@ -73,6 +75,8 @@ contract DeployRewards is Script {
     function deploy(address deployer, Roles memory roles) public returns (Deployment memory d) {
         d.config = new MockProtocolConfig(deployer);
         IProtocolConfig cfg = d.config;
+        // 24h epochs (NetworkRewardsEmission assumes 365/year) with the spec's 15-minute finality window.
+        d.epochs = new EpochController(cfg, uint64(block.timestamp), 1 days, 15 minutes);
 
         d.registry = StakingNodeRegistry(_proxy(address(new StakingNodeRegistry()), abi.encodeCall(StakingNodeRegistry.initialize, (cfg))));
         d.slashing = SlashingController(_proxy(address(new SlashingController()), abi.encodeCall(SlashingController.initialize, (cfg))));
@@ -91,7 +95,7 @@ contract DeployRewards is Script {
         address tokenImpl = address(new SYMToken());
         address predictedToken = vm.computeCreateAddress(deployer, vm.getNonce(deployer) + 1);
         d.emission = new NetworkRewardsEmission(
-            ISYMMinter(predictedToken), address(d.rewards), IEpochClock(address(d.rewards)), IFeeTreasury(address(0)), roles.timelock
+            ISYMMinter(predictedToken), address(d.rewards), IEpochClock(address(d.epochs)), IFeeTreasury(address(0)), roles.timelock
         );
         d.token = SYMToken(_proxy(tokenImpl, _tokenInit(roles, address(d.emission), deployer)));
         if (address(d.token) != predictedToken) revert PredictedAddressMismatch(predictedToken, address(d.token));
@@ -118,8 +122,7 @@ contract DeployRewards is Script {
         cfg.setAddress(ConfigKeys.REGISTRY_ADDRESS, address(d.registry));
         cfg.setAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER, address(d.slashing));
         cfg.setAddress(ConfigKeys.REGISTRY_VERIFIER_ROLE, roles.verifier);
-        cfg.setUint(ConfigKeys.EPOCH_LENGTH, 1 days); // NetworkRewardsEmission assumes 365 epochs/year
-        cfg.setUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP, block.timestamp);
+        cfg.setAddress(ConfigKeys.EPOCH_CONTROLLER, address(d.epochs));
         cfg.setUint(ConfigKeys.REGISTRY_UNSTAKE_COOLDOWN, 21 days);
         cfg.setUint(ConfigKeys.registryStakeBase(0), 100e18); // Storage: 100 SYM + 1 SYM/TB
         cfg.setUint(ConfigKeys.registryStakePerUnit(0), 1e18);
@@ -135,7 +138,6 @@ contract DeployRewards is Script {
         cfg.setUint(ConfigKeys.REWARD_MULT_MAX, 10_000);
         cfg.setUint(ConfigKeys.REWARD_HEARTBEAT_THRESHOLD_BPS, 9_000);
         cfg.setUint(ConfigKeys.REWARD_RESERVE_SWEEP_EPOCHS, 2);
-        cfg.setUint(ConfigKeys.REWARD_FINALITY_WINDOW, 1 hours);
         cfg.setUint(ConfigKeys.REWARD_RELIABILITY_BONUS_THRESHOLD_BPS, 9_800);
         cfg.setUint(ConfigKeys.REWARD_RELIABILITY_BONUS_BPS, 10_500);
         cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 0), 3_000); // retrieval speed
@@ -198,6 +200,7 @@ contract DeployRewards is Script {
 
     function _log(Deployment memory d) internal pure {
         console.log("ProtocolConfig:", address(d.config));
+        console.log("EpochController:", address(d.epochs));
         console.log("SYMToken:", address(d.token));
         console.log("StakingNodeRegistry:", address(d.registry));
         console.log("SlashingController:", address(d.slashing));
@@ -211,6 +214,7 @@ contract DeployRewards is Script {
         string memory k = "rewards";
         vm.serializeUint(k, "chainId", block.chainid);
         vm.serializeAddress(k, "ProtocolConfig", address(d.config));
+        vm.serializeAddress(k, "EpochController", address(d.epochs));
         vm.serializeAddress(k, "SYMToken", address(d.token));
         vm.serializeAddress(k, "StakingNodeRegistry", address(d.registry));
         vm.serializeAddress(k, "SlashingController", address(d.slashing));

@@ -12,6 +12,7 @@ import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
 import {IFoundationRewardHook} from "./interfaces/IFoundationRewardHook.sol";
 import {INetworkRewardsEmission} from "./interfaces/INetworkRewardsEmission.sol";
 import {IReliabilityRegistry} from "./interfaces/IReliabilityRegistry.sol";
+import {IEpochController} from "./interfaces/IEpochController.sol";
 import {BonusNormalization} from "./libraries/BonusNormalization.sol";
 
 /// @title RewardDistributor
@@ -295,13 +296,13 @@ contract RewardDistributor is GovernedUpgradeable {
         emit FactorMetricsReported(node, epoch, heartbeatBps);
     }
 
-    /// @notice Rejects metric/factor reports once the epoch's 15-minute (MVP
-    /// default, governance-configurable) finality window has elapsed, or the
-    /// epoch has already been sealed (#53 FR1.2/FR1.5) — late reports must
-    /// not be silently incorporated into a seal that reads current storage.
+    /// @notice Rejects metric/factor reports for an epoch that hasn't started,
+    /// whose finality window (EpochController, #72) has elapsed, or that has
+    /// already been sealed (#53 FR1.2/FR1.5). Late reports are rejected, never
+    /// rolled into the next epoch.
     function _checkReportWindow(uint256 epoch) internal view {
         if (_rewardStorage().seals[epoch].sealed_) revert EpochAlreadySealed(epoch);
-        if (block.timestamp >= epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
+        if (!_epochs().acceptsReports(epoch)) revert FinalityWindowElapsed(epoch);
     }
 
     function metricOf(uint256 epoch, address node) external view returns (MetricRecord memory) {
@@ -360,20 +361,19 @@ contract RewardDistributor is GovernedUpgradeable {
 
     // --- Epoch sealing ---
 
-    /// @notice IEpochClock (#73): timestamp at which `epoch` ends.
+    /// @notice IEpochClock (#73): timestamp at which `epoch` ends. Forwards to
+    /// the EpochController (#72), which owns all epoch math.
     function epochEndTimestamp(uint256 epoch) public view returns (uint256) {
-        uint256 genesis = config().getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP);
-        uint256 length = config().getUint(ConfigKeys.EPOCH_LENGTH);
-        return genesis + (epoch + 1) * length;
+        return _epochs().epochEnd(epoch);
     }
 
-    // TODO(#72): move epoch math into the epoch controller / a shared EpochMath library
-    // (duplicated in TelemetryCheckpointRegistry.epochFinalityDeadline).
+    /// @notice Last second (inclusive) at which reports for `epoch` are accepted.
     function epochFinalityDeadline(uint256 epoch) public view returns (uint256) {
-        uint256 genesis = config().getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP);
-        uint256 length = config().getUint(ConfigKeys.EPOCH_LENGTH);
-        uint256 finality = config().getUint(ConfigKeys.REWARD_FINALITY_WINDOW);
-        return genesis + (epoch + 1) * length + finality;
+        return _epochs().finalityDeadline(epoch);
+    }
+
+    function _epochs() internal view returns (IEpochController) {
+        return IEpochController(config().getAddress(ConfigKeys.EPOCH_CONTROLLER));
     }
 
     /// @notice Capacity node types that share the 92% emission (tokenomics-mvp.md
@@ -414,11 +414,12 @@ contract RewardDistributor is GovernedUpgradeable {
     function sealEpoch(uint256 epoch, address[] calldata nodes) external whenNotPaused {
         RewardStorage storage $ = _rewardStorage();
         if ($.seals[epoch].sealed_) revert EpochAlreadySealed(epoch);
-        if (block.timestamp < epochFinalityDeadline(epoch)) revert FinalityWindowNotElapsed(epoch);
+        if (!_epochs().isSealed(epoch)) revert FinalityWindowNotElapsed(epoch);
         if (epoch != $.nextSealableEpoch) revert EpochSealOutOfOrder(epoch, $.nextSealableEpoch);
         $.nextSealableEpoch = epoch + 1;
         // Latch before any external call (emission mint, reliability finalize, payouts).
         $.seals[epoch] = EpochSeal({sealed_: true, sealedAt: block.timestamp});
+        _epochs().trySeal(epoch); // records the controller seal and its event; no-op if already recorded
 
         uint256 emission = _epochEmission(epoch);
         uint256 capacityAmount = (emission * config().getUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS)) / 10_000;

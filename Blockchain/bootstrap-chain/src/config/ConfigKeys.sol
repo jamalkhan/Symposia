@@ -16,6 +16,9 @@ library ConfigKeys {
     // --- Shared / cross-contract ---
     bytes32 internal constant TOKEN_ADDRESS = keccak256("token.address");
     bytes32 internal constant GOVERNANCE_TIMELOCK = keccak256("governance.timelock");
+    /// @notice EpochController (#72): the only source of epoch boundaries and finality.
+    bytes32 internal constant EPOCH_CONTROLLER = keccak256("epoch.controller");
+    /// @dev Deprecated by EPOCH_CONTROLLER (#72); no contract reads these any more.
     bytes32 internal constant EPOCH_LENGTH = keccak256("epoch.length");
     bytes32 internal constant EPOCH_GENESIS_TIMESTAMP = keccak256("epoch.genesisTimestamp");
     bytes32 internal constant REGISTRY_ADDRESS = keccak256("registry.address");
@@ -52,6 +55,7 @@ library ConfigKeys {
     bytes32 internal constant REWARD_MULT_EPSILON = keccak256("reward.mult.epsilon");
     bytes32 internal constant REWARD_HEARTBEAT_THRESHOLD_BPS = keccak256("reward.heartbeat.thresholdBps");
     bytes32 internal constant REWARD_RESERVE_SWEEP_EPOCHS = keccak256("reward.reserve.sweepEpochs");
+    /// @dev Deprecated: the finality window is EpochController.finalityWindow (#72).
     bytes32 internal constant REWARD_FINALITY_WINDOW = keccak256("reward.finalityWindow");
     bytes32 internal constant REWARD_METRIC_SIGNER = keccak256("reward.metric.signer");
     /// @notice NetworkRewardsEmission (#73). When set, `sealEpoch` pulls the

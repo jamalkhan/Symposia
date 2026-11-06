@@ -189,6 +189,7 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
         // starting at epoch 5 (its first-ever metric report), well after
         // epoch index 0. It must still get the "no preceding record"
         // exemption, not be penalized for lacking an epoch-4 record.
+        vm.warp(epochs.epochStart(5)); // reports are only accepted once their epoch has started (#72)
         rewards.submitMetricReport(nodeB, 5, 100, 9_300, _signMetric(nodeB, 5, 100, 9_300));
         _warpToFinality(5);
         _sealEmptyBefore(5);
@@ -201,6 +202,7 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
     }
 
     function test_newNode_secondEpoch_revertsToFullTwoEpochTest() public {
+        vm.warp(epochs.epochStart(5)); // reports are only accepted once their epoch has started (#72)
         rewards.submitMetricReport(nodeB, 5, 100, 9_300, _signMetric(nodeB, 5, 100, 9_300));
         _warpToFinality(5);
         _sealEmptyBefore(5);
