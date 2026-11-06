@@ -20,7 +20,8 @@ to re-register.
   - `src/NodeRegistry.sol` — EIP-712-authenticated node identity registration. Idempotent.
   - `src/EpochRootRegistry.sol` — signed epoch Merkle root submission, gated on registration. Idempotent for identical resubmissions; rejects conflicting resubmissions for an already-submitted epoch.
   - `test/` — Foundry unit tests covering the full acceptance criteria (registration, rejection, forgery resistance, idempotency, reads).
-  - `script/Deploy.s.sol` — deploys both contracts.
+  - `script/Deploy.s.sol` — deploys the Phase 0 set (NodeRegistry, EpochRootRegistry, ProtocolActivations).
+  - `script/DeployRewards.s.sol` — deploys and wires the node-rewards contracts for local devnets (see `bootstrap-chain/README.md`).
 - `Symposia.Blockchain.Gateway/` — the foundation-operated Bootstrap Chain Gateway (relayer + read proxy). Freshly generated node keypairs have no L3 balance to pay gas, so nodes sign payloads locally and the Gateway relays them on-chain, paying gas itself (see the Arch pass on issue #110, "Gas bootstrapping"). The contracts — not the Gateway — are the authoritative rejector of unregistered or forged submissions.
 - `Symposia.Blockchain.Gateway.Tests/` — end-to-end tests that boot a real local `anvil` chain, deploy the real contracts via `forge script`, and exercise the Gateway's HTTP surface against them.
 
@@ -29,10 +30,9 @@ to re-register.
 Requires [Foundry](https://getfoundry.sh/) (`curl -L https://foundry.paradigm.xyz | bash && foundryup`) and the .NET 9 SDK.
 
 ```bash
-# Contracts (first run: install deps, since lib/ is gitignored)
+# Contracts (first run: install pinned deps, since lib/ is gitignored)
 cd Blockchain/bootstrap-chain
-forge install foundry-rs/forge-std --no-git
-forge install OpenZeppelin/openzeppelin-contracts --no-git
+../../tools/install-contract-libs.sh
 forge test
 
 # Gateway (against a local anvil + deployed contracts)
