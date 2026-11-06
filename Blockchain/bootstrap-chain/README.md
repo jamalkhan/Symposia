@@ -37,3 +37,12 @@ forge script script/DeployRewards.s.sol:DeployRewards --rpc-url http://localhost
   is fixed at initialize. Getting either wrong on a real network means an upgrade.
 - No fee treasury is set, so the post-year-8 floor stays unfunded until governance calls
   `NetworkRewardsEmission.setFeeTreasury` (#86).
+- Node Service economics (stakes, type-pool weights, emission shares and factor tables) come from
+  [`protocol/economics.json`](../../protocol/economics.json) (#163). Change them there: a forge test
+  checks the deployed config and `ScoringWeights` against that file, and the NodeHost earnings
+  catalog is checked against it too. Run from this directory so the script can read it.
+- `FactorScoring`, `BonusNormalization` and `TelemetryRecordReader` are external libraries, which
+  keeps `RewardDistributor` under the 24,576-byte limit (EIP-170). `forge script` deploys and links
+  them automatically; any other deploy tool must link them.
+- Proxies deployed before the Verifier and Blob Gateway tables existed need
+  `ScoringWeights.initializeNodeServiceTables()` from the timelock after upgrading.
