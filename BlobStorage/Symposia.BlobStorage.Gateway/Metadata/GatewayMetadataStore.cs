@@ -110,10 +110,11 @@ public sealed partial class GatewayMetadataStore
         }
 
         // (replica_count, bucket, key) lets the under-replication sweep range-scan and page in key order.
+        // The older idx_objects_replica_count is left in place for one release so N-1 gateways sharing
+        // this database keep their plan (issue #152); drop it once no N-1 hosts remain.
         // Multipart uploads (#5): parts are ordinary blobs tracked here, never rows in objects, so they
         // can't leak into GET/LIST; the upload row outlives completion for idempotent Complete retries.
         Execute(conn, """
-            DROP INDEX IF EXISTS idx_objects_replica_count;
             CREATE INDEX IF NOT EXISTS idx_objects_replicas ON objects (replica_count, bucket, key);
 
             CREATE TABLE IF NOT EXISTS multipart_uploads (
@@ -475,7 +476,7 @@ public sealed partial class GatewayMetadataStore
         return ReadRecords(cmd);
     }
 
-    /// <summary>How many objects are recorded on fewer than <paramref name="minCopies"/> nodes (idx_objects_replica_count).</summary>
+    /// <summary>How many objects are recorded on fewer than <paramref name="minCopies"/> nodes (idx_objects_replicas).</summary>
     public long CountUnderReplicated(int minCopies)
     {
         using var conn = Open();
