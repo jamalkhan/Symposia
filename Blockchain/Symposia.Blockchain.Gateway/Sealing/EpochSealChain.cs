@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 using System.Numerics;
 using Microsoft.Extensions.Options;
 using Nethereum.ABI.FunctionEncoding.Attributes;

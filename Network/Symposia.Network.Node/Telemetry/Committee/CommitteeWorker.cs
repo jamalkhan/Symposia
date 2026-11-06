@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Nethereum.Hex.HexConvertors.Extensions;
@@ -301,7 +302,7 @@ public sealed class CommitteeWorker(
         var aggregator = new EpochMetricAggregator(schedule, chainId, registry);
         return heartbeats.Select(h => h.Payload.NodeId.ToLowerInvariant()).Distinct()
             .Select(n => aggregator.Aggregate(n, epoch, heartbeats, attestations))
-            .Select(AggregatedMetricInput.From)
+            .Select(TelemetryAbi.ToInput)
             .Select(r => { r.Node = Nethereum.Util.AddressUtil.Current.ConvertToChecksumAddress(r.Node); return r; })
             .OrderBy(r => r.Node.ToLowerInvariant(), StringComparer.Ordinal)
             .ToList();

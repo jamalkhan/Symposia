@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 using System.Numerics;
 using Microsoft.Extensions.Options;
 using Nethereum.ABI.FunctionEncoding.Attributes;
@@ -175,36 +176,4 @@ public static class TelemetryRelayEndpoints
     private static string Selector(string signature) =>
         Sha3Keccack.Current.CalculateHash(System.Text.Encoding.UTF8.GetBytes(signature))[..4].ToHex(false);
 
-    [Function("commitCheckpoint")]
-    private sealed class CommitCheckpointFunction : FunctionMessage
-    {
-        [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
-        [Parameter("uint256", "checkpointIndex", 2)] public BigInteger Index { get; set; }
-        [Parameter("bytes32", "merkleRoot", 3)] public byte[] MerkleRoot { get; set; } = [];
-        [Parameter("bytes32", "blobAddress", 4)] public byte[] BlobAddress { get; set; } = [];
-        [Parameter("uint32", "sampleCount", 5)] public uint SampleCount { get; set; }
-        [Parameter("bytes[]", "signatures", 6)] public List<byte[]> Signatures { get; set; } = [];
-    }
-
-    [Function("selfCheckpointFor")]
-    private sealed class SelfCheckpointForFunction : FunctionMessage
-    {
-        [Parameter("address", "node", 1)] public string Node { get; set; } = "";
-        [Parameter("uint256", "epoch", 2)] public BigInteger Epoch { get; set; }
-        [Parameter("uint256", "checkpointIndex", 3)] public BigInteger Index { get; set; }
-        [Parameter("bytes32", "merkleRoot", 4)] public byte[] MerkleRoot { get; set; } = [];
-        [Parameter("bytes32", "blobAddress", 5)] public byte[] BlobAddress { get; set; } = [];
-        [Parameter("uint32", "sampleCount", 6)] public uint SampleCount { get; set; }
-        [Parameter("bytes", "signature", 7)] public byte[] Signature { get; set; } = [];
-    }
-
-    [Function("submitAggregatedRecords")]
-    private sealed class SubmitAggregatedRecordsFunction : FunctionMessage
-    {
-        [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
-        [Parameter("uint256", "chunkIndex", 2)] public BigInteger ChunkIndex { get; set; }
-        [Parameter("uint256", "chunkCount", 3)] public BigInteger ChunkCount { get; set; }
-        [Parameter("tuple[]", "inputs", 4, structTypeName: "AggregatedMetricInput[]")] public List<AggregatedMetricInput> Inputs { get; set; } = [];
-        [Parameter("bytes[]", "signatures", 5)] public List<byte[]> Signatures { get; set; } = [];
-    }
 }

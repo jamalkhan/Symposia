@@ -2,21 +2,13 @@ using System.Numerics;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Contracts;
 
-namespace Symposia.Blockchain.Gateway.Sealing;
+namespace Symposia.Blockchain.Contracts;
 
-// RewardDistributor (#80) and EpochController (#72) ABI surface used by the epoch sealer.
+// RewardDistributor bindings (#167): the one copy every Symposia .NET component uses; ContractAbiTests pins them to the forge ABI.
 
 /// <summary>#165: block of an epoch's first metric report (0 = none).</summary>
 [Function("firstReportBlock", "uint256")]
 public sealed class FirstReportBlockFunction : FunctionMessage
-{
-    [Parameter("uint256", "epoch", 1)]
-    public BigInteger Epoch { get; set; }
-}
-
-/// <summary>#165: block of an epoch's first records chunk (0 = none).</summary>
-[Function("firstRecordBlock", "uint256")]
-public sealed class FirstRecordBlockFunction : FunctionMessage
 {
     [Parameter("uint256", "epoch", 1)]
     public BigInteger Epoch { get; set; }
@@ -93,28 +85,36 @@ public sealed class EpochSourceFunction : FunctionMessage
     public BigInteger Epoch { get; set; }
 }
 
-[Function("recordCount", "uint256")]
-public sealed class RecordCountFunction : FunctionMessage
+[Event("ServiceSettled")]
+public sealed class ServiceSettledEvent : IEventDTO
 {
-    [Parameter("uint256", "epoch", 1)]
-    public BigInteger Epoch { get; set; }
+    [Parameter("address", "node", 1, true)] public string Node { get; set; } = "";
+    [Parameter("uint8", "service", 2, true)] public byte Service { get; set; }
+    [Parameter("uint256", "epoch", 3, true)] public BigInteger Epoch { get; set; }
+    [Parameter("uint8", "reason", 4, false)] public byte Reason { get; set; }
+    [Parameter("address", "account", 5, false)] public string Account { get; set; } = "";
+    [Parameter("uint256", "amount", 6, false)] public BigInteger Amount { get; set; }
+    [Parameter("uint256", "paid", 7, false)] public BigInteger Paid { get; set; }
+    [Parameter("uint256", "held", 8, false)] public BigInteger Held { get; set; }
 }
 
-[Event("AggregatedRecordWritten")]
-public sealed class AggregatedRecordWrittenEventDTO : IEventDTO
+[Event("ServiceReserveClaimed")]
+public sealed class ServiceReserveClaimedEvent : IEventDTO
 {
-    [Parameter("uint256", "epoch", 1, true)]
-    public BigInteger Epoch { get; set; }
+    [Parameter("address", "node", 1, true)] public string Node { get; set; } = "";
+    [Parameter("uint8", "service", 2, true)] public byte Service { get; set; }
+    [Parameter("uint256", "amount", 3, false)] public BigInteger Amount { get; set; }
+}
 
-    [Parameter("address", "node", 2, true)]
-    public string Node { get; set; } = "";
+[Function("accountOf", "address")]
+public sealed class AccountOfFunction : FunctionMessage
+{
+    [Parameter("address", "node", 1)] public string Node { get; set; } = "";
+    [Parameter("uint8", "service", 2)] public byte Service { get; set; }
+}
 
-    [Parameter("uint16", "heartbeatComplianceBps", 3, false)]
-    public ushort HeartbeatComplianceBps { get; set; }
-
-    [Parameter("bool", "eligible", 4, false)]
-    public bool Eligible { get; set; }
-
-    [Parameter("bool", "divergenceFlag", 5, false)]
-    public bool DivergenceFlag { get; set; }
+[Function("reserveBalanceOf", "uint256")]
+public sealed class ReserveBalanceOfFunction : FunctionMessage
+{
+    [Parameter("address", "node", 1)] public string Account { get; set; } = "";
 }

@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
