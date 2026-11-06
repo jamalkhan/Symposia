@@ -2,7 +2,9 @@
 
 The compatibility checks (#146) only gate merges if GitHub requires them. Apply these settings in **Settings → Branches** (or as a ruleset) on the repository. They are applied by the repo owner, not by CI.
 
-## `qa`, `stage`, `master`, `production`
+## `qa`, `stage`, `master`
+
+`master` is the production branch; there is no separate `production` branch.
 
 | Setting | Value |
 |---|---|
@@ -44,6 +46,6 @@ gh api -X PUT repos/jamalkhan/Symposia/branches/qa/protection --input - <<'JSON'
 JSON
 ```
 
-Repeat for `master`, `stage` and `production`.
+Repeat for `master` and `stage`.
 
 A check only appears in the picker after it has run once, so open one PR first. With a single maintainer, a required approval means you need a second account or an admin bypass to merge your own PRs. Keep `enforce_admins` false until there is a second maintainer.
