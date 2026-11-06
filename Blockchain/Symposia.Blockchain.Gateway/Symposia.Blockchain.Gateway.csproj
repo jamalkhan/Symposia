@@ -13,6 +13,7 @@
   <ItemGroup>
     <!-- Telemetry batch codec, EIP-712 digests and blob client shared with nodes (#158). -->
     <ProjectReference Include="..\..\Network\Symposia.Network.Node\Symposia.Network.Node.csproj" />
+    <ProjectReference Include="..\Symposia.Blockchain.Contracts\Symposia.Blockchain.Contracts.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -33,7 +33,7 @@ library BonusNormalization {
     /// @param eligible Per-node bonus eligibility.
     /// @param bonusBps Bonus multiplier in bps (10_500 = 1.05x).
     function normalize(uint256 pool, uint256[] memory base, bool[] memory eligible, uint256 bonusBps)
-        internal
+        public
         pure
         returns (uint256[] memory out)
     {

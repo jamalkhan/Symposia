@@ -16,7 +16,7 @@ import {IEpochController} from "./interfaces/IEpochController.sol";
 import {BonusNormalization} from "./libraries/BonusNormalization.sol";
 import {FactorScoring} from "./libraries/FactorScoring.sol";
 import {ITelemetryRecords, IScoringWeights} from "./interfaces/ITelemetryRecords.sol";
-import {TelemetryCheckpointRegistry} from "./TelemetryCheckpointRegistry.sol";
+import {TelemetryRecordReader} from "./libraries/TelemetryRecordReader.sol";
 
 /// @title RewardDistributor
 /// @notice Implements FR-4 of issue #52 and reconciles/completes it against
@@ -111,7 +111,8 @@ import {TelemetryCheckpointRegistry} from "./TelemetryCheckpointRegistry.sol";
 /// entitlement-then-settle call sequence.
 /// @dev Typed view of SlashingController's penalty stage (replaces a string-signature staticcall).
 interface IStageSource {
-    function stageOf(address node) external view returns (uint8);
+    /// @dev #166: the higher of the node-level stage and `service`'s own hardware stage.
+    function stageOf(address node, INodeRegistry.NodeType service) external view returns (uint8);
 }
 
 contract RewardDistributor is GovernedUpgradeable {
@@ -191,6 +192,8 @@ contract RewardDistributor is GovernedUpgradeable {
         mapping(uint256 => uint256) reportingNodeCount;
         // Review fix: per-seal duplicate guard, so no placeholder settlement is left behind.
         mapping(uint256 => mapping(address => bool)) sealListed;
+        // #165: block of each epoch's first metric report (0 = none).
+        mapping(uint256 => uint256) firstReportBlock;
     }
 
     bytes32 private constant REWARD_STORAGE_LOCATION = keccak256("symposia.storage.RewardDistributor");
@@ -696,9 +699,9 @@ contract RewardDistributor is GovernedUpgradeable {
             if ($.sealListed[epoch][node]) revert DuplicateNode(node);
             $.sealListed[epoch][node] = true;
 
-            TelemetryCheckpointRegistry.AggregatedMetricRecord memory r;
+            TelemetryRecordReader.Summary memory r;
             if (telemetry) {
-                r = _telemetry().getEpochMetricRecord(node, epoch);
+                r = TelemetryRecordReader.read(address(_telemetry()), node, epoch);
                 if (r.exists) coveredRecords++;
             }
             for (uint256 k = 0; k < services[i].length; k++) {
@@ -741,7 +744,7 @@ contract RewardDistributor is GovernedUpgradeable {
         INodeRegistry.NodeType service,
         INodeRegistry registry,
         IReliabilityRegistry rel,
-        TelemetryCheckpointRegistry.AggregatedMetricRecord memory r,
+        TelemetryRecordReader.Summary memory r,
         NodeCalc memory c
     ) private returns (bool reported) {
         RewardStorage storage $ = _rewardStorage();
@@ -775,29 +778,15 @@ contract RewardDistributor is GovernedUpgradeable {
             if ($.hasFactorReport[epoch][c.account]) c.raw = $.factorRaw[epoch][c.account];
             else c.score = m.score; // legacy single-score report (#53)
         }
-        c.stagePenaltyBps = _stagePenaltyBpsFor(node);
+        c.stagePenaltyBps = _stagePenaltyBpsFor(node, service);
     }
 
     /// @dev A Storage service with a finalized record is judged on it (#76). Its
-    /// eligibility and heartbeat compliance replace any signed report, so the reserve
-    /// gate and reliability read measured data.
-    function _ingestRecord(
-        uint256 epoch,
-        NodeCalc memory c,
-        TelemetryCheckpointRegistry.AggregatedMetricRecord memory r
-    ) private {
-        _rewardStorage().metrics[epoch][c.account] =
-            MetricRecord({score: 0, heartbeatBps: r.heartbeatComplianceBps, submitted: true}); // eligibility checked by the caller
-        // Verifier-attested latency/retrieval when a verifier measured them, else self-reported.
-        bool attested = r.attestationCount > 0;
-        c.raw = new uint256[](7);
-        c.raw[0] = attested && r.verifierAttested.retrievalMs != 0 ? r.verifierAttested.retrievalMs : r.selfReported.retrievalMs;
-        c.raw[1] = r.heartbeatComplianceBps;
-        c.raw[2] = attested && r.verifierAttested.latencyMs != 0 ? r.verifierAttested.latencyMs : r.selfReported.latencyMs;
-        c.raw[3] = uint256(r.selfReported.readThroughputKBps) + r.selfReported.writeThroughputKBps;
-        c.raw[4] = uint256(r.selfReported.bandwidthInKbps) + r.selfReported.bandwidthOutKbps;
-        c.raw[5] = r.availableBytes;
-        c.raw[6] = r.usedBytes;
+    /// heartbeat compliance replaces any signed report, so the reserve gate and
+    /// reliability read measured data; eligibility is checked by the caller.
+    function _ingestRecord(uint256 epoch, NodeCalc memory c, TelemetryRecordReader.Summary memory r) private {
+        _rewardStorage().metrics[epoch][c.account] = MetricRecord({score: 0, heartbeatBps: r.heartbeatBps, submitted: true});
+        c.raw = r.raw;
     }
 
     /// @dev #76 two-pass scoring: per type, find the best value of each factor across
@@ -892,7 +881,13 @@ contract RewardDistributor is GovernedUpgradeable {
         RewardStorage storage $ = _rewardStorage();
         if ($.nodeReported[epoch][node]) return;
         $.nodeReported[epoch][node] = true;
-        $.reportingNodeCount[epoch] += 1;
+        if ($.reportingNodeCount[epoch]++ == 0) $.firstReportBlock[epoch] = block.number;
+    }
+
+    /// @notice #165: block of `epoch`'s first metric report (0 = none). Every report event
+    /// for the epoch is at or after it, so sealers query logs from here, not from genesis.
+    function firstReportBlock(uint256 epoch) external view returns (uint256) {
+        return _rewardStorage().firstReportBlock[epoch];
     }
 
     /// @notice #159: distinct nodes that reported for `epoch` (any service). Sealers
@@ -963,13 +958,13 @@ contract RewardDistributor is GovernedUpgradeable {
         return (capacityAmount * weight) / 10_000;
     }
 
-    /// @dev Node-level hardware penalty stage (#159: generic hardware stages apply to
-    /// every service; the storage/compute machines slash their own service directly).
+    /// @dev #166: `service`'s penalty stage (its own hardware stage, or a node-level
+    /// violation), so a fault on one Node Service doesn't cut the node's other services.
     /// Unconfigured (address 0) is the only silent no-penalty path.
-    function _stagePenaltyBpsFor(address node) internal returns (uint256) {
+    function _stagePenaltyBpsFor(address node, INodeRegistry.NodeType service) internal returns (uint256) {
         address controller = config().getAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER);
         if (controller == address(0)) return 10_000;
-        try IStageSource(controller).stageOf(node) returns (uint8 stage) {
+        try IStageSource(controller).stageOf(node, service) returns (uint8 stage) {
             if (stage == 0) return 10_000;
             return config().getUint(ConfigKeys.rewardStagePenaltyBps(stage));
         } catch {

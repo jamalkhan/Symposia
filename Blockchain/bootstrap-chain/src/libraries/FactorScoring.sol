@@ -22,7 +22,7 @@ library FactorScoring {
     uint256 internal constant BPS = 10_000;
 
     /// @notice Per-factor best values across `raws` (one row per node of a type).
-    function bests(uint256[][] memory raws, bool[] memory lowerIsBetter) internal pure returns (uint256[] memory best) {
+    function bests(uint256[][] memory raws, bool[] memory lowerIsBetter) public pure returns (uint256[] memory best) {
         uint256 factors = lowerIsBetter.length;
         best = new uint256[](factors);
         for (uint256 n; n < raws.length; ++n) {
@@ -41,7 +41,7 @@ library FactorScoring {
 
     /// @notice Weighted score of one node in WAD.
     function score(uint256[] memory raw, uint256[] memory best, uint16[] memory weightsBps, bool[] memory lowerIsBetter)
-        internal
+        public
         pure
         returns (uint256 total)
     {

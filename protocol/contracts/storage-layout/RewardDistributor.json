@@ -114,6 +114,10 @@
       {
         "type": "mapping(uint256 => mapping(address => bool))",
         "name": "sealListed"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "firstReportBlock"
       }
     ],
     "NodeCalc": [

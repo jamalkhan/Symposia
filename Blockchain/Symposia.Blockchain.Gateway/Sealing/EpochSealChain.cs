@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 using System.Numerics;
 using Microsoft.Extensions.Options;
 using Nethereum.ABI.FunctionEncoding.Attributes;
@@ -73,11 +74,24 @@ public sealed class EpochSealChain : IEpochSealChain
         await _web3.Eth.GetContractQueryHandler<EpochSourceFunction>()
             .QueryAsync<byte>(_distributor, new EpochSourceFunction { Epoch = epoch }) == 1; // EpochSource.Telemetry
 
-    public async Task<IReadOnlyCollection<string>> RecordNodesAsync(ulong epoch, CancellationToken ct) =>
-        string.IsNullOrEmpty(_telemetry)
+    public async Task<IReadOnlyCollection<string>> RecordNodesAsync(ulong epoch, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_telemetry))
+        {
+            return [];
+        }
+
+        // #165: no record for the epoch exists before its first chunk's block.
+        var first = await FirstBlockAsync<FirstRecordBlockFunction>(_telemetry, new FirstRecordBlockFunction { Epoch = epoch });
+        return first == 0
             ? []
-            : (await NodesAsync<AggregatedRecordWrittenEventDTO>(_telemetry, epoch, e => e.Node, epochIsFirstTopic: true))
+            : (await NodesAsync<AggregatedRecordWrittenEventDTO>(_telemetry, epoch, e => e.Node, first, epochIsFirstTopic: true))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private async Task<ulong> FirstBlockAsync<TFunction>(string contract, TFunction query)
+        where TFunction : FunctionMessage, new() =>
+        (ulong)await _web3.Eth.GetContractQueryHandler<TFunction>().QueryAsync<BigInteger>(contract, query);
 
     public async Task<ulong> RecordCountAsync(ulong epoch, CancellationToken ct) =>
         string.IsNullOrEmpty(_telemetry)
@@ -92,12 +106,19 @@ public sealed class EpochSealChain : IEpochSealChain
     public async Task<IReadOnlyCollection<string>> ReportersAsync(ulong epoch, CancellationToken ct)
     {
         var reporters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var node in await NodesAsync<MetricReportedEventDTO>(_distributor, epoch, e => e.Node))
+        // #165: every report for the epoch is at or after its first report's block; none means no query.
+        var first = await FirstBlockAsync<FirstReportBlockFunction>(_distributor, new FirstReportBlockFunction { Epoch = epoch });
+        if (first == 0)
+        {
+            return reporters;
+        }
+
+        foreach (var node in await NodesAsync<MetricReportedEventDTO>(_distributor, epoch, e => e.Node, first))
         {
             reporters.Add(node);
         }
 
-        foreach (var node in await NodesAsync<FactorMetricsReportedEventDTO>(_distributor, epoch, e => e.Node))
+        foreach (var node in await NodesAsync<FactorMetricsReportedEventDTO>(_distributor, epoch, e => e.Node, first))
         {
             reporters.Add(node);
         }
@@ -120,12 +141,15 @@ public sealed class EpochSealChain : IEpochSealChain
     private const ulong LogPageBlocks = 5_000;
 
     /// <param name="epochIsFirstTopic">Report events index (node, epoch); record events index (epoch, node).</param>
-    private async Task<IEnumerable<string>> NodesAsync<TEvent>(string contract, ulong epoch, Func<TEvent, string> node, bool epochIsFirstTopic = false)
+    /// <param name="fromBlock">The epoch's first report/record block (#165); never earlier than <c>EpochSealer:FromBlock</c>.</param>
+    private async Task<IEnumerable<string>> NodesAsync<TEvent>(string contract, ulong epoch, Func<TEvent, string> node, ulong fromBlock,
+        bool epochIsFirstTopic = false)
         where TEvent : IEventDTO, new()
     {
         var ev = _web3.Eth.GetEvent<TEvent>(contract);
         var latest = (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
-        var from = _fromBlock.BlockNumber is { } start ? (ulong)start.Value : 0UL;
+        var floor = _fromBlock.BlockNumber is { } start ? (ulong)start.Value : 0UL;
+        var from = Math.Max(floor, fromBlock);
         var nodes = new List<string>();
         for (; from <= latest; from += LogPageBlocks)
         {

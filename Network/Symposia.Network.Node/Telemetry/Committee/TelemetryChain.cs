@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 namespace Symposia.Network.Node.Telemetry.Committee;
 
 /// <summary>An on-chain checkpoint (committee or self) as the registry stores it.</summary>

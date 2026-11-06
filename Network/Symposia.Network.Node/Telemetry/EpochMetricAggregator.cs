@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 namespace Symposia.Network.Node.Telemetry;
 
 /// <summary>Per-field aggregated values; mirrors <c>TelemetryCheckpointRegistry.MetricValues</c>.</summary>

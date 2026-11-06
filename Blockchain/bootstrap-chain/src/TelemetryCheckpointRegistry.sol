@@ -114,6 +114,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         mapping(uint256 => uint256) recordChunksWritten;
         mapping(uint256 => uint64) recordsFinalizedAt;
         mapping(uint256 => uint256) recordCount; // #76: distinct nodes with a record per epoch
+        mapping(uint256 => uint256) firstRecordBlock; // #165: lower bound for sealers' log queries
     }
 
     // keccak256(abi.encode(uint256(keccak256("symposia.TelemetryCheckpointRegistry")) - 1)) & ~bytes32(uint256(0xff))
@@ -426,8 +427,10 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     function _recordChunk(uint256 epoch, uint256 chunkIndex, uint256 chunkCount, uint256 records) private {
         TelemetryStorage storage $ = _ts();
         uint256 known = $.recordChunkCount[epoch];
-        if (known == 0) $.recordChunkCount[epoch] = chunkCount;
-        else if (known != chunkCount) revert InvalidChunk(chunkIndex, chunkCount);
+        if (known == 0) {
+            $.recordChunkCount[epoch] = chunkCount;
+            $.firstRecordBlock[epoch] = block.number;
+        } else if (known != chunkCount) revert InvalidChunk(chunkIndex, chunkCount);
         if ($.recordChunkWritten[epoch][chunkIndex]) revert ChunkAlreadyWritten(epoch, chunkIndex);
         $.recordChunkWritten[epoch][chunkIndex] = true;
         emit RecordsChunkWritten(epoch, chunkIndex, chunkCount, records);
@@ -449,6 +452,12 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     /// @notice Distinct nodes with a record for `epoch`; settlement must cover all of them (#76).
     function recordCount(uint256 epoch) external view returns (uint256) {
         return _ts().recordCount[epoch];
+    }
+
+    /// @notice #165: block of `epoch`'s first records chunk (0 = none yet). No
+    /// `AggregatedRecordWritten` for the epoch exists before it.
+    function firstRecordBlock(uint256 epoch) external view returns (uint256) {
+        return _ts().firstRecordBlock[epoch];
     }
 
     /// @notice Chunk count fixed by `epoch`'s first chunk (0 = none yet); later chunks must match it.

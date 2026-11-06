@@ -466,9 +466,14 @@ contract TelemetryCheckpointRegistryTest is Test {
         _afterFinality(0);
         TelemetryCheckpointRegistry.AggregatedMetricInput memory b = _input(100, 288);
         b.node = makeAddr("nodeB");
+        assertEq(reg.firstRecordBlock(0), 0);
+        vm.roll(500);
         _submitChunk(0, 1, 2, _one(b));
+        assertEq(reg.firstRecordBlock(0), 500, "#165: first chunk's block");
         assertFalse(reg.recordsFinalized(0));
+        vm.roll(510);
         _submitChunk(0, 0, 2, _one(_input(288, 288)));
+        assertEq(reg.firstRecordBlock(0), 500, "later chunks don't move it");
         assertTrue(reg.recordsFinalized(0));
         assertEq(reg.recordsFinalizedAt(0), block.timestamp);
         assertTrue(reg.getEpochMetricRecord(b.node, 0).exists);

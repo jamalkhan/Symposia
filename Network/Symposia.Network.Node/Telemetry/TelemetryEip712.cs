@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 using Nethereum.ABI;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Hex.HexConvertors.Extensions;
@@ -6,19 +7,10 @@ using Nethereum.Util;
 
 namespace Symposia.Network.Node.Telemetry;
 
-/// <summary>ABI mirror of <c>TelemetryCheckpointRegistry.MetricValues</c>.</summary>
-[Struct("MetricValues")]
-public sealed class MetricValuesInput
+/// <summary>Maps node-side telemetry records onto the shared contract structs (#167).</summary>
+public static class TelemetryAbi
 {
-    [Parameter("uint32", "uptimeBps", 1)] public uint UptimeBps { get; set; }
-    [Parameter("uint64", "readThroughputKBps", 2)] public ulong ReadThroughputKBps { get; set; }
-    [Parameter("uint64", "writeThroughputKBps", 3)] public ulong WriteThroughputKBps { get; set; }
-    [Parameter("uint64", "bandwidthInKbps", 4)] public ulong BandwidthInKbps { get; set; }
-    [Parameter("uint64", "bandwidthOutKbps", 5)] public ulong BandwidthOutKbps { get; set; }
-    [Parameter("uint32", "latencyMs", 6)] public uint LatencyMs { get; set; }
-    [Parameter("uint32", "retrievalMs", 7)] public uint RetrievalMs { get; set; }
-
-    public static MetricValuesInput From(MetricValues v) => new()
+    public static MetricValuesInput ToInput(MetricValues v) => new()
     {
         UptimeBps = v.UptimeBps,
         ReadThroughputKBps = v.ReadThroughputKBps,
@@ -28,28 +20,12 @@ public sealed class MetricValuesInput
         LatencyMs = v.LatencyMs,
         RetrievalMs = v.RetrievalMs,
     };
-}
 
-/// <summary>ABI mirror of <c>TelemetryCheckpointRegistry.AggregatedMetricInput</c>.</summary>
-[Struct("AggregatedMetricInput")]
-public sealed class AggregatedMetricInput
-{
-    [Parameter("address", "node", 1)] public string Node { get; set; } = "";
-    [Parameter("tuple", "selfReported", 2, structTypeName: "MetricValues")] public MetricValuesInput SelfReported { get; set; } = new();
-    [Parameter("tuple", "verifierAttested", 3, structTypeName: "MetricValues")] public MetricValuesInput VerifierAttested { get; set; } = new();
-    [Parameter("uint32", "heartbeatsReceived", 4)] public uint HeartbeatsReceived { get; set; }
-    [Parameter("uint32", "heartbeatsExpected", 5)] public uint HeartbeatsExpected { get; set; }
-    [Parameter("uint16", "attestationCount", 6)] public ushort AttestationCount { get; set; }
-    [Parameter("uint16", "firstCheckpoint", 7)] public ushort FirstCheckpoint { get; set; }
-    [Parameter("uint16", "lastCheckpoint", 8)] public ushort LastCheckpoint { get; set; }
-    [Parameter("uint64", "availableBytes", 9)] public ulong AvailableBytes { get; set; }
-    [Parameter("uint64", "usedBytes", 10)] public ulong UsedBytes { get; set; }
-
-    public static AggregatedMetricInput From(AggregatedMetricRecord r) => new()
+    public static AggregatedMetricInput ToInput(AggregatedMetricRecord r) => new()
     {
         Node = r.NodeId,
-        SelfReported = MetricValuesInput.From(r.SelfReported),
-        VerifierAttested = MetricValuesInput.From(r.VerifierAttested),
+        SelfReported = ToInput(r.SelfReported),
+        VerifierAttested = ToInput(r.VerifierAttested),
         HeartbeatsReceived = r.HeartbeatsReceived,
         HeartbeatsExpected = r.HeartbeatsExpected,
         AttestationCount = r.AttestationCount,

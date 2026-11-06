@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Nethereum bindings for the Symposia contracts (#167), shared by the Gateway, Network.Node and NodeHost. -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Nethereum.Web3" Version="4.29.0" />
+  </ItemGroup>
+
+</Project>

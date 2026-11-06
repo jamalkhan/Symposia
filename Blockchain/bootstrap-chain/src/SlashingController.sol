@@ -35,12 +35,20 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
 
     /// @custom:storage-location erc7201:symposia.SlashingController
     struct SlashingStorage {
+        // Node-level state: non-hardware and stake-commitment violations (and any
+        // hardware state recorded before #166). Applies to every Node Service.
         mapping(address => NodePenaltyState) states;
+        // #166: hardware-fault stages per (node, Node Service).
+        mapping(address => mapping(uint8 => NodePenaltyState)) serviceStates;
     }
 
     bytes32 private constant SLASHING_STORAGE_LOCATION = keccak256("symposia.storage.SlashingController");
 
     event StageTransition(address indexed node, uint8 previousStage, uint8 newStage, uint8 severity);
+    /// @notice #166: a hardware-fault stage change on one Node Service.
+    event ServiceStageTransition(
+        address indexed node, INodeRegistry.NodeType indexed service, uint8 previousStage, uint8 newStage, uint8 severity
+    );
     event Slashed(address indexed node, uint256 amount, uint256 appliedBps, uint8 stage);
     event Recovered(address indexed node);
     event NonHardwareViolationSlashed(address indexed node, ViolationType violationType, uint256 amount, uint256 banExpiry);
@@ -99,11 +107,38 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
         _;
     }
 
-    function stageOf(address node) external view returns (uint8) {
-        return _slashingStorage().states[node].stage;
+    /// @notice Highest penalty stage across the node: node-level violations and every
+    /// service's hardware stage. Kept for readers that predate #166.
+    function stageOf(address node) external view returns (uint8 stage) {
+        SlashingStorage storage $ = _slashingStorage();
+        stage = $.states[node].stage;
+        INodeRegistry.NodeType[] memory services = _registry().servicesOf(node);
+        for (uint256 i; i < services.length; i++) {
+            uint8 st = $.serviceStates[node][uint8(services[i])].stage;
+            if (st > stage) stage = st;
+        }
     }
 
+    /// @notice #166: the stage that drives `service`'s reward penalty: the higher of the
+    /// node-level stage and that service's own hardware stage.
+    function stageOf(address node, INodeRegistry.NodeType service) external view returns (uint8) {
+        SlashingStorage storage $ = _slashingStorage();
+        uint8 nodeLevel = $.states[node].stage;
+        uint8 own = $.serviceStates[node][uint8(service)].stage;
+        return own > nodeLevel ? own : nodeLevel;
+    }
+
+    /// @notice The primary service's hardware state (the whole node's state before #166).
     function stateOf(address node) external view returns (NodePenaltyState memory) {
+        return _slashingStorage().serviceStates[node][uint8(_registry().typeOf(node))];
+    }
+
+    function serviceStateOf(address node, INodeRegistry.NodeType service) external view returns (NodePenaltyState memory) {
+        return _slashingStorage().serviceStates[node][uint8(service)];
+    }
+
+    /// @notice Node-level violation state (non-hardware, stake commitment).
+    function nodeStateOf(address node) external view returns (NodePenaltyState memory) {
         return _slashingStorage().states[node];
     }
 
@@ -113,28 +148,47 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
     /// `stage` (0 = clean/no-fault epoch report, used to accrue recovery
     /// progress; 1-4 = the progressive stages from
     /// `node-runner-incentives-and-penalties.md`). Verified against the
-    /// config-supplied `slashing.fault.signer` address.
+    /// config-supplied `slashing.fault.signer` address. Pre-#166 form: applies to the
+    /// node's primary service.
     function submitFaultAttestation(address node, uint8 stage, uint256 epoch, bool auditPassed, bytes calldata signature)
         external
         whenNotPaused
     {
         if (stage > STAGE_4_HIGH_RATE) revert InvalidStage(stage);
+        _checkFaultSigner(keccak256(abi.encode(address(this), node, stage, epoch, auditPassed)), signature);
+        _applyAttestation(node, _registry().typeOf(node), stage, auditPassed);
+    }
 
-        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
-            keccak256(abi.encode(address(this), node, stage, epoch, auditPassed))
-        );
-        address signer = ECDSA.recover(digest, signature);
+    /// @notice #166: hardware-fault attestation for one Node Service. The service is in
+    /// the signed digest, so an attestation can't be replayed against another service.
+    function submitServiceFaultAttestation(
+        address node,
+        INodeRegistry.NodeType service,
+        uint8 stage,
+        uint256 epoch,
+        bool auditPassed,
+        bytes calldata signature
+    ) external whenNotPaused {
+        if (stage > STAGE_4_HIGH_RATE) revert InvalidStage(stage);
+        _checkFaultSigner(keccak256(abi.encode(address(this), node, uint8(service), stage, epoch, auditPassed)), signature);
+        _applyAttestation(node, service, stage, auditPassed);
+    }
+
+    function _checkFaultSigner(bytes32 hash, bytes calldata signature) private view {
+        address signer = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(hash), signature);
         if (signer != config().getAddress(ConfigKeys.SLASHING_FAULT_SIGNER)) revert InvalidSignature();
+    }
 
+    function _applyAttestation(address node, INodeRegistry.NodeType service, uint8 stage, bool auditPassed) private {
         if (stage == STAGE_NONE) {
-            _processCleanEpoch(node, auditPassed);
+            _processCleanEpoch(node, service, auditPassed);
         } else {
-            _processFault(node, stage);
+            _processFault(node, service, stage);
         }
     }
 
-    function _processCleanEpoch(address node, bool auditPassed) internal {
-        NodePenaltyState storage s = _slashingStorage().states[node];
+    function _processCleanEpoch(address node, INodeRegistry.NodeType service, bool auditPassed) internal {
+        NodePenaltyState storage s = _slashingStorage().serviceStates[node][uint8(service)];
         if (s.stage == STAGE_NONE) return;
 
         s.consecutiveCleanEpochs += 1;
@@ -144,18 +198,21 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
             s.stage = STAGE_NONE;
             s.consecutiveCleanEpochs = 0;
             emit StageTransition(node, previous, STAGE_NONE, 0 /* INFO */ );
+            emit ServiceStageTransition(node, service, previous, STAGE_NONE, 0);
             emit Recovered(node);
         }
     }
 
-    function _processFault(address node, uint8 stage) internal {
-        NodePenaltyState storage s = _slashingStorage().states[node];
+    /// @dev #166: stages, slashes and the Stage 4 ban touch only `service`.
+    function _processFault(address node, INodeRegistry.NodeType service, uint8 stage) internal {
+        NodePenaltyState storage s = _slashingStorage().serviceStates[node][uint8(service)];
         uint8 previous = s.stage;
         s.consecutiveCleanEpochs = 0;
 
         if (stage == STAGE_1_WARNING || stage == STAGE_2_DEGRADED) {
             s.stage = stage;
             emit StageTransition(node, previous, stage, 1 /* WARNING */ );
+            emit ServiceStageTransition(node, service, previous, stage, 1);
             return;
         }
 
@@ -168,7 +225,7 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
             // `node-runner-incentives-and-penalties.md` (5%/epoch up to a
             // flat 25% cumulative cap).
             if (previous != STAGE_3_LOW_RATE) {
-                s.stage3BaselineStake = _registry().stakeOf(node);
+                s.stage3BaselineStake = _registry().serviceStakeOf(node, service);
                 s.cumulativeStage3SlashBps = 0;
             }
 
@@ -181,9 +238,10 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
             s.stage = STAGE_3_LOW_RATE;
 
             uint256 amount = (s.stage3BaselineStake * appliedBps) / 10_000;
-            _applySlashAmount(node, amount);
+            amount = _applyServiceSlashAmount(node, service, amount);
             emit Slashed(node, amount, appliedBps, STAGE_3_LOW_RATE);
             emit StageTransition(node, previous, STAGE_3_LOW_RATE, 2 /* CRITICAL */ );
+            emit ServiceStageTransition(node, service, previous, STAGE_3_LOW_RATE, 2);
             return;
         }
 
@@ -193,14 +251,16 @@ contract SlashingController is GovernedUpgradeable, ISlashingController {
             : config().getUint(ConfigKeys.SLASHING_STAGE4_IMMEDIATE_BPS);
 
         s.stage = STAGE_4_HIGH_RATE;
-        uint256 slashedAmount = _slashBps(node, bps);
+        uint256 slashedAmount =
+            _applyServiceSlashAmount(node, service, (_registry().serviceStakeOf(node, service) * bps) / 10_000);
         emit Slashed(node, slashedAmount, bps, STAGE_4_HIGH_RATE);
         emit StageTransition(node, previous, STAGE_4_HIGH_RATE, 3 /* EMERGENCY */ );
+        emit ServiceStageTransition(node, service, previous, STAGE_4_HIGH_RATE, 3);
 
         if (!s.stage4Confirmed) {
             s.stage4Confirmed = true;
             uint256 banDuration = config().getUint(ConfigKeys.SLASHING_BAN_DURATION);
-            _registry().banNode(node, block.timestamp + banDuration);
+            _registry().banService(node, service, block.timestamp + banDuration);
         }
     }
 

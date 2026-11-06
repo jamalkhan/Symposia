@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 using System.Net.Http.Json;
 using System.Numerics;
 using Nethereum.ABI.FunctionEncoding.Attributes;
@@ -101,87 +102,6 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
     private static CommittedCheckpoint? ToCommitted(CheckpointOutput c) =>
         c.CommittedAt == 0 ? null : new CommittedCheckpoint(c.MerkleRoot, c.BlobAddress, c.SampleCount);
 
-    [Function("epochStart", "uint256")]
-    private sealed class EpochStartFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
-
-    [Function("epochLength", "uint256")]
-    private sealed class EpochLengthFunction : FunctionMessage;
-
-    [Function("checkpointsPerEpoch", "uint256")]
-    private sealed class CheckpointsPerEpochFunction : FunctionMessage;
-
-    [Function("recordsPerTx", "uint256")]
-    private sealed class RecordsPerTxFunction : FunctionMessage;
-
-    [Function("telemetryDeadline", "uint256")]
-    private sealed class TelemetryDeadlineFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
-
-    [Function("config", "address")]
-    private sealed class ConfigFunction : FunctionMessage;
-
-    [Function("getUint", "uint256")]
-    private sealed class GetUintFunction : FunctionMessage { [Parameter("bytes32", "key", 1)] public byte[] Key { get; set; } = []; }
-
-    [Function("committee")]
-    private sealed class CommitteeFunction : FunctionMessage;
-
-    [FunctionOutput]
-    private sealed class CommitteeOutput : IFunctionOutputDTO
-    {
-        [Parameter("address[]", "members", 1)] public List<string> Members { get; set; } = [];
-        [Parameter("uint256", "threshold_", 2)] public BigInteger Threshold { get; set; }
-    }
-
-    [Function("getCheckpoint")]
-    private sealed class GetCheckpointFunction : FunctionMessage
-    {
-        [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
-        [Parameter("uint256", "checkpointIndex", 2)] public BigInteger Index { get; set; }
-    }
-
-    [Function("getSelfCheckpoint")]
-    private sealed class GetSelfCheckpointFunction : FunctionMessage
-    {
-        [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
-        [Parameter("uint256", "checkpointIndex", 2)] public BigInteger Index { get; set; }
-        [Parameter("address", "node", 3)] public string Node { get; set; } = "";
-    }
-
-    [FunctionOutput]
-    private sealed class CheckpointOutput : IFunctionOutputDTO
-    {
-        [Parameter("bytes32", "merkleRoot", 1)] public byte[] MerkleRoot { get; set; } = [];
-        [Parameter("bytes32", "blobAddress", 2)] public byte[] BlobAddress { get; set; } = [];
-        [Parameter("uint32", "sampleCount", 3)] public uint SampleCount { get; set; }
-        [Parameter("uint64", "committedAt", 4)] public ulong CommittedAt { get; set; }
-    }
-
-    [Function("recordChunkCount", "uint256")]
-    private sealed class RecordChunkCountFunction : FunctionMessage
-    {
-        [Parameter("uint256", "epoch", 1)]
-        public BigInteger Epoch { get; set; }
-    }
-
-    [Function("recordChunkWritten", "bool")]
-    private sealed class RecordChunkWrittenFunction : FunctionMessage
-    {
-        [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
-        [Parameter("uint256", "chunkIndex", 2)] public BigInteger Chunk { get; set; }
-    }
-
-    [Function("recordsFinalized", "bool")]
-    private sealed class RecordsFinalizedFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
-
-    [Event("SelfCheckpointCommitted")]
-    private sealed class SelfCheckpointCommittedEvent : IEventDTO
-    {
-        [Parameter("uint256", "epoch", 1, true)] public BigInteger Epoch { get; set; }
-        [Parameter("uint256", "checkpointIndex", 2, true)] public BigInteger CheckpointIndex { get; set; }
-        [Parameter("address", "node", 3, true)] public string Node { get; set; } = "";
-        [Parameter("bytes32", "merkleRoot", 4, false)] public byte[] MerkleRoot { get; set; } = [];
-        [Parameter("bytes32", "blobAddress", 5, false)] public byte[] BlobAddress { get; set; } = [];
-    }
 }
 
 /// <summary>Wire shapes of the Gateway's telemetry relay endpoints (#158 FR5); shared by client and server.</summary>

@@ -10,10 +10,15 @@ import {ConfigKeys} from "../src/config/ConfigKeys.sol";
 
 /// @dev Stand-in for SlashingController's `stageOf` read by the distributor.
 contract MockStageSource {
-    mapping(address => uint8) public stageOf;
+    mapping(address => uint8) internal _stages;
+
+    /// #166: per-service form read by the distributor; this stand-in applies one stage to every service.
+    function stageOf(address node, INodeRegistry.NodeType) external view returns (uint8) {
+        return _stages[node];
+    }
 
     function setStage(address node, uint8 stage) external {
-        stageOf[node] = stage;
+        _stages[node] = stage;
     }
 }
 
