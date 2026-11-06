@@ -1,5 +1,6 @@
 using Symposia.Blockchain.Gateway.Chain;
 using Symposia.Blockchain.Gateway.Nodes;
+using Symposia.Blockchain.Gateway.Sealing;
 
 namespace Symposia.Blockchain.Gateway;
 
@@ -17,6 +18,14 @@ public static class GatewayApp
 
         builder.Services.Configure<GatewayOptions>(builder.Configuration.GetSection("Gateway"));
         builder.Services.AddSingleton<BootstrapChainClient>();
+
+        var gateway = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
+        if (gateway.EpochSealer.Enabled && gateway.RewardDistributorAddress.Length > 0 && gateway.EpochControllerAddress.Length > 0)
+        {
+            builder.Services.AddSingleton<IEpochSealChain, EpochSealChain>();
+            builder.Services.AddSingleton<EpochSealer>();
+            builder.Services.AddHostedService<EpochSealerService>();
+        }
 
         var app = builder.Build();
 

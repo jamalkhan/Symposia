@@ -30,6 +30,9 @@ public sealed class GatewayComponent : WebAppComponent
             ["Gateway:NodeRegistryAddress"] = network.NodeRegistryAddress,
             ["Gateway:EpochRootRegistryAddress"] = network.EpochRootRegistryAddress,
             ["Gateway:ProtocolActivationsAddress"] = network.ProtocolActivationsAddress,
+            // Both set = the gateway runs the epoch sealer (issue #72) with the relayer key.
+            ["Gateway:RewardDistributorAddress"] = network.RewardDistributorAddress,
+            ["Gateway:EpochControllerAddress"] = network.EpochControllerAddress,
             ["Gateway:RelayerPrivateKey"] = context.Settings.Network.Mode == NetworkMode.LocalDev
                 ? ChainComponent.AnvilDevKey
                 : context.Secrets.RelayerPrivateKey,

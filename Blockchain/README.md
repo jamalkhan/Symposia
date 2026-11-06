@@ -23,6 +23,7 @@ to re-register.
   - `script/Deploy.s.sol` — deploys the Phase 0 set (NodeRegistry, EpochRootRegistry, ProtocolActivations).
   - `script/DeployRewards.s.sol` — deploys and wires the node-rewards contracts for local devnets (see `bootstrap-chain/README.md`).
 - `Symposia.Blockchain.Gateway/` — the foundation-operated Bootstrap Chain Gateway (relayer + read proxy). Freshly generated node keypairs have no L3 balance to pay gas, so nodes sign payloads locally and the Gateway relays them on-chain, paying gas itself (see the Arch pass on issue #110, "Gas bootstrapping"). The contracts — not the Gateway — are the authoritative rejector of unregistered or forged submissions.
+  - **Epoch sealer** (issue #72): when `Gateway:RewardDistributorAddress` and `Gateway:EpochControllerAddress` are both set, the Gateway settles each epoch on the RewardDistributor once the EpochController's finality window closes, paying gas from the relayer key. It gathers the epoch's reporting nodes from report events and checks them against the distributor's count before sealing. Sealing is permissionless and idempotent on-chain, so several gateways can run it. Tune with `Gateway:EpochSealer:{Enabled,PollSeconds,MaxEpochsPerPass,FromBlock}`. NodeHost LocalDev deploys the rewards contracts and turns it on automatically.
 - `Symposia.Blockchain.Gateway.Tests/` — end-to-end tests that boot a real local `anvil` chain, deploy the real contracts via `forge script`, and exercise the Gateway's HTTP surface against them.
 
 ## Running locally
