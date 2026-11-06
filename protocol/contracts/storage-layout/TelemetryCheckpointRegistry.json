@@ -1,0 +1,169 @@
+{
+  "structs": {
+    "TelemetryCheckpoint": [
+      {
+        "type": "bytes32",
+        "name": "merkleRoot"
+      },
+      {
+        "type": "bytes32",
+        "name": "blobAddress"
+      },
+      {
+        "type": "uint32",
+        "name": "sampleCount"
+      },
+      {
+        "type": "uint64",
+        "name": "committedAt"
+      }
+    ],
+    "MetricValues": [
+      {
+        "type": "uint32",
+        "name": "uptimeBps"
+      },
+      {
+        "type": "uint64",
+        "name": "readThroughputKBps"
+      },
+      {
+        "type": "uint64",
+        "name": "writeThroughputKBps"
+      },
+      {
+        "type": "uint64",
+        "name": "bandwidthInKbps"
+      },
+      {
+        "type": "uint64",
+        "name": "bandwidthOutKbps"
+      },
+      {
+        "type": "uint32",
+        "name": "latencyMs"
+      },
+      {
+        "type": "uint32",
+        "name": "retrievalMs"
+      }
+    ],
+    "AggregatedMetricInput": [
+      {
+        "type": "address",
+        "name": "node"
+      },
+      {
+        "type": "MetricValues",
+        "name": "selfReported"
+      },
+      {
+        "type": "MetricValues",
+        "name": "verifierAttested"
+      },
+      {
+        "type": "uint32",
+        "name": "heartbeatsReceived"
+      },
+      {
+        "type": "uint32",
+        "name": "heartbeatsExpected"
+      },
+      {
+        "type": "uint16",
+        "name": "attestationCount"
+      },
+      {
+        "type": "uint16",
+        "name": "firstCheckpoint"
+      },
+      {
+        "type": "uint16",
+        "name": "lastCheckpoint"
+      }
+    ],
+    "AggregatedMetricRecord": [
+      {
+        "type": "MetricValues",
+        "name": "selfReported"
+      },
+      {
+        "type": "MetricValues",
+        "name": "verifierAttested"
+      },
+      {
+        "type": "uint32",
+        "name": "heartbeatsReceived"
+      },
+      {
+        "type": "uint32",
+        "name": "heartbeatsExpected"
+      },
+      {
+        "type": "uint16",
+        "name": "heartbeatComplianceBps"
+      },
+      {
+        "type": "uint16",
+        "name": "attestationCount"
+      },
+      {
+        "type": "uint16",
+        "name": "firstCheckpoint"
+      },
+      {
+        "type": "uint16",
+        "name": "lastCheckpoint"
+      },
+      {
+        "type": "bool",
+        "name": "eligible"
+      },
+      {
+        "type": "bool",
+        "name": "divergenceFlag"
+      },
+      {
+        "type": "bool",
+        "name": "exists"
+      }
+    ],
+    "TelemetryStorage": [
+      {
+        "type": "mapping(uint256 => mapping(uint256 => TelemetryCheckpoint))",
+        "name": "checkpoints"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "checkpointCount"
+      },
+      {
+        "type": "mapping(uint256 => mapping(uint256 => mapping(address => TelemetryCheckpoint)))",
+        "name": "selfCheckpoints"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => AggregatedMetricRecord))",
+        "name": "records"
+      },
+      {
+        "type": "mapping(address => uint256)",
+        "name": "memberGeneration"
+      },
+      {
+        "type": "uint256",
+        "name": "generation"
+      },
+      {
+        "type": "uint256",
+        "name": "threshold"
+      },
+      {
+        "type": "address[]",
+        "name": "members"
+      }
+    ]
+  },
+  "locations": {
+    "TELEMETRY_STORAGE_LOCATION": "0xa65fed527fb0a7d4e7fe4a45377cc933d800a0aef8dbd2b95282e0d3eb3f6e00"
+  }
+}
