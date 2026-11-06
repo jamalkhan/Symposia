@@ -14,6 +14,28 @@
         "name": "submitted"
       }
     ],
+    "SettlementRecord": [
+      {
+        "type": "SettlementReason",
+        "name": "reason"
+      },
+      {
+        "type": "uint16",
+        "name": "reliabilityBps"
+      },
+      {
+        "type": "uint16",
+        "name": "stagePenaltyBps"
+      },
+      {
+        "type": "bool",
+        "name": "reliabilityBonus"
+      },
+      {
+        "type": "uint128",
+        "name": "amount"
+      }
+    ],
     "EpochSeal": [
       {
         "type": "bool",
@@ -56,6 +78,56 @@
       {
         "type": "mapping(uint256 => uint256[STORAGE_FACTOR_COUNT])",
         "name": "factorMax"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => SettlementRecord))",
+        "name": "settlements"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "reporterCount"
+      },
+      {
+        "type": "uint256",
+        "name": "nextSealableEpoch"
+      },
+      {
+        "type": "uint256",
+        "name": "undistributed"
+      }
+    ],
+    "NodeCalc": [
+      {
+        "type": "address",
+        "name": "node"
+      },
+      {
+        "type": "uint8",
+        "name": "nodeType"
+      },
+      {
+        "type": "uint256",
+        "name": "score"
+      },
+      {
+        "type": "uint256",
+        "name": "reliabilityBps"
+      },
+      {
+        "type": "uint256",
+        "name": "stagePenaltyBps"
+      },
+      {
+        "type": "bool",
+        "name": "bonus"
+      },
+      {
+        "type": "uint256",
+        "name": "amount"
+      },
+      {
+        "type": "SettlementReason",
+        "name": "reason"
       }
     ]
   },

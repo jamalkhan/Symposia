@@ -1,0 +1,57 @@
+{
+  "structs": {
+    "NodeState": [
+      {
+        "type": "uint16",
+        "name": "deficitBps"
+      },
+      {
+        "type": "uint16",
+        "name": "highStreak"
+      },
+      {
+        "type": "bool",
+        "name": "hasFinalized"
+      },
+      {
+        "type": "uint64",
+        "name": "lastFinalizedEpoch"
+      }
+    ],
+    "EpochRecord": [
+      {
+        "type": "uint16",
+        "name": "scoreBps"
+      },
+      {
+        "type": "bool",
+        "name": "finalized"
+      },
+      {
+        "type": "bool",
+        "name": "bonusEligible"
+      },
+      {
+        "type": "bool",
+        "name": "degraded"
+      }
+    ],
+    "ReliabilityStorage": [
+      {
+        "type": "mapping(address => NodeState)",
+        "name": "nodes"
+      },
+      {
+        "type": "mapping(address => mapping(uint256 => EpochRecord))",
+        "name": "epochs"
+      },
+      {
+        "type": "mapping(bytes32 => bool)",
+        "name": "seenOutcome"
+      }
+    ]
+  },
+  "locations": {
+    "RELIABILITY_STORAGE_LOCATION": "0x378195eb34af454070b69bab8e35fa427f61bc6c5c3c671d0f706e8ee865b900"
+  }
+}
