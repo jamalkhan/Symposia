@@ -162,7 +162,9 @@ contract DeployRewards is Script {
 
         // Telemetry checkpoints (#75).
         cfg.setUint(ConfigKeys.TELEMETRY_CHECKPOINTS_PER_EPOCH, 24);
-        cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, 30 minutes);
+        cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, 20 minutes);
+        cfg.setUint(ConfigKeys.TELEMETRY_COMMIT_WINDOW, 30 minutes); // checkpoints until finality + 30 min (#158)
+        cfg.setUint(ConfigKeys.TELEMETRY_RECORDS_PER_TX, 200);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_UPTIME_BPS, 1_000);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_LATENCY_BPS, 5_000);
 

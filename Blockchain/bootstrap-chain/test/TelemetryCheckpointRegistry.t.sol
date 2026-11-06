@@ -38,7 +38,9 @@ contract TelemetryCheckpointRegistryTest is Test {
     bytes32 internal constant CP_TYPEHASH = keccak256(
         "TelemetryCheckpoint(uint256 epochIndex,uint256 checkpointIndex,bytes32 merkleRoot,bytes32 blobAddress,uint32 sampleCount)"
     );
-    bytes32 internal constant AGG_TYPEHASH = keccak256("AggregatedRecords(uint256 epochIndex,bytes32 recordsHash)");
+    bytes32 internal constant AGG_TYPEHASH =
+        keccak256("AggregatedRecords(uint256 epochIndex,uint256 chunkIndex,uint256 chunkCount,bytes32 recordsHash)");
+    uint256 internal constant COMMIT_WINDOW = 30 minutes; // TELEMETRY_COMMIT_WINDOW default
 
     function setUp() public {
         vm.warp(1_700_000_000);
@@ -124,7 +126,7 @@ contract TelemetryCheckpointRegistryTest is Test {
 
     function _submit(uint256 epoch, TelemetryCheckpointRegistry.AggregatedMetricInput[] memory inputs) internal {
         bytes32 h = keccak256(abi.encode(inputs));
-        reg.submitAggregatedRecords(epoch, inputs, _sigs(keccak256(abi.encode(AGG_TYPEHASH, epoch, h)), 2));
+        reg.submitAggregatedRecords(epoch, 0, 1, inputs, _sigs(keccak256(abi.encode(AGG_TYPEHASH, epoch, 0, 1, h)), 2));
     }
 
     function _one(TelemetryCheckpointRegistry.AggregatedMetricInput memory r)
@@ -136,8 +138,9 @@ contract TelemetryCheckpointRegistryTest is Test {
         a[0] = r;
     }
 
+    /// @dev One second past the telemetry deadline (finality + commit window); the deadline second itself is in-window.
     function _afterFinality(uint256 epoch) internal {
-        vm.warp(genesis + (epoch + 1) * EPOCH + FINALITY + 1); // the deadline second itself is still in-window (#72)
+        vm.warp(genesis + (epoch + 1) * EPOCH + FINALITY + COMMIT_WINDOW + 1);
     }
 
     // --- committee ---
@@ -220,15 +223,17 @@ contract TelemetryCheckpointRegistryTest is Test {
         assertEq(reg.checkpointCount(0), 1);
     }
 
-    function test_CheckpointAtExactDeadlineAccepted() public {
-        vm.warp(genesis + EPOCH + FINALITY);
+    function test_CheckpointAtExactTelemetryDeadlineAccepted() public {
+        // #158: checkpoints get the commit window beyond #72's finality deadline.
+        vm.warp(genesis + EPOCH + FINALITY + COMMIT_WINDOW);
+        assertEq(reg.telemetryDeadline(0), block.timestamp);
         _commit(0, 23, keccak256("on time"));
         assertGt(reg.getCheckpoint(0, 23).committedAt, 0);
     }
 
     function test_RevertWhen_CheckpointAfterFinality() public {
         _afterFinality(0);
-        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.FinalityWindowElapsed.selector, 0));
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.TelemetryDeadlineElapsed.selector, 0));
         _commit(0, 23, keccak256("late"));
     }
 
@@ -340,41 +345,42 @@ contract TelemetryCheckpointRegistryTest is Test {
         assertFalse(reg.getEpochMetricRecord(node, 0).divergenceFlag);
     }
 
-    function test_RevertWhen_RecordsBeforeFinality() public {
-        vm.warp(genesis + EPOCH + FINALITY - 1);
+    function test_RevertWhen_RecordsBeforeTelemetryDeadline() public {
+        vm.warp(genesis + EPOCH + FINALITY + COMMIT_WINDOW); // the deadline second itself is still the commit window
         TelemetryCheckpointRegistry.AggregatedMetricInput[] memory a = _one(_input(288, 288));
         bytes32 h = keccak256(abi.encode(a));
-        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(0), h)), 2);
-        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.FinalityWindowNotElapsed.selector, 0));
-        reg.submitAggregatedRecords(0, a, s);
+        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(0), 0, 1, h)), 2);
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.TelemetryDeadlineNotElapsed.selector, 0));
+        reg.submitAggregatedRecords(0, 0, 1, a, s);
     }
 
     function test_RevertWhen_RecordWrittenTwice() public {
+        // The same node in two different chunks of one epoch is rejected record by record.
         _afterFinality(0);
-        _submit(0, _one(_input(288, 288)));
+        _submitChunk(0, 0, 2, _one(_input(288, 288)));
         TelemetryCheckpointRegistry.AggregatedMetricInput[] memory a = _one(_input(100, 288));
         bytes32 h = keccak256(abi.encode(a));
-        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(0), h)), 2);
+        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(0), 1, 2, h)), 2);
         vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.RecordAlreadyWritten.selector, 0, node));
-        reg.submitAggregatedRecords(0, a, s);
+        reg.submitAggregatedRecords(0, 1, 2, a, s);
     }
 
     function test_RevertWhen_ReceivedExceedsExpected() public {
         _afterFinality(0);
         TelemetryCheckpointRegistry.AggregatedMetricInput[] memory a = _one(_input(289, 288));
         bytes32 h = keccak256(abi.encode(a));
-        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(0), h)), 2);
+        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(0), 0, 1, h)), 2);
         vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.InvalidRecord.selector, node));
-        reg.submitAggregatedRecords(0, a, s);
+        reg.submitAggregatedRecords(0, 0, 1, a, s);
     }
 
     function test_RevertWhen_RecordsSignedForOtherEpoch() public {
         _afterFinality(1);
         TelemetryCheckpointRegistry.AggregatedMetricInput[] memory a = _one(_input(288, 288));
         bytes32 h = keccak256(abi.encode(a));
-        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(1), h)), 2);
+        bytes[] memory s = _sigs(keccak256(abi.encode(AGG_TYPEHASH, uint256(1), 0, 1, h)), 2);
         vm.expectRevert();
-        reg.submitAggregatedRecords(0, a, s);
+        reg.submitAggregatedRecords(0, 0, 1, a, s);
     }
 
     function test_HashRecordsMatchesAbiEncoding() public view {
@@ -399,5 +405,96 @@ contract TelemetryCheckpointRegistryTest is Test {
         bytes[] memory s = _cpSigs(0, 0, root, 12, 2);
         vm.expectRevert();
         reg.commitCheckpoint(0, 0, root, bytes32("blob"), 12, s);
+    }
+
+    // --- #158: relayed self-checkpoints ---
+
+    bytes32 internal constant SELF_TYPEHASH = keccak256(
+        "SelfCheckpoint(address node,uint256 epochIndex,uint256 checkpointIndex,bytes32 merkleRoot,bytes32 blobAddress,uint32 sampleCount)"
+    );
+
+    function _selfSig(uint256 pk, address who, bytes32 root) internal view returns (bytes memory) {
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01", _domain(), keccak256(abi.encode(SELF_TYPEHASH, who, uint256(0), uint256(0), root, bytes32("blob"), uint32(12)))
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 ss) = vm.sign(pk, digest);
+        return abi.encodePacked(r, ss, v);
+    }
+
+    function test_SelfCheckpointForRelayedWithNodeSignature() public {
+        uint256 pk = 0xBEEF;
+        address signer = vm.addr(pk);
+        nodes.set(signer, INodeRegistry.NodeStatus.Active);
+        vm.warp(reg.checkpointWindowEnd(0, 0) + 30 minutes);
+        vm.prank(makeAddr("relayer"));
+        reg.selfCheckpointFor(signer, 0, 0, keccak256("mine"), bytes32("blob"), 12, _selfSig(pk, signer, keccak256("mine")));
+        assertEq(reg.getSelfCheckpoint(0, 0, signer).merkleRoot, keccak256("mine"));
+    }
+
+    function test_RevertWhen_SelfCheckpointForSignedByAnotherKey() public {
+        address victim = makeAddr("victim");
+        nodes.set(victim, INodeRegistry.NodeStatus.Active);
+        vm.warp(reg.checkpointWindowEnd(0, 0) + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.InvalidNodeSignature.selector, victim));
+        reg.selfCheckpointFor(victim, 0, 0, keccak256("mine"), bytes32("blob"), 12, _selfSig(0xBAD, victim, keccak256("mine")));
+    }
+
+    function test_RevertWhen_SelfCheckpointAfterTelemetryDeadline() public {
+        nodes.set(node, INodeRegistry.NodeStatus.Active);
+        _afterFinality(0);
+        vm.prank(node);
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.TelemetryDeadlineElapsed.selector, 0));
+        reg.selfCheckpoint(0, 0, keccak256("mine"), bytes32("blob"), 12);
+    }
+
+    // --- #158: chunked records ---
+
+    function _submitChunk(uint256 epoch, uint256 idx, uint256 count, TelemetryCheckpointRegistry.AggregatedMetricInput[] memory inputs)
+        internal
+    {
+        bytes32 h = keccak256(abi.encode(inputs));
+        reg.submitAggregatedRecords(epoch, idx, count, inputs, _sigs(keccak256(abi.encode(AGG_TYPEHASH, epoch, idx, count, h)), 2));
+    }
+
+    function test_RecordsFinalizeWhenEveryChunkLands() public {
+        _afterFinality(0);
+        TelemetryCheckpointRegistry.AggregatedMetricInput memory b = _input(100, 288);
+        b.node = makeAddr("nodeB");
+        _submitChunk(0, 1, 2, _one(b));
+        assertFalse(reg.recordsFinalized(0));
+        _submitChunk(0, 0, 2, _one(_input(288, 288)));
+        assertTrue(reg.recordsFinalized(0));
+        assertEq(reg.recordsFinalizedAt(0), block.timestamp);
+        assertTrue(reg.getEpochMetricRecord(b.node, 0).exists);
+    }
+
+    function test_EmptyEpochFinalizedByOneEmptyChunk() public {
+        _afterFinality(0);
+        _submitChunk(0, 0, 1, new TelemetryCheckpointRegistry.AggregatedMetricInput[](0));
+        assertTrue(reg.recordsFinalized(0));
+    }
+
+    function test_RevertWhen_ChunkResubmittedOrCountChanges() public {
+        _afterFinality(0);
+        _submitChunk(0, 0, 2, new TelemetryCheckpointRegistry.AggregatedMetricInput[](0));
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.ChunkAlreadyWritten.selector, 0, 0));
+        _submitChunk(0, 0, 2, new TelemetryCheckpointRegistry.AggregatedMetricInput[](0));
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.InvalidChunk.selector, 1, 3));
+        _submitChunk(0, 1, 3, new TelemetryCheckpointRegistry.AggregatedMetricInput[](0));
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.InvalidChunk.selector, 2, 2));
+        _submitChunk(0, 2, 2, new TelemetryCheckpointRegistry.AggregatedMetricInput[](0));
+    }
+
+    function test_RevertWhen_ChunkExceedsRecordsPerTx() public {
+        vm.prank(configOwner);
+        cfg.setUint(ConfigKeys.TELEMETRY_RECORDS_PER_TX, 1);
+        _afterFinality(0);
+        TelemetryCheckpointRegistry.AggregatedMetricInput[] memory two = new TelemetryCheckpointRegistry.AggregatedMetricInput[](2);
+        two[0] = _input(1, 288);
+        two[1] = _input(1, 288);
+        vm.expectRevert(abi.encodeWithSelector(TelemetryCheckpointRegistry.TooManyRecords.selector, 2, 1));
+        _submitChunk(0, 0, 1, two);
     }
 }

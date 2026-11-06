@@ -160,6 +160,22 @@
       {
         "type": "address[]",
         "name": "members"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "recordChunkCount"
+      },
+      {
+        "type": "mapping(uint256 => mapping(uint256 => bool))",
+        "name": "recordChunkWritten"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "recordChunksWritten"
+      },
+      {
+        "type": "mapping(uint256 => uint64)",
+        "name": "recordsFinalizedAt"
       }
     ]
   },

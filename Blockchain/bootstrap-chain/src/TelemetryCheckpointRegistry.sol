@@ -102,6 +102,11 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         uint256 generation;
         uint256 threshold;
         address[] members;
+        // #158: records are submitted in signed chunks; an epoch's records are final once all land.
+        mapping(uint256 => uint256) recordChunkCount;
+        mapping(uint256 => mapping(uint256 => bool)) recordChunkWritten;
+        mapping(uint256 => uint256) recordChunksWritten;
+        mapping(uint256 => uint64) recordsFinalizedAt;
     }
 
     // keccak256(abi.encode(uint256(keccak256("symposia.TelemetryCheckpointRegistry")) - 1)) & ~bytes32(uint256(0xff))
@@ -111,10 +116,16 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     bytes32 public constant CHECKPOINT_TYPEHASH = keccak256(
         "TelemetryCheckpoint(uint256 epochIndex,uint256 checkpointIndex,bytes32 merkleRoot,bytes32 blobAddress,uint32 sampleCount)"
     );
-    bytes32 public constant AGGREGATE_TYPEHASH =
-        keccak256("AggregatedRecords(uint256 epochIndex,bytes32 recordsHash)");
+    bytes32 public constant AGGREGATE_TYPEHASH = keccak256(
+        "AggregatedRecords(uint256 epochIndex,uint256 chunkIndex,uint256 chunkCount,bytes32 recordsHash)"
+    );
+    bytes32 public constant SELF_CHECKPOINT_TYPEHASH = keccak256(
+        "SelfCheckpoint(address node,uint256 epochIndex,uint256 checkpointIndex,bytes32 merkleRoot,bytes32 blobAddress,uint32 sampleCount)"
+    );
 
     uint256 internal constant DEFAULT_CHECKPOINTS_PER_EPOCH = 24;
+    uint256 internal constant DEFAULT_COMMIT_WINDOW = 30 minutes;
+    uint256 internal constant DEFAULT_RECORDS_PER_TX = 200;
 
     event CommitteeSet(uint256 indexed generation, address[] members, uint256 threshold);
     event CheckpointCommitted(
@@ -123,6 +134,8 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     event SelfCheckpointCommitted(
         uint256 indexed epoch, uint256 indexed checkpointIndex, address indexed node, bytes32 merkleRoot, bytes32 blobAddress
     );
+    event RecordsChunkWritten(uint256 indexed epoch, uint256 chunkIndex, uint256 chunkCount, uint256 records);
+    event RecordsFinalized(uint256 indexed epoch);
     event AggregatedRecordWritten(
         uint256 indexed epoch, address indexed node, uint16 heartbeatComplianceBps, bool eligible, bool divergenceFlag
     );
@@ -134,8 +147,12 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     error NotCommitteeMember(address signer);
     error CheckpointIndexOutOfRange(uint256 index, uint256 perEpoch);
     error CheckpointAlreadyCommitted(uint256 epoch, uint256 index);
-    error FinalityWindowElapsed(uint256 epoch);
-    error FinalityWindowNotElapsed(uint256 epoch);
+    error TelemetryDeadlineElapsed(uint256 epoch);
+    error TelemetryDeadlineNotElapsed(uint256 epoch);
+    error InvalidChunk(uint256 chunkIndex, uint256 chunkCount);
+    error ChunkAlreadyWritten(uint256 epoch, uint256 chunkIndex);
+    error TooManyRecords(uint256 count, uint256 max);
+    error InvalidNodeSignature(address node);
     error WindowNotClosed(uint256 epoch, uint256 index);
     error SelfCheckpointNotYetAllowed(uint256 epoch, uint256 index);
     error NotActiveNode(address node);
@@ -206,7 +223,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         bytes[] calldata signatures
     ) external whenNotPaused {
         _checkIndex(checkpointIndex);
-        if (block.timestamp > epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
+        if (block.timestamp > telemetryDeadline(epoch)) revert TelemetryDeadlineElapsed(epoch);
         if (merkleRoot == bytes32(0) || sampleCount == 0) revert EmptyCheckpoint();
         TelemetryStorage storage $ = _ts();
         if ($.checkpoints[epoch][checkpointIndex].committedAt != 0) {
@@ -230,7 +247,7 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
 
     /// @notice Liveness fallback: a registered, Active node commits its own
     /// samples for a window the committee missed. Only allowed from
-    /// `windowEnd + grace` until the epoch's finality deadline.
+    /// `windowEnd + grace` until the epoch's telemetry deadline.
     function selfCheckpoint(
         uint256 epoch,
         uint256 checkpointIndex,
@@ -238,8 +255,41 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
         bytes32 blobAddress,
         uint32 sampleCount
     ) external whenNotPaused {
+        _selfCheckpoint(msg.sender, epoch, checkpointIndex, merkleRoot, blobAddress, sampleCount);
+    }
+
+    /// @notice `selfCheckpoint` relayed by someone else (the Gateway, which pays gas, #158),
+    /// authorized by the node's EIP-712 signature. No nonce: a node can self-checkpoint each
+    /// window at most once, and only until the telemetry deadline.
+    function selfCheckpointFor(
+        address node,
+        uint256 epoch,
+        uint256 checkpointIndex,
+        bytes32 merkleRoot,
+        bytes32 blobAddress,
+        uint32 sampleCount,
+        bytes calldata signature
+    ) external whenNotPaused {
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(SELF_CHECKPOINT_TYPEHASH, node, epoch, checkpointIndex, merkleRoot, blobAddress, sampleCount)
+            )
+        );
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, signature);
+        if (err != ECDSA.RecoverError.NoError || signer != node) revert InvalidNodeSignature(node);
+        _selfCheckpoint(node, epoch, checkpointIndex, merkleRoot, blobAddress, sampleCount);
+    }
+
+    function _selfCheckpoint(
+        address node,
+        uint256 epoch,
+        uint256 checkpointIndex,
+        bytes32 merkleRoot,
+        bytes32 blobAddress,
+        uint32 sampleCount
+    ) private {
         _checkIndex(checkpointIndex);
-        if (block.timestamp > epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
+        if (block.timestamp > telemetryDeadline(epoch)) revert TelemetryDeadlineElapsed(epoch);
         if (merkleRoot == bytes32(0) || sampleCount == 0) revert EmptyCheckpoint();
         TelemetryStorage storage $ = _ts();
         if ($.checkpoints[epoch][checkpointIndex].committedAt != 0) {
@@ -250,20 +300,20 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
             revert SelfCheckpointNotYetAllowed(epoch, checkpointIndex);
         }
         INodeRegistry registry = INodeRegistry(config().getAddress(ConfigKeys.REGISTRY_ADDRESS));
-        if (address(registry) == address(0) || registry.statusOf(msg.sender) != INodeRegistry.NodeStatus.Active) {
-            revert NotActiveNode(msg.sender);
+        if (address(registry) == address(0) || registry.statusOf(node) != INodeRegistry.NodeStatus.Active) {
+            revert NotActiveNode(node);
         }
-        if ($.selfCheckpoints[epoch][checkpointIndex][msg.sender].committedAt != 0) {
+        if ($.selfCheckpoints[epoch][checkpointIndex][node].committedAt != 0) {
             revert CheckpointAlreadyCommitted(epoch, checkpointIndex);
         }
 
-        $.selfCheckpoints[epoch][checkpointIndex][msg.sender] = TelemetryCheckpoint({
+        $.selfCheckpoints[epoch][checkpointIndex][node] = TelemetryCheckpoint({
             merkleRoot: merkleRoot,
             blobAddress: blobAddress,
             sampleCount: sampleCount,
             committedAt: uint64(block.timestamp)
         });
-        emit SelfCheckpointCommitted(epoch, checkpointIndex, msg.sender, merkleRoot, blobAddress);
+        emit SelfCheckpointCommitted(epoch, checkpointIndex, node, merkleRoot, blobAddress);
     }
 
     function getCheckpoint(uint256 epoch, uint256 checkpointIndex) external view returns (TelemetryCheckpoint memory) {
@@ -304,16 +354,27 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     // Aggregated records
     // ---------------------------------------------------------------------
 
-    /// @notice Writes the committee-signed aggregated records for `epoch`.
-    /// Only after the finality deadline (so every in-window sample could be
-    /// checkpointed), and at most once per (node, epoch).
-    function submitAggregatedRecords(uint256 epoch, AggregatedMetricInput[] calldata inputs, bytes[] calldata signatures)
-        external
-        whenNotPaused
-    {
-        if (block.timestamp <= epochFinalityDeadline(epoch)) revert FinalityWindowNotElapsed(epoch);
-        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(AGGREGATE_TYPEHASH, epoch, hashRecords(inputs))));
+    /// @notice Writes one committee-signed chunk of `epoch`'s aggregated records.
+    /// Only after the telemetry deadline (so every window could be checkpointed).
+    /// Members split the address-sorted record set into fixed `recordsPerTx()`
+    /// slices; the signature covers the chunk's position and the total, so once
+    /// every chunk has landed the epoch's records are final (`recordsFinalized`).
+    /// An epoch with no records is finalized by one empty chunk (0 of 1).
+    function submitAggregatedRecords(
+        uint256 epoch,
+        uint256 chunkIndex,
+        uint256 chunkCount,
+        AggregatedMetricInput[] calldata inputs,
+        bytes[] calldata signatures
+    ) external whenNotPaused {
+        if (block.timestamp <= telemetryDeadline(epoch)) revert TelemetryDeadlineNotElapsed(epoch);
+        if (chunkCount == 0 || chunkIndex >= chunkCount) revert InvalidChunk(chunkIndex, chunkCount);
+        if (inputs.length > recordsPerTx()) revert TooManyRecords(inputs.length, recordsPerTx());
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(AGGREGATE_TYPEHASH, epoch, chunkIndex, chunkCount, hashRecords(inputs)))
+        );
         _requireThreshold(digest, signatures);
+        _recordChunk(epoch, chunkIndex, chunkCount, inputs.length);
 
         uint256 perEpoch = checkpointsPerEpoch();
         uint256 uptimeGap = config().getUint(ConfigKeys.TELEMETRY_DIVERGENCE_UPTIME_BPS);
@@ -346,6 +407,33 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
             });
             emit AggregatedRecordWritten(epoch, r.node, compliance, eligible, divergent);
         }
+    }
+
+    function _recordChunk(uint256 epoch, uint256 chunkIndex, uint256 chunkCount, uint256 records) private {
+        TelemetryStorage storage $ = _ts();
+        uint256 known = $.recordChunkCount[epoch];
+        if (known == 0) $.recordChunkCount[epoch] = chunkCount;
+        else if (known != chunkCount) revert InvalidChunk(chunkIndex, chunkCount);
+        if ($.recordChunkWritten[epoch][chunkIndex]) revert ChunkAlreadyWritten(epoch, chunkIndex);
+        $.recordChunkWritten[epoch][chunkIndex] = true;
+        emit RecordsChunkWritten(epoch, chunkIndex, chunkCount, records);
+        if (++$.recordChunksWritten[epoch] == chunkCount) {
+            $.recordsFinalizedAt[epoch] = uint64(block.timestamp);
+            emit RecordsFinalized(epoch);
+        }
+    }
+
+    /// @notice True once every chunk of `epoch`'s records is on-chain (#76 gates settlement on this).
+    function recordsFinalized(uint256 epoch) external view returns (bool) {
+        return _ts().recordsFinalizedAt[epoch] != 0;
+    }
+
+    function recordsFinalizedAt(uint256 epoch) external view returns (uint256) {
+        return _ts().recordsFinalizedAt[epoch];
+    }
+
+    function recordChunkWritten(uint256 epoch, uint256 chunkIndex) external view returns (bool) {
+        return _ts().recordChunkWritten[epoch][chunkIndex];
     }
 
     /// @notice Stable read interface for #76 (scoring), #79 (challenges) and
@@ -381,9 +469,22 @@ contract TelemetryCheckpointRegistry is GovernedUpgradeable, EIP712Upgradeable {
     // Epoch timing (EpochController, #72)
     // ---------------------------------------------------------------------
 
-    /// @notice Last second (inclusive) at which records for `epoch` are accepted.
     function epochFinalityDeadline(uint256 epoch) public view returns (uint256) {
         return _epochs().finalityDeadline(epoch);
+    }
+
+    /// @notice Last second (inclusive) at which checkpoints for `epoch` are accepted:
+    /// the finality deadline plus `TELEMETRY_COMMIT_WINDOW` (default 30 min), so the
+    /// final hourly window has time to be gossiped, endorsed and self-checkpointed (#158).
+    /// Aggregated records are accepted only after it.
+    function telemetryDeadline(uint256 epoch) public view returns (uint256) {
+        uint256 window = config().getUint(ConfigKeys.TELEMETRY_COMMIT_WINDOW);
+        return epochFinalityDeadline(epoch) + (window == 0 ? DEFAULT_COMMIT_WINDOW : window);
+    }
+
+    function recordsPerTx() public view returns (uint256) {
+        uint256 n = config().getUint(ConfigKeys.TELEMETRY_RECORDS_PER_TX);
+        return n == 0 ? DEFAULT_RECORDS_PER_TX : n;
     }
 
     function _epochs() internal view returns (IEpochController) {

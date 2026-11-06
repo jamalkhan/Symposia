@@ -91,6 +91,11 @@ library ConfigKeys {
     /// @notice Seconds after a checkpoint window closes before a node may
     /// self-checkpoint that window because the committee did not.
     bytes32 internal constant TELEMETRY_SELF_CHECKPOINT_GRACE = keccak256("telemetry.selfCheckpointGrace");
+    /// @notice Seconds after the epoch's finality deadline during which telemetry
+    /// checkpoints are still accepted; aggregated records only after that (#158).
+    bytes32 internal constant TELEMETRY_COMMIT_WINDOW = keccak256("telemetry.commitWindow");
+    /// @notice Records per submitAggregatedRecords chunk (#158); every member chunks identically.
+    bytes32 internal constant TELEMETRY_RECORDS_PER_TX = keccak256("telemetry.recordsPerTx");
     /// @notice Self-reported vs verifier-attested uptime gap (bps of 10_000) that sets `divergenceFlag`.
     bytes32 internal constant TELEMETRY_DIVERGENCE_UPTIME_BPS = keccak256("telemetry.divergence.uptimeBps");
     /// @notice Relative latency gap (bps of the verifier value) that sets `divergenceFlag`.
@@ -112,6 +117,11 @@ library ConfigKeys {
     bytes32 internal constant RELIABILITY_BONUS_WINDOW = keccak256("reliability.bonusWindow");
     /// @notice ReliabilityRegistry address read by RewardDistributor (#80).
     bytes32 internal constant REWARD_RELIABILITY_REGISTRY = keccak256("reward.reliabilityRegistry");
+    /// @notice TelemetryCheckpointRegistry whose aggregated records settlement scores from (#76).
+    bytes32 internal constant REWARD_TELEMETRY_REGISTRY = keccak256("reward.telemetryRegistry");
+    /// @notice How long settlement waits for an epoch's telemetry records before falling back to
+    /// signed metric reports (#76/#158).
+    bytes32 internal constant REWARD_RECORDS_MAX_WAIT = keccak256("reward.recordsMaxWait");
 
     // --- SlashingController ---
     bytes32 internal constant SLASHING_STAGE3_PCT_PER_EPOCH_BPS = keccak256("slashing.stage3.pctPerEpochBps");
