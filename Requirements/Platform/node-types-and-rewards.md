@@ -18,7 +18,7 @@
 Per-service rules (on-chain, `StakingNodeRegistry` / `RewardDistributor`):
 
 - **Stake:** `minStakeFor(service, capacity)` is required for *each* service. Unstake, top-up and the 21-day cooldown are per service.
-- **Penalties:** a service-specific fault (the Storage or Compute penalty stages) slashes and deregisters only that service. Node-level violations (overcommitment, region-verification fraud, foundation commitment breaches) slash every service pro rata to stake and ban the whole node.
+- **Penalties:** service-specific faults slash and deregister only that service: the Storage and Compute penalty stages, and the hardware-fault stages (Stage 1-4, tracked per service since #166, which also scale only that service's rewards). Node-level violations (overcommitment, region-verification fraud, foundation commitment breaches) slash every service pro rata to stake and ban the whole node.
 - **Rewards:** each service is scored against peers running the same service and settled separately. Payouts always go to the node address. The node's first-registered (*primary*) service settles under the node address; every other service under a derived *reward account* (`accountOf(node, service)`).
 - **Region verification** is a fact about the node, so it applies to every service it runs.
 

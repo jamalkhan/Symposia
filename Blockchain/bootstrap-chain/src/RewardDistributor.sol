@@ -111,7 +111,8 @@ import {TelemetryRecordReader} from "./libraries/TelemetryRecordReader.sol";
 /// entitlement-then-settle call sequence.
 /// @dev Typed view of SlashingController's penalty stage (replaces a string-signature staticcall).
 interface IStageSource {
-    function stageOf(address node) external view returns (uint8);
+    /// @dev #166: the higher of the node-level stage and `service`'s own hardware stage.
+    function stageOf(address node, INodeRegistry.NodeType service) external view returns (uint8);
 }
 
 contract RewardDistributor is GovernedUpgradeable {
@@ -777,7 +778,7 @@ contract RewardDistributor is GovernedUpgradeable {
             if ($.hasFactorReport[epoch][c.account]) c.raw = $.factorRaw[epoch][c.account];
             else c.score = m.score; // legacy single-score report (#53)
         }
-        c.stagePenaltyBps = _stagePenaltyBpsFor(node);
+        c.stagePenaltyBps = _stagePenaltyBpsFor(node, service);
     }
 
     /// @dev A Storage service with a finalized record is judged on it (#76). Its
@@ -957,13 +958,13 @@ contract RewardDistributor is GovernedUpgradeable {
         return (capacityAmount * weight) / 10_000;
     }
 
-    /// @dev Node-level hardware penalty stage (#159: generic hardware stages apply to
-    /// every service; the storage/compute machines slash their own service directly).
+    /// @dev #166: `service`'s penalty stage (its own hardware stage, or a node-level
+    /// violation), so a fault on one Node Service doesn't cut the node's other services.
     /// Unconfigured (address 0) is the only silent no-penalty path.
-    function _stagePenaltyBpsFor(address node) internal returns (uint256) {
+    function _stagePenaltyBpsFor(address node, INodeRegistry.NodeType service) internal returns (uint256) {
         address controller = config().getAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER);
         if (controller == address(0)) return 10_000;
-        try IStageSource(controller).stageOf(node) returns (uint8 stage) {
+        try IStageSource(controller).stageOf(node, service) returns (uint8 stage) {
             if (stage == 0) return 10_000;
             return config().getUint(ConfigKeys.rewardStagePenaltyBps(stage));
         } catch {

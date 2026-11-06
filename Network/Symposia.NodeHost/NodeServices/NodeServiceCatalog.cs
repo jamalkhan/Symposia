@@ -42,7 +42,7 @@ public static class NodeServiceCatalog
     private static readonly string[] NodeLevel =
     [
         "Node-level violations (overcommitment, region-verification fraud) slash every service pro rata and ban the node",
-        "Node-level hardware-fault stages cut every service's rewards: Stage 1 pays 70%, Stage 2 pays 40%, Stages 3-4 pay nothing",
+        "Hardware-fault stages are per service: Stage 1 pays that service 70%, Stage 2 40%, Stages 3-4 nothing; Stage 3-4 slash and Stage 4 bans only that service",
         "Rewards held in reserve while heartbeat compliance is at or below 90%; released after 2 compliant epochs",
     ];
 
