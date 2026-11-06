@@ -211,6 +211,9 @@ public static class UiApp
 
         api.MapGet("/network", async (NetworkOverview overview) => Results.Ok(await overview.SnapshotAsync()));
 
+        // Public earnings breakdown of every Node Service (issue #159).
+        api.MapGet("/node-services", () => Results.Ok(ServiceCatalog.NodeServiceCatalog.All));
+
         api.MapPost("/components/{name}/restart", async (string name) =>
         {
             try
@@ -289,11 +292,11 @@ public static class UiApp
         return errors;
     }
 
-    private static void CheckEndpoint(string role, string endpoint, List<string> errors)
+    private static void CheckEndpoint(string service, string endpoint, List<string> errors)
     {
         if (!string.IsNullOrWhiteSpace(endpoint) && NodeEndpoint.Normalize(endpoint) is null)
         {
-            errors.Add($"{role} advertised endpoint must be an http(s) base URL like http://10.0.0.5:5180.");
+            errors.Add($"{service} advertised endpoint must be an http(s) base URL like http://10.0.0.5:5180.");
         }
     }
 

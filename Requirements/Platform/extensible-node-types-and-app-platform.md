@@ -1,4 +1,4 @@
-# Extensible Node Types & Application Platform
+# Extensible Node Services & Application Platform
 
 ## Overview
 
@@ -7,11 +7,11 @@ Symposia is not only a fixed set of infrastructure roles. It is an **application
 This document explains how **growth of functionality** maps to:
 
 1. **Software apps** (no new mining type), and  
-2. **New node types** (new economic/resource classes for operators),
+2. **New Node Services** (new economic/resource classes for operators),
 
 and how **tokenomics accounts for new types** without breaking the hard supply cap or rewriting the reward system each time.
 
-Related: [Stakeholders](./stakeholders-and-personas.md), [Node Types and Rewards](./node-types-and-rewards.md), [Tokenomics MVP](../Blockchain/tokenomics-mvp.md), [Governance](../Blockchain/governance.md).
+Related: [Stakeholders](./stakeholders-and-personas.md), [Node Services and Rewards](./node-types-and-rewards.md), [Tokenomics MVP](../Blockchain/tokenomics-mvp.md), [Governance](../Blockchain/governance.md).
 
 ---
 
@@ -25,7 +25,7 @@ Related: [Stakeholders](./stakeholders-and-personas.md), [Node Types and Rewards
 └───────────────────────────┬─────────────────────────────────┘
                             │ invoke / store / query
 ┌───────────────────────────▼─────────────────────────────────┐
-│  INFRASTRUCTURE NODE TYPES (operators / miners)             │
+│  INFRASTRUCTURE NODE SERVICES (operators / miners)          │
 │  Storage · OLTP · Analytics · Consensus · Serverless · …    │
 │  Stake · epoch rewards · dynamic type pools · fees          │
 └─────────────────────────────────────────────────────────────┘
@@ -34,9 +34,9 @@ Related: [Stakeholders](./stakeholders-and-personas.md), [Node Types and Rewards
 | Layer | Who | What they “ship” | Earn mining rewards? |
 |---|---|---|---|
 | **App** | AppBuilder / vendor | Software + data products (e.g. propensity scores, Shopify sync, vertical Journey packs) | **No** — they earn **commercial revenue** (licenses, usage fees from marketers) |
-| **Node type** | Node operators | Hardware + agent software matching a **resource profile** | **Yes** (if the type is a rewarded capacity type) |
+| **Node Service** | Node operators | Hardware + agent software matching a **resource profile** | **Yes** (if the type is a rewarded capacity type) |
 
-**Most vendor expansion never needs a new node type.** A fraud-scoring vendor, a “best send time” model, or a CRM connector should default to:
+**Most vendor expansion never needs a new Node Service.** A fraud-scoring vendor, a “best send time” model, or a CRM connector should default to:
 
 - **Serverless** (invoke),  
 - **OLTP** (state),  
@@ -44,7 +44,7 @@ Related: [Stakeholders](./stakeholders-and-personas.md), [Node Types and Rewards
 - **Analytics** (batch features),  
 - existing **NATS** subjects / APIs.
 
-A **new node type** is only justified when the network needs a **distinct operator market** with its own hardware profile, metering, and incentive weight (e.g. GPU inference fleet, global CDN edge, specialized messaging brokers).
+A **new Node Service** is only justified when the network needs a **distinct operator market** with its own hardware profile, metering, and incentive weight (e.g. GPU inference fleet, global CDN edge, specialized messaging brokers).
 
 ---
 
@@ -64,7 +64,7 @@ A **new node type** is only justified when the network needs a **distinct operat
 
 ---
 
-## When to introduce a new node type
+## When to introduce a new Node Service
 
 Consider a new rewarded type only if **most** of these are true:
 
@@ -80,7 +80,7 @@ If the vendor can run the specialty hardware **themselves** and only expose an A
 
 ---
 
-## How tokenomics accounts for a new node type
+## How tokenomics accounts for a new Node Service
 
 ### Core invariant
 
@@ -195,14 +195,14 @@ Protocol fee split → node operators (70%) + platform (25%) + treasury (5%)
 
 **Builders are not miners.** How we fund grants, usage match, and marketplace kickbacks in **SYM** (and why there is **no second protocol token** for vendors): [AppBuilder / Vendor Incentives](./appbuilder-incentives.md).
 
-Optional future: **on-protocol app marketplace** with escrowed SYM and revenue share — still does **not** require each app to be a node type.
+Optional future: **on-protocol app marketplace** with escrowed SYM and revenue share — still does **not** require each app to be a Node Service.
 
 ### AppBuilder responsibilities
 
 - Respect data ownership, consent, enrichment namespaces  
 - Declare which infrastructure types the app will consume (for capacity planning)  
 - Prefer existing types; propose a new type only with operator-market justification  
-- Cannot self-mint rewards by inventing a fake node type without governance  
+- Cannot self-mint rewards by inventing a fake Node Service without governance  
 
 ### Platform responsibilities
 
@@ -251,16 +251,16 @@ Optional future: **on-protocol app marketplace** with escrowed SYM and revenue s
 
 | Question | Answer |
 |---|---|
-| How do we account for new node types economically? | Give them a **base weight** in the **same fixed emission pie**; **dynamic mult** allocates day-to-day; **no new minting**. |
-| How do vendors extend the platform? | Prefer **apps on existing types**; promote a **new node type** only for open, specialized operator markets. |
-| Does every app need a node type? | **No.** |
+| How do we account for new Node Services economically? | Give them a **base weight** in the **same fixed emission pie**; **dynamic mult** allocates day-to-day; **no new minting**. |
+| How do vendors extend the platform? | Prefer **apps on existing types**; promote a **new Node Service** only for open, specialized operator markets. |
+| Does every app need a Node Service? | **No.** |
 | Does adding types break the hard cap? | **No.** |
 
 ---
 
 ## References
 
-- [Node Types and Dynamic Rewards](./node-types-and-rewards.md)  
+- [Node Services and Dynamic Rewards](./node-types-and-rewards.md)  
 - [Tokenomics MVP §6](../Blockchain/tokenomics-mvp.md#6-dynamic-type-pools--performance-scoring)  
 - [Governance](../Blockchain/governance.md)  
 - [Stakeholders — AppBuilder](./stakeholders-and-personas.md#3-appbuilder)  

@@ -17,10 +17,10 @@ All parameters are **governance-adjustable** after launch only via the threshold
 1. **Largest share of supply is earned** by running infrastructure (network rewards).  
 2. **Predictable emission** — anyone can compute tokens minted in epoch *N* from genesis config.  
 3. **Stake is real collateral** — enough to deter griefing; low enough to onboard operators at launch liquidity.  
-4. **Dynamic type mix** — capacity types rebalance without manual ops; **new types** join via governance by re-slicing the same pie (see [extensible node types](../Platform/extensible-node-types-and-app-platform.md)).  
+4. **Dynamic type mix** — capacity types rebalance without manual ops; **new types** join via governance by re-slicing the same pie (see [extensible Node Services](../Platform/extensible-node-types-and-app-platform.md)).  
 5. **Tenants can pay in stablecoins**; **operators are paid in SYM**.  
 6. **Email IP Address nodes never receive mining rewards.**  
-7. **Apps ≠ node types** — vendors extend the platform primarily as AppBuilders on existing infra; new mining types only when an open operator market is needed.  
+7. **Apps ≠ Node Services** — vendors extend the platform primarily as AppBuilders on existing infra; new mining types only when an open operator market is needed.  
 
 ---
 
@@ -159,9 +159,11 @@ Once the 4B Network Rewards bucket is fully emitted, **no new SYM is minted**. R
 
 | Recipient class | Share of that epoch’s emission | Notes |
 |---|---|---|
-| **Capacity nodes** (Storage, OLTP, Analytics, Consensus, **Serverless**) | **92%** | Split by dynamic type pools (§6) then performance scores |
-| **Verifier nodes** | **8%** | Separate score (attestation quality, uptime); see [verifier-nodes](../Network/verifier-nodes.md) |
-| **Email IP Address nodes** | **0%** | Hardcoded exclusion |
+| **Capacity Node Services** (Storage, OLTP, Analytics, Consensus, **Serverless**, **Blob Gateway** *(strawman, #160)*) | **92%** | Split by dynamic type pools (§6) then performance scores |
+| **Verifier** Node Service | **8%** | Separate score: uptime 40%, coverage 30%, accuracy 30% (#81); see [verifier-nodes](../Network/verifier-nodes.md) |
+| **Email IP Address** Node Service | **0%** | Hardcoded exclusion |
+
+> **Node Services (#159).** A node can run several Node Services; each is settled separately against peers running the same service, with its own stake and penalties. Rounding remainders, forfeits, and pools with no eligible service (e.g. an epoch with no eligible Verifier) stay in the distributor's `undistributed` balance for a governed sweep.
 
 ---
 
@@ -186,25 +188,27 @@ Epoch pie for capacity nodes = 1,000,000 SYM.
 Base: Storage 40%, Serverless 12%, …  
 If Serverless is scarce and slammed, its mult might be 2.0× and Storage 0.8×; after renormalize, Serverless might land ~20% of the pie and Storage ~35% — **still only 1,000,000 SYM total**, just different slices.
 
-That is the whole idea: **steer operators toward under-served node types** without changing the hard supply cap.
+That is the whole idea: **steer operators toward under-served Node Services** without changing the hard supply cap.
 
-**Adding a brand-new type later** (CDN, GPU, vendor-driven specialty): governance assigns a **base weight**, **rescales other types so weights still sum to 100%**, and the same dynamic mult applies. Emission schedule and **10B hard cap are unchanged**. See [Extensible Node Types & Application Platform](../Platform/extensible-node-types-and-app-platform.md).
+**Adding a brand-new type later** (CDN, GPU, vendor-driven specialty): governance assigns a **base weight**, **rescales other types so weights still sum to 100%**, and the same dynamic mult applies. Emission schedule and **10B hard cap are unchanged**. See [Extensible Node Services & Application Platform](../Platform/extensible-node-types-and-app-platform.md).
 
 ### 6.1 Base pool weights (before demand adjustment)
 
 Of the **92% capacity** emission:
 
-| Node type | Base weight | Rationale |
+| Node Service | Base weight | Rationale |
 |---|---|---|
 | **Storage** | **40%** | Core durability product |
-| **OLTP** | **22%** | Martech transactional layer (contact records, segmentation, event writes — see [Node Types and Rewards](../Platform/node-types-and-rewards.md#oltp-node)) |
+| **OLTP** | **22%** | Martech transactional layer (contact records, segmentation, event writes — see [Node Services and Rewards](../Platform/node-types-and-rewards.md#oltp)) |
 | **Analytics** | **13%** | Report/query tier |
 | **Consensus** | **13%** | Chain security / participation |
 | **Serverless** | **12%** | Event-driven functions, webhooks, Journey side-effects |
 
 Weights sum to 100% of the capacity slice.
 
-> **Correction (post-#90 Arch):** earlier drafts of this table described the OLTP row as "Martech + DB compute," implying Symposia's own Postgres database-service compute nodes ([Compute Nodes](../Database/compute-nodes.md)) shared this emission-based type pool with martech OLTP nodes. That is incorrect and has been removed. Compute nodes are **not** part of any emission-based type pool — per compute-nodes.md's Reward Pool section, they are rewarded entirely from a separate, **fee-based** compute reward pool funded by tenant compute billing revenue (see §7 and [FeeSplitter's `depositOltpFeeRevenue`](../Database/compute-nodes.md#reward-calculation)), not token emission. The OLTP row above is scoped to the martech-track OLTP node type only.
+> **Blob Gateway (strawman, #160).** Long-term proposal: carve **4%** for Blob Gateway from Storage (Storage 40% → 36%). The MVP deploy, where Storage and Blob Gateway are the only paid capacity services, uses **Storage 90% / Blob Gateway 10%**. Blob Gateway is scored on uptime 30%, request success rate 30%, p95 latency 20% (lower is better) and bytes served 20%.
+
+> **Correction (post-#90 Arch):** earlier drafts of this table described the OLTP row as "Martech + DB compute," implying Symposia's own Postgres database-service compute nodes ([Compute Nodes](../Database/compute-nodes.md)) shared this emission-based type pool with martech OLTP nodes. That is incorrect and has been removed. Compute nodes are **not** part of any emission-based type pool — per compute-nodes.md's Reward Pool section, they are rewarded entirely from a separate, **fee-based** compute reward pool funded by tenant compute billing revenue (see §7 and [FeeSplitter's `depositOltpFeeRevenue`](../Database/compute-nodes.md#reward-calculation)), not token emission. The OLTP row above is scoped to the martech-track OLTP Node Service only.
 
 
 
@@ -332,9 +336,11 @@ Stake is in **SYM**, locked for the node’s registration. Unstake subject to **
 | Partial unstake | Allowed if remaining stake ≥ minimum for declared capacity |
 | Mid-epoch drop below minimum | **Forfeit rewards for that epoch**; grace **1 epoch** before forced deregister |
 
-### 9.1 By node type
+### 9.1 By Node Service
 
-| Node type | Minimum stake | Scaling |
+Stake is **per Node Service** (#159): a node running Storage and Verifier posts both minimums, and each is unstaked, slashed and banned on its own.
+
+| Node Service | Minimum stake | Scaling |
 |---|---|---|
 | **Storage** | **25,000 SYM** base | **+ 2,500 SYM per TB** offered (ceil) |
 | **OLTP** | **75,000 SYM** base | **+ 15,000 SYM per compute-size step** above `medium` (see database sizes: large=+1, xlarge=+2, …) — martech transactional layer only, see note below |
@@ -344,8 +350,10 @@ Stake is in **SYM**, locked for the node’s registration. Unstake subject to **
 | **Serverless** | **50,000 SYM** base | **+ 5,000 SYM per concurrent invoke slot** committed (ceil) |
 | **Verifier** | **5×** the Storage base for a **0 TB** “verifier-only” registration = **125,000 SYM** | Matches “5× standard” intent in verifier requirements |
 | **Email IP Address** | **0 SYM mining stake** | Optional **abuse bond** later; not mining collateral |
+| **Blob Gateway** *(strawman, #160)* | **10,000 SYM** flat | No capacity term (a gateway holds no data) |
+| **Blockchain Gateway**, **Telemetry Committee** | Not set | Earnings not yet defined |
 
-> **`Compute` node type (added post-#90 Arch):** Symposia's own Postgres-as-a-service compute nodes ([Compute Nodes](../Database/compute-nodes.md)) are **a distinct `NodeType` from `OLTP`**, not a reuse of it. `OLTP` in this document refers exclusively to the martech track's internal transactional layer (contact records, segmentation queries — [Node Types and Rewards](../Platform/node-types-and-rewards.md#oltp-node)). The two were previously conflated in this document's type-pool table (§6.1) and risked being conflated in `StakeRegistry`'s `NodeType` enum (issue #74) as well. Reasons for the split: (1) compute-nodes.md's own stake guidance ("scales similarly to storage nodes per GB") describes a **continuous per-vCPU** formula, structurally different from OLTP's tiered per-compute-size-step formula; (2) compute nodes are fee-funded (§7), not emission-funded, and keeping them a distinct type keeps that distinction visible in the stake/registry layer; (3) the two node types may diverge further as non-Postgres OLTP or non-database compute classes are added later. The `40,000 SYM` base and `5,000 SYM`/vCPU figures above are illustrative placeholders pending a governance pass — unlike the other rows in this table, they were not part of the original MVP numbers and need explicit confirmation before mainnet.
+> **`Compute` Node Service (added post-#90 Arch):** Symposia's own Postgres-as-a-service compute nodes ([Compute Nodes](../Database/compute-nodes.md)) are **a distinct `NodeType` from `OLTP`**, not a reuse of it. `OLTP` in this document refers exclusively to the martech track's internal transactional layer (contact records, segmentation queries — [Node Services and Rewards](../Platform/node-types-and-rewards.md#oltp)). The two were previously conflated in this document's type-pool table (§6.1) and risked being conflated in `StakeRegistry`'s `NodeType` enum (issue #74) as well. Reasons for the split: (1) compute-nodes.md's own stake guidance ("scales similarly to storage nodes per GB") describes a **continuous per-vCPU** formula, structurally different from OLTP's tiered per-compute-size-step formula; (2) compute nodes are fee-funded (§7), not emission-funded, and keeping them a distinct type keeps that distinction visible in the stake/registry layer; (3) the two Node Services may diverge further as non-Postgres OLTP or non-database compute classes are added later. The `40,000 SYM` base and `5,000 SYM`/vCPU figures above are illustrative placeholders pending a governance pass — unlike the other rows in this table, they were not part of the original MVP numbers and need explicit confirmation before mainnet.
 
 ### 9.2 Stake-to-earn communication
 
@@ -357,13 +365,13 @@ Publish before mainnet a **calculator** using:
 
 **Target design band:** well-behaved Storage node recovers stake principal from rewards in roughly **6–18 months** at early-network node counts — **not a guarantee**; labeled estimate only.
 
-### 9.3 Cross-type co-location (isolation)
+### 9.3 Several Node Services on one node (isolation)
 
 | Rule | MVP |
 |---|---|
-| Multiple rewarded types on one machine | **Allowed** |
+| Several rewarded Node Services on one node | **Allowed**; each staked separately (#159) |
 | Dedicated hardware enforced by protocol? | **No** |
-| Enforcement | Each container’s **resource guarantees are binding**; failures reduce reliability score / stages independently |
+| Enforcement | Each service's **resource guarantees are binding**; failures reduce that service's reliability score / stages independently, and service-specific slashes touch only that service's stake |
 | Guidance | Recommend isolating Analytics from OLTP above OLTP `large` or Analytics >64 GB RAM |
 | Sybil | Same hardware must not register **duplicate identities** for the same capacity (existing anti-Sybil rules) |
 
@@ -397,10 +405,10 @@ Publish before mainnet a **calculator** using:
 
 - [ ] ERC-20 + vestings + emission contract with year table  
 - [ ] Epoch controller (24h, seal, finality window)  
-- [ ] Stake registry per node type + capacity  
+- [ ] Stake registry per Node Service + capacity  
 - [ ] Reward distributor: type pools → scores → reliability → stages  
 - [ ] Verifier 8% path  
-- [ ] Hard zero for Email IP node type ID  
+- [ ] Hard zero for Email IP Node Service ID  
 - [ ] Fee splitter 70/25/5  
 - [ ] Public parameter viewer (API + docs site)  
 - [ ] Testnet: ≥3 capacity nodes + ≥1 verifier complete 2 full epochs with non-zero payouts  

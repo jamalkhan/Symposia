@@ -1,11 +1,16 @@
 # Symposia Node Host
 
-One process that runs everything a Symposia node needs (issue #133):
+One process that runs everything a Symposia node needs (issue #133).
 
-- the **Blockchain Gateway**,
-- a password-protected **config and diagnostics web UI**,
-- the **storage role**, when you turn it on,
-- the **compute role**, when you turn it on.
+A **Node** is this machine's identity (its node key). A node runs zero, one or many **Node Services**, and each one is staked, scored, penalized and paid on its own (#159). The Node Host runs:
+
+- the **Blockchain Gateway**;
+- a password-protected **config and diagnostics web UI**;
+- the **Storage** Node Service, when you turn it on;
+- the **Blob Gateway** Node Service (S3), when you turn it on;
+- the **Compute** Node Service, when you turn it on (pinned: Blob Storage comes first, see #162).
+
+The **Node Services** tab shows every Node Service's public earnings breakdown: what it earns and from which pool, how it is scored, its minimum stake and its penalties. Storage, Blob Gateway and Compute settings live there too.
 
 Settings persist, so a restart comes back exactly as it was.
 
@@ -20,7 +25,7 @@ dotnet run --project Network/Symposia.NodeHost
    - **Local dev network**: starts a local chain (anvil) and gateway on this machine and deploys the contracts. Requires [Foundry](https://book.getfoundry.sh/getting-started/installation) and a repo checkout.
    - **Join a network**: enter another network's gateway URL. This is all you need for a testnet, or for a second host on your machine.
    - **Run a gateway for a remote chain**: for foundation hosts (Base Sepolia, the Symposia L3). Needs a relayer key.
-3. Turn on **Storage** and/or **Compute** and click **Save and apply**. For compute without the Neon binaries, tick **Networking only**.
+3. On the **Node Services** tab, turn on **Storage** and/or **Compute** and click **Save and apply**. For compute without the Neon binaries, tick **Networking only**.
 
 The **Diagnostics** tab shows:
 - each component's status;
@@ -37,21 +42,21 @@ dotnet run --project Network/Symposia.NodeHost                                  
 dotnet run --project Network/Symposia.NodeHost -- --data-dir /tmp/node-b --port-offset 1   # host B → http://localhost:5171
 ```
 
-1. On host A, choose **Local dev network** and turn on storage.
-2. On host B, click **Join it** (or choose **Join a network** with `http://127.0.0.1:8080`) and turn on storage.
+1. On host A, choose **Local dev network** and turn on the Storage service.
+2. On host B, click **Join it** (or choose **Join a network** with `http://127.0.0.1:8080`) and turn on the Storage service.
 3. After about one discovery interval, each host's Diagnostics page lists the other as **Recognized**.
 
 To do the whole thing automatically: `Network/scripts/node-host-smoke.sh`.
 
 ## Two machines on a LAN
 
-Each storage node registers the address other nodes use to reach it. The default is `127.0.0.1`, which only works on one machine. On each host, open **Settings → Storage role** and click **Use <your LAN IP>** next to *Advertised endpoint*, which fills in something like `http://10.0.0.213:5180`. Then save.
+Each node running Storage registers the address other nodes use to reach it. The default is `127.0.0.1`, which only works on one machine. On each host, open **Node Services → Storage** and click **Use <your LAN IP>** next to *Advertised endpoint*, which fills in something like `http://10.0.0.213:5180`. Then save.
 
 The second machine joins with **Join a network** and the first machine's gateway, for example `http://10.0.0.213:8080`. If it starts before that gateway is reachable, it keeps retrying every 5 to 60 seconds; you don't need to restart it.
 
 ## Storing files (S3)
 
-Turn on **Settings → Blob gateway** on one host, click **Generate a new key pair**, copy the secret, and save. The gateway finds every storage node on the network through the on-chain registry. An upload succeeds once **one** node has it (*write quorum*), and the gateway copies it to a second node in the background (*minimum copies*). That second copy normally happens during the upload itself, or within seconds of a missing node coming back.
+Turn on **Node Services → Blob Gateway** on one host, click **Generate a new key pair**, copy the secret, and save. The gateway finds every storage node on the network through the on-chain registry. An upload succeeds once **one** node has it (*write quorum*), and the gateway copies it to a second node in the background (*minimum copies*). That second copy normally happens during the upload itself, or within seconds of a missing node coming back.
 
 ```bash
 export AWS_ACCESS_KEY_ID=<key id> AWS_SECRET_ACCESS_KEY=<secret> AWS_DEFAULT_REGION=us-east-1
@@ -69,7 +74,7 @@ $S3 s3 cp s3://proof/file.bin ./back.bin
 
 **Encryption between gateway and storage nodes:** storage calls use TLS (#142) on the gRPC TLS port (`6280+`). Each storage node creates its own certificate (`grpc-tls.pfx` in its storage data folder, owner-only, renewed automatically before it expires) and signs the certificate's fingerprint with its node key. The gateway accepts only a certificate vouched for by that node's on-chain address, prefers TLS whenever a node offers it, and never falls back to cleartext for a node it has seen with TLS.
 
-**Upgrading:** hosts can be upgraded one at a time (#145). Each release works with the one before it: during the overlap a storage node also serves cleartext gRPC on `6180+` (Settings → *Also serve gRPC in cleartext*) for gateways that don't speak TLS yet. A breaking requirement such as TLS-only takes effect for the whole network at a time scheduled on chain in the ProtocolActivations contract; the Network tab shows upcoming activations and which nodes aren't ready. Once `storage.grpc.tls` is active, turn cleartext off. See [docs/engineering/protocol-compatibility.md](../../docs/engineering/protocol-compatibility.md).
+**Upgrading:** hosts can be upgraded one at a time (#145). Each release works with the one before it: during the overlap a storage node also serves cleartext gRPC on `6180+` (Node Services → Storage → *Also serve gRPC in cleartext*) for gateways that don't speak TLS yet. A breaking requirement such as TLS-only takes effect for the whole network at a time scheduled on chain in the ProtocolActivations contract; the Network tab shows upcoming activations and which nodes aren't ready. Once `storage.grpc.tls` is active, turn cleartext off. See [docs/engineering/protocol-compatibility.md](../../docs/engineering/protocol-compatibility.md).
 
 Diagnostics shows how many storage nodes the gateway can reach and how many objects are waiting for their second copy. The Network tab shows a Gateway light for each node.
 
@@ -81,7 +86,7 @@ To run a two-node S3 check automatically: `Network/scripts/s3-cluster-smoke.sh`.
 
 | Option | Default | |
 |---|---|---|
-| `--data-dir DIR` | `~/.symposia/node` | Holds the identity key, settings, secrets, chain state and role data |
+| `--data-dir DIR` | `~/.symposia/node` | Holds the identity key, settings, secrets, chain state and Node Service data |
 | `--port-offset N` | `0` | Adds N to every default port (UI 5170, gateway 8080, anvil 8545, storage 5180, storage gRPC 6180 (cleartext) and 6280 (TLS), compute 5190, blob gateway 9000) |
 | `--ui-port P` | `5170 + offset` | |
 
@@ -95,4 +100,4 @@ Any setting can be fixed with an environment variable, for example `SYMPOSIA__St
 | `settings.json` | Everything set in the UI |
 | `secrets.json` (0600) | Admin password hash, relayer key and the blob gateway's secret key |
 | `anvil-state.json`, `network.json` | Local dev chain state and deployed contract addresses |
-| `storage/`, `compute/`, `blobgateway/` | Role data, kept in a separate folder per network (`<chainId>-<registry>`) |
+| `storage/`, `compute/`, `blobgateway/` | Node Service data, kept in a separate folder per network (`<chainId>-<registry>`) |

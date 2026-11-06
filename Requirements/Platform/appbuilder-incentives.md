@@ -9,7 +9,7 @@ This document answers:
 1. Should vendors have a **separate protocol token**?  
 2. If not, **how do we incentivize them** under the existing **10B SYM** hard cap?
 
-Related: [Extensible Node Types & Application Platform](./extensible-node-types-and-app-platform.md), [Tokenomics MVP](../Blockchain/tokenomics-mvp.md), [Stakeholders — AppBuilder](./stakeholders-and-personas.md#3-appbuilder).
+Related: [Extensible Node Services & Application Platform](./extensible-node-types-and-app-platform.md), [Tokenomics MVP](../Blockchain/tokenomics-mvp.md), [Stakeholders — AppBuilder](./stakeholders-and-personas.md#3-appbuilder).
 
 ---
 
@@ -138,7 +138,7 @@ MVP may ship grants + match first; kickback when marketplace attribution is soli
 
 | Anti-pattern | Why blocked |
 |---|---|
-| App claims to be a “node type” to farm epoch emission | Mining is for attested infrastructure only |
+| App claims to be a “Node Service” to farm epoch emission | Mining is for attested infrastructure only |
 | Infinite SYM mint for installs | Breaks hard cap / trust |
 | Paying builders from Network Rewards pie | Dilutes operators; wrong job |
 
@@ -206,6 +206,6 @@ Exact match rates, caps, and kickback % may change via Tier 1–2 governance. Th
 ## References
 
 - [Tokenomics MVP](../Blockchain/tokenomics-mvp.md) — 15% Ecosystem, hard cap  
-- [Extensible node types](./extensible-node-types-and-app-platform.md)  
+- [Extensible Node Services](./extensible-node-types-and-app-platform.md)  
 - [Token distribution](../Blockchain/token-distribution-and-launch-economics.md)  
 - [Governance](../Blockchain/governance.md)  
