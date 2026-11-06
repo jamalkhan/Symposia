@@ -30,6 +30,15 @@ public sealed class GatewayOptions
     public string EpochControllerAddress { get; set; } = "";
 
     public EpochSealerOptions EpochSealer { get; set; } = new();
+
+    /// <summary>TelemetryCheckpointRegistry (#75/#158); empty = the telemetry relay endpoints answer 404.</summary>
+    public string TelemetryRegistryAddress { get; set; } = "";
+
+    /// <summary>
+    /// Where the Gateway stores self-checkpoint batches it relays (#158), so nodes need no blob
+    /// credential. Without an endpoint, batches are kept in <c>CacheDirectory</c> only.
+    /// </summary>
+    public Symposia.Network.Node.Telemetry.Committee.TelemetryBlobOptions TelemetryBlobs { get; set; } = new();
 }
 
 /// <summary>

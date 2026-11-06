@@ -33,6 +33,9 @@ public sealed class GatewayComponent : WebAppComponent
             // Both set = the gateway runs the epoch sealer (issue #72) with the relayer key.
             ["Gateway:RewardDistributorAddress"] = network.RewardDistributorAddress,
             ["Gateway:EpochControllerAddress"] = network.EpochControllerAddress,
+            // Telemetry relays (#158); relayed self-checkpoint batches are kept under the gateway's data dir.
+            ["Gateway:TelemetryRegistryAddress"] = network.TelemetryRegistryAddress,
+            ["Gateway:TelemetryBlobs:CacheDirectory"] = Path.Combine(context.Paths.DataDir, "telemetry-blobs"),
             ["Gateway:RelayerPrivateKey"] = context.Settings.Network.Mode == NetworkMode.LocalDev
                 ? ChainComponent.AnvilDevKey
                 : context.Secrets.RelayerPrivateKey,

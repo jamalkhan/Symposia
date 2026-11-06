@@ -4,6 +4,7 @@ using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Contracts;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
+using Symposia.Blockchain.Gateway.Chain;
 
 namespace Symposia.Blockchain.Gateway.Sealing;
 
@@ -37,10 +38,13 @@ public sealed class EpochSealChain : IEpochSealChain
     private readonly string _epochs;
     private readonly BlockParameter _fromBlock;
 
-    public EpochSealChain(IOptions<GatewayOptions> options)
+    private readonly RelayerAccount _relayer;
+
+    public EpochSealChain(IOptions<GatewayOptions> options, RelayerAccount relayer)
     {
         var o = options.Value;
-        _web3 = new Web3(new Nethereum.Web3.Accounts.Account(o.RelayerPrivateKey), o.RpcUrl);
+        _relayer = relayer;
+        _web3 = relayer.Web3;
         _distributor = o.RewardDistributorAddress;
         _epochs = o.EpochControllerAddress;
         _fromBlock = new BlockParameter(o.EpochSealer.FromBlock);
@@ -75,8 +79,8 @@ public sealed class EpochSealChain : IEpochSealChain
     }
 
     public Task SealAsync(ulong epoch, IReadOnlyList<string> nodes, CancellationToken ct) =>
-        _web3.Eth.GetContractTransactionHandler<SealEpochFunction>()
-            .SendRequestAndWaitForReceiptAsync(_distributor, new SealEpochFunction { Epoch = epoch, Nodes = [.. nodes] }, ct);
+        _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<SealEpochFunction>()
+            .SendRequestAndWaitForReceiptAsync(_distributor, new SealEpochFunction { Epoch = epoch, Nodes = [.. nodes] }, ct), ct);
 
     private async Task<IEnumerable<string>> NodesAsync<TEvent>(ulong epoch, Func<TEvent, string> node)
         where TEvent : IEventDTO, new()

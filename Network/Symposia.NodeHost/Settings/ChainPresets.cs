@@ -5,8 +5,10 @@ namespace Symposia.NodeHost.Settings;
 /// <param name="ProtocolActivationsAddress">The network's ProtocolActivations contract (issue #145); empty = none yet.</param>
 /// <param name="RewardDistributorAddress">RewardDistributor (#80); empty = no rewards stack, so the gateway's epoch sealer stays off.</param>
 /// <param name="EpochControllerAddress">EpochController (#72), required with <paramref name="RewardDistributorAddress"/>.</param>
+/// <param name="TelemetryRegistryAddress">TelemetryCheckpointRegistry (#75/#158); empty = nodes don't gossip or checkpoint telemetry.</param>
 public sealed record ChainPreset(string Description, string RpcUrl, ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress,
-    string ProtocolActivationsAddress = "", string RewardDistributorAddress = "", string EpochControllerAddress = "")
+    string ProtocolActivationsAddress = "", string RewardDistributorAddress = "", string EpochControllerAddress = "",
+    string TelemetryRegistryAddress = "")
 {
     public bool IsDeployed =>
         !string.IsNullOrWhiteSpace(RpcUrl) && ChainId != 0 &&
@@ -30,7 +32,8 @@ public static class ChainPresets
             Pick(network.EpochRootRegistryAddress, preset.EpochRootRegistryAddress),
             preset.ProtocolActivationsAddress,
             preset.RewardDistributorAddress,
-            preset.EpochControllerAddress);
+            preset.EpochControllerAddress,
+            preset.TelemetryRegistryAddress);
     }
 
     private static string Pick(string over, string preset) => string.IsNullOrWhiteSpace(over) ? preset : over;

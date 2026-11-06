@@ -11,6 +11,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Telemetry batch codec, EIP-712 digests and blob client shared with nodes (#158). -->
+    <ProjectReference Include="..\..\Network\Symposia.Network.Node\Symposia.Network.Node.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>Symposia.Blockchain.Gateway.Tests</_Parameter1>
     </AssemblyAttribute>

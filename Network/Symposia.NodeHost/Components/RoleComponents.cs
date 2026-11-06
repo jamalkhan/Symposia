@@ -61,6 +61,16 @@ public sealed class StorageRoleComponent : WebAppComponent
             ["StorageNode:Telemetry:Enabled"] = storage.Heartbeats.ToString(),
             ["StorageNode:Telemetry:GenesisUnixSeconds"] = storage.EpochGenesisUnixSeconds.ToString(),
         };
+        var network = context.Network!;
+        if (!string.IsNullOrEmpty(network.TelemetryRegistryAddress) && !string.IsNullOrEmpty(network.RpcUrl) && storage.Heartbeats)
+        {
+            // HTTP gossip, the self-checkpoint fallback and committee duties (#158); the schedule syncs from the EpochController.
+            config["StorageNode:Telemetry:Chain:RpcUrl"] = network.RpcUrl;
+            config["StorageNode:Telemetry:Chain:TelemetryRegistryAddress"] = network.TelemetryRegistryAddress;
+            config["StorageNode:Telemetry:Chain:EpochControllerAddress"] = network.EpochControllerAddress;
+            config["StorageNode:Telemetry:Blobs:CacheDirectory"] = Path.Combine(dir, "telemetry-blobs");
+        }
+
         RoleNetwork.Add(config, "StorageNode", context, HostContext.EndpointFor(storage.AdvertisedEndpoint, storage.Port));
         return config;
     }

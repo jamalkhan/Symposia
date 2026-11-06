@@ -46,8 +46,27 @@ public sealed record TelemetrySchedule(long GenesisUnixSeconds, long EpochSecond
 
     public uint SlotAt(long unixSeconds) => (uint)((unixSeconds - EpochStart(EpochAt(unixSeconds))) / CadenceSeconds);
 
+    /// <summary>End of checkpoint window <paramref name="k"/>, matching <c>TelemetryCheckpointRegistry.checkpointWindowEnd</c>.</summary>
+    public long CheckpointWindowEnd(ulong epoch, ushort k) => EpochStart(epoch) + (k + 1) * EpochSeconds / CheckpointsPerEpoch;
+
     /// <summary>The checkpoint window a slot falls in.</summary>
     public ushort CheckpointOf(uint slot) => (ushort)((ulong)slot * (ulong)CheckpointsPerEpoch / SlotsPerEpoch);
+}
+
+/// <summary>
+/// The schedule heartbeats are stamped with. Starts from configuration; when the telemetry
+/// network is on (#158), the committee service replaces it with the EpochController's values,
+/// so a node's samples always land in the slots the chain counts.
+/// </summary>
+public sealed class TelemetryScheduleSource(TelemetrySchedule initial)
+{
+    private volatile TelemetrySchedule _current = initial;
+
+    public TelemetrySchedule Current
+    {
+        get => _current;
+        set => _current = value;
+    }
 }
 
 /// <summary>

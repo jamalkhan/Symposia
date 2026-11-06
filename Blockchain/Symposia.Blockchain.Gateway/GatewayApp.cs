@@ -1,6 +1,8 @@
 using Symposia.Blockchain.Gateway.Chain;
 using Symposia.Blockchain.Gateway.Nodes;
 using Symposia.Blockchain.Gateway.Sealing;
+using Symposia.Blockchain.Gateway.Telemetry;
+using Symposia.Network.Node.Telemetry.Committee;
 
 namespace Symposia.Blockchain.Gateway;
 
@@ -17,6 +19,7 @@ public static class GatewayApp
         configure?.Invoke(builder);
 
         builder.Services.Configure<GatewayOptions>(builder.Configuration.GetSection("Gateway"));
+        builder.Services.AddSingleton<RelayerAccount>();
         builder.Services.AddSingleton<BootstrapChainClient>();
 
         var gateway = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
@@ -27,10 +30,18 @@ public static class GatewayApp
             builder.Services.AddHostedService<EpochSealerService>();
         }
 
+        builder.Services.AddSingleton<ITelemetryBlobStore>(sp =>
+        {
+            var blobs = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.TelemetryBlobs;
+            ITelemetryBlobStore? remote = string.IsNullOrEmpty(blobs.Endpoint) ? null : new S3TelemetryBlobStore(new HttpClient(), blobs);
+            return new CachingTelemetryBlobStore(string.IsNullOrEmpty(blobs.CacheDirectory) ? null : blobs.CacheDirectory, remote);
+        });
+
         var app = builder.Build();
 
         app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
         app.MapNodeEndpoints();
+        app.MapTelemetryRelay();
 
         return app;
     }

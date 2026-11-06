@@ -119,14 +119,15 @@ public sealed partial class ChainComponent : HostComponent
         if (string.IsNullOrEmpty(deployment.RewardDistributorAddress) || !await HasCodeAsync(rpcUrl, deployment.RewardDistributorAddress, ct))
         {
             // Rewards stack (#70-#80) with its epoch controller (#72), so the hosted gateway's epoch sealer has something to settle.
-            var (distributor, epochs) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, ct);
-            deployment = deployment with { RewardDistributorAddress = distributor, EpochControllerAddress = epochs };
+            var (distributor, epochs, telemetry) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, ct);
+            deployment = deployment with { RewardDistributorAddress = distributor, EpochControllerAddress = epochs, TelemetryRegistryAddress = telemetry };
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
             context.Logger.LogInformation("Deployed the rewards contracts (RewardDistributor {Distributor}, EpochController {Epochs}).", distributor, epochs);
         }
 
         return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl,
-            deployment.ProtocolActivationsAddress, deployment.RewardDistributorAddress, deployment.EpochControllerAddress);
+            deployment.ProtocolActivationsAddress, deployment.RewardDistributorAddress, deployment.EpochControllerAddress,
+            deployment.TelemetryRegistryAddress);
     }
 
     private static NetworkInfo ResolveRemoteRpc(HostContext context)
@@ -145,7 +146,8 @@ public sealed partial class ChainComponent : HostComponent
         }
 
         return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", preset.ChainId, preset.NodeRegistryAddress, preset.EpochRootRegistryAddress, preset.RpcUrl,
-            preset.ProtocolActivationsAddress, preset.RewardDistributorAddress, preset.EpochControllerAddress);
+            preset.ProtocolActivationsAddress, preset.RewardDistributorAddress, preset.EpochControllerAddress,
+            preset.TelemetryRegistryAddress);
     }
 
     internal static async Task<NetworkInfo> JoinAsync(string gatewayUrl, CancellationToken ct)
@@ -220,10 +222,10 @@ public sealed partial class ChainComponent : HostComponent
     }
 
     /// <summary>Runs DeployRewards.s.sol (dev roles = the anvil dev key) and returns the distributor and epoch controller.</summary>
-    private static async Task<(string Distributor, string Epochs)> DeployRewardsAsync(string foundryBin, string rpcUrl, CancellationToken ct)
+    private static async Task<(string Distributor, string Epochs, string Telemetry)> DeployRewardsAsync(string foundryBin, string rpcUrl, CancellationToken ct)
     {
         var output = await ForgeAsync(foundryBin, ct, "script", "script/DeployRewards.s.sol:DeployRewards", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast");
-        return (Extract(output, "RewardDistributor"), Extract(output, "EpochController"));
+        return (Extract(output, "RewardDistributor"), Extract(output, "EpochController"), Extract(output, "TelemetryCheckpointRegistry"));
     }
 
     /// <summary>Deploys ProtocolActivations (issue #145) owned by the dev key, with no notice window (local dev).</summary>
@@ -359,7 +361,8 @@ public sealed partial class ChainComponent : HostComponent
 
     /// <summary>Deployed addresses, tagged with the chain they were deployed to (checked on load).</summary>
     private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId,
-        string? ProtocolActivationsAddress = null, string? RewardDistributorAddress = null, string? EpochControllerAddress = null);
+        string? ProtocolActivationsAddress = null, string? RewardDistributorAddress = null, string? EpochControllerAddress = null,
+        string? TelemetryRegistryAddress = null);
 
     private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null);
 }

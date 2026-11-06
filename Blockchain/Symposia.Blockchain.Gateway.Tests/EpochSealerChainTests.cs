@@ -54,7 +54,7 @@ public sealed class EpochSealerChainTests(RewardsChainFixture chain) : IClassFix
         await SetNextBlockTimestamp((ulong)deadline + 1);
 
         var sealer = new EpochSealer(
-            new EpochSealChain(Options.Create(Gateway())),
+            new EpochSealChain(Options.Create(Gateway()), new Symposia.Blockchain.Gateway.Chain.RelayerAccount(Options.Create(Gateway()))),
             Options.Create(Gateway()),
             NullLogger<EpochSealer>.Instance);
         Assert.Equal(2, await sealer.RunOnceAsync(default));

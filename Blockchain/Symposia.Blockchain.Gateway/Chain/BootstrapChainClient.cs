@@ -14,14 +14,16 @@ namespace Symposia.Blockchain.Gateway.Chain;
 public sealed class BootstrapChainClient
 {
     private readonly Web3 _web3;
+    private readonly RelayerAccount _relayer;
     private readonly string _nodeRegistryAddress;
     private readonly string _epochRootRegistryAddress;
     private readonly string _protocolActivationsAddress;
 
-    public BootstrapChainClient(IOptions<GatewayOptions> options)
+    public BootstrapChainClient(IOptions<GatewayOptions> options, RelayerAccount relayer)
     {
         var o = options.Value;
-        _web3 = new Web3(new Nethereum.Web3.Accounts.Account(o.RelayerPrivateKey), o.RpcUrl);
+        _relayer = relayer;
+        _web3 = relayer.Web3;
         _nodeRegistryAddress = o.NodeRegistryAddress;
         _epochRootRegistryAddress = o.EpochRootRegistryAddress;
         _protocolActivationsAddress = o.ProtocolActivationsAddress;
@@ -96,14 +98,14 @@ public sealed class BootstrapChainClient
     /// </summary>
     public async Task<string> RegisterAsync(string node, string endpoint, ulong nonce, byte[] signature)
     {
-        var receipt = await _web3.Eth.GetContractTransactionHandler<RegisterFunction>()
+        var receipt = await _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<RegisterFunction>()
             .SendRequestAndWaitForReceiptAsync(_nodeRegistryAddress, new RegisterFunction
             {
                 Node = node,
                 Endpoint = endpoint,
                 RegistrationNonce = nonce,
                 Signature = signature,
-            });
+            }));
         return receipt.TransactionHash;
     }
 
@@ -142,15 +144,15 @@ public sealed class BootstrapChainClient
         return nodes;
     }
 
-    public Task<string> SubmitRootAsync(string node, ulong epoch, byte[] root, byte[] signature) =>
-        _web3.Eth.GetContractTransactionHandler<SubmitRootFunction>()
+    public async Task<string> SubmitRootAsync(string node, ulong epoch, byte[] root, byte[] signature) =>
+        (await _relayer.SendAsync(web3 => web3.Eth.GetContractTransactionHandler<SubmitRootFunction>()
             .SendRequestAndWaitForReceiptAsync(_epochRootRegistryAddress, new SubmitRootFunction
             {
                 Node = node,
                 Epoch = epoch,
                 Root = root,
                 Signature = signature,
-            }).ContinueWith(t => t.Result.TransactionHash);
+            }))).TransactionHash;
 
     public async Task<(ulong Epoch, byte[] Root)?> TryGetLatestRootAsync(string node)
     {
