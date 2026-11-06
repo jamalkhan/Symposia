@@ -155,10 +155,10 @@ contract ConsentRegistryTest is Test {
     // TC-2.5 / TC-3.4: expired deadline is rejected.
     function test_GrantConsent_ExpiredDeadline_Reverts() public {
         ConsentRegistry.Permission[] memory perms = _permissions(ConsentRegistry.Permission.EmailMarketing);
-        uint256 deadline = block.timestamp;
+        uint256 deadline = vm.getBlockTimestamp(); // not block.timestamp: via-IR re-reads it after the warp below
         bytes memory sig = _signGrant(walletAKey, walletA, perms, 0, deadline);
 
-        vm.warp(block.timestamp + 1);
+        vm.warp(deadline + 1);
         vm.expectRevert("ConsentRegistry: expired");
         registry.grantConsent(walletA, tenantId, perms, grantSourceHash, grantWordingHash, 0, deadline, sig);
     }

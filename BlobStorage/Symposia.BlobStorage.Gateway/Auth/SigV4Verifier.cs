@@ -20,7 +20,14 @@ public sealed partial class SigV4Verifier
     /// The payload body is NOT re-read; we trust the client's stated x-amz-content-sha256 value.
     /// A forged body hash still breaks the signature, so MITM attacks are blocked.
     /// </summary>
-    public string? Verify(HttpRequest request)
+    public string? Verify(HttpRequest request) => Authenticate(request)?.TenantId;
+
+    /// <summary>
+    /// Verifies the request signature and returns what streaming uploads need to verify each chunk's
+    /// signature (issue #139): the derived per-day signing key (never the secret), the request date,
+    /// the credential scope and the seed signature. Null for any auth failure.
+    /// </summary>
+    public SigV4Context? Authenticate(HttpRequest request)
     {
         if (!TryParseAuth(request.Headers.Authorization.ToString(), out var auth))
             return null;
@@ -50,8 +57,16 @@ public sealed partial class SigV4Verifier
                 Encoding.ASCII.GetBytes(computedSig)))
             return null;
 
-        return credential.TenantId;
+        return new SigV4Context(credential.TenantId, auth.AccessKeyId, signingKey, amzDate, credentialScope, computedSig);
     }
+
+    /// <summary>HMAC-SHA256 hex signature of <paramref name="stringToSign"/> under a derived signing key.</summary>
+    public static string SignHex(byte[] signingKey, string stringToSign) =>
+        Convert.ToHexStringLower(HMACSHA256.HashData(signingKey, Encoding.UTF8.GetBytes(stringToSign)));
+
+    /// <summary>For tests and tooling: the SigV4 signing key for a secret, date stamp, region and service.</summary>
+    public static byte[] SigningKey(string secretKey, string dateStamp, string region, string service) =>
+        DeriveSigningKey(secretKey, dateStamp, region, service);
 
     private static string BuildCanonicalRequest(HttpRequest request, string[] signedHeaders)
     {
@@ -170,3 +185,6 @@ public sealed partial class SigV4Verifier
     [GeneratedRegex(@"\s+")]
     private static partial Regex CollapseWhitespace();
 }
+
+/// <summary>A verified SigV4 request: who it is, plus the material to verify streaming chunk signatures (#139).</summary>
+public sealed record SigV4Context(string TenantId, string AccessKeyId, byte[] SigningKey, string AmzDate, string Scope, string SeedSignature);

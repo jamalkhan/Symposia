@@ -1,0 +1,65 @@
+# Protocol compatibility gate (issue #146): wire formats, JSON documents, the feature registry,
+# upgradeable contract storage and migrations may only change compatibly.
+# What each check catches and how to fix it: docs/engineering/protocol-compatibility.md#the-checks
+name: Protocol compatibility
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches: [dev, qa, stage, master, production]
+
+concurrency:
+  group: protocol-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compat:
+    name: Compatibility vs base
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ALLOW_DESTRUCTIVE_MIGRATION: ${{ contains(github.event.pull_request.labels.*.name, 'migration-contract-approved') && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Choose bases
+        id: base
+        run: tools/protocol-compat/bases.sh "${{ github.event_name }}" "${{ github.base_ref }}" "${{ github.event.before }}" | tee -a "$GITHUB_OUTPUT"
+      - name: Against the base branch
+        run: tools/protocol-compat/run.sh "${{ steps.base.outputs.ref }}"
+      - name: Against the latest release (N-1)
+        if: steps.base.outputs.tag != ''
+        run: tools/protocol-compat/run.sh "${{ steps.base.outputs.tag }}" schema fixtures registry storage-layout
+
+  grpc:
+    name: gRPC breaking changes (buf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Choose bases
+        id: base
+        run: tools/protocol-compat/bases.sh "${{ github.event_name }}" "${{ github.base_ref }}" "${{ github.event.before }}" | tee -a "$GITHUB_OUTPUT"
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: buf breaking vs base branch and latest release
+        working-directory: BlobStorage/Symposia.BlobStorage.Protocol/Protos
+        run: |
+          module=BlobStorage/Symposia.BlobStorage.Protocol/Protos
+          for against in "${{ steps.base.outputs.ref }}" "${{ steps.base.outputs.tag }}"; do
+            [ -n "$against" ] || { echo "::notice::No release tag yet; nothing to compare against."; continue; }
+            if ! git cat-file -e "$against:$module/buf.yaml" 2>/dev/null; then
+              echo "::notice::$against has no buf module yet; skipping that comparison."
+              continue
+            fi
+            echo "buf breaking against $against"
+            buf breaking --against "$GITHUB_WORKSPACE/.git#ref=$(git rev-parse "$against"),subdir=$module"
+          done

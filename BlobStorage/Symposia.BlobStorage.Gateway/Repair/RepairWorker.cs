@@ -57,6 +57,10 @@ public sealed class RepairWorker : BackgroundService
                 _logger.LogError(ex,
                     "Repair failed for CID {Cid} (reason: {Reason}).", task.Cid, task.Reason);
             }
+            finally
+            {
+                _queue.Done(task.Cid);
+            }
         }
     }
 
@@ -73,7 +77,7 @@ public sealed class RepairWorker : BackgroundService
         var currentNodeIds = record.NodeIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         // 2. Find a healthy source node that actually holds a good copy.
-        var sourceNode = await FindHealthySourceAsync(task.Cid, currentNodeIds, task.BadNodeUrl, ct);
+        var sourceNode = await FindHealthySourceAsync(task.Cid, currentNodeIds, task.BadNodeId, ct);
         if (sourceNode is null)
         {
             _logger.LogWarning(
@@ -83,7 +87,7 @@ public sealed class RepairWorker : BackgroundService
 
         // 3. Find a healthy target node not already in the replica set.
         var targetNode = _nodes.Healthy
-            .Where(n => !currentNodeIds.Contains(n.Url, StringComparer.OrdinalIgnoreCase))
+            .Where(n => !currentNodeIds.Contains(n.Id, StringComparer.OrdinalIgnoreCase))
             .FirstOrDefault();
 
         if (targetNode is null)
@@ -101,12 +105,20 @@ public sealed class RepairWorker : BackgroundService
         var success = await ReplicateAsync(record, sourceNode, targetNode, ct);
         if (!success) return;
 
-        // 5. Update all objects that reference this CID to include the new node.
-        UpdateAllReferencingObjects(task.Cid, targetNode.Url);
+        // 5. Record the new replica on every object holding this CID (idx_objects_cid, atomic).
+        //    If the object was deleted or overwritten while copying, the target's copy is now
+        //    orphaned storage: queue it for deletion instead of leaking it.
+        _store.AddReplicaForCid(task.Cid, targetNode.Id);
+        if (!_store.IsCidReferenced(task.Cid))
+        {
+            _logger.LogInformation("Repair: CID {Cid} was deleted while copying; removing the new copy from {Target}.", task.Cid, targetNode.Url);
+            _store.EnqueueNodeDeletion(task.Cid, targetNode.Id);
+            return;
+        }
 
         // 6. If we evicted a bad node, schedule its blob for GC deletion.
-        if (task.BadNodeUrl is not null && !_store.IsCidReferenced(task.Cid))
-            _store.EnqueueNodeDeletion(task.Cid, task.BadNodeUrl);
+        if (task.BadNodeId is not null && !_store.IsCidReferenced(task.Cid))
+            _store.EnqueueNodeDeletion(task.Cid, task.BadNodeId);
 
         _logger.LogInformation("Repair complete for CID {Cid}: replica added on {Target}.", task.Cid, targetNode.Url);
     }
@@ -115,8 +127,8 @@ public sealed class RepairWorker : BackgroundService
         string cid, ISet<string> candidateUrls, string? excludeUrl, CancellationToken ct)
     {
         var candidates = _nodes.Healthy
-            .Where(n => candidateUrls.Contains(n.Url, StringComparer.OrdinalIgnoreCase) &&
-                        !n.Url.Equals(excludeUrl, StringComparison.OrdinalIgnoreCase))
+            .Where(n => candidateUrls.Contains(n.Id, StringComparer.OrdinalIgnoreCase) &&
+                        !n.Id.Equals(excludeUrl, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         foreach (var node in candidates)
@@ -191,27 +203,6 @@ public sealed class RepairWorker : BackgroundService
         {
             _logger.LogError(ex, "Replication from {Source} to {Target} failed.", source.Url, target.Url);
             return false;
-        }
-    }
-
-    private void UpdateAllReferencingObjects(string cid, string newNodeUrl)
-    {
-        // Page through all objects to find every one referencing this CID and add the new node.
-        var cursor = "";
-        while (true)
-        {
-            var page = _store.ListAllObjectsPaged(cursor, 200);
-            foreach (var obj in page)
-            {
-                if (!obj.Cid.Equals(cid, StringComparison.OrdinalIgnoreCase)) continue;
-                var updated = obj.NodeIds
-                    .Append(newNodeUrl)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                _store.UpdateNodeIds(obj.Bucket, obj.Key, updated);
-            }
-            if (page.Count < 200) break;
-            cursor = $"{page[^1].Bucket}/{page[^1].Key}";
         }
     }
 }

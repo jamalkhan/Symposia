@@ -8,7 +8,7 @@ public enum RepairReason { CorruptReplica, MissingReplica, UnderReplicated }
 
 public sealed record RepairTask(
     string Cid,
-    string? BadNodeUrl,   // null = no specific bad node, just add a copy
+    string? BadNodeId,   // null = no specific bad node, just add a copy
     RepairReason Reason);
 
 /// <summary>
@@ -27,7 +27,32 @@ public sealed class RepairQueue
 
     public ChannelReader<RepairTask> Reader => _channel.Reader;
 
-    public void Enqueue(RepairTask task) => _channel.Writer.TryWrite(task);
+    // CIDs queued and not yet processed: sweeps run on every node event, so without this the
+    // same objects would be queued over and over (issue #135 review).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _pending = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Queues the task unless the same CID is already waiting; returns whether it was queued.</summary>
+    public bool Enqueue(RepairTask task)
+    {
+        if (!_pending.TryAdd(task.Cid, 0))
+        {
+            return false;
+        }
+
+        if (_channel.Writer.TryWrite(task))
+        {
+            return true;
+        }
+
+        _pending.TryRemove(task.Cid, out _);
+        return false;
+    }
+
+    /// <summary>Called by the worker once a task is finished (successfully or not).</summary>
+    public void Done(string cid) => _pending.TryRemove(cid, out _);
+
+    /// <summary>How many repairs are waiting.</summary>
+    public int Pending => _pending.Count;
 
     /// <summary>
     /// Called from GetObject when a CID mismatch is detected during streaming.
@@ -56,9 +81,8 @@ public sealed class RepairQueue
     private static void RemoveBadNodeFromMetadata(
         ObjectRecord record, string badNodeUrl, GatewayMetadataStore store)
     {
-        var updated = record.NodeIds
-            .Where(u => !u.Equals(badNodeUrl, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        store.UpdateNodeIds(record.Bucket, record.Key, updated);
+        // Re-reads inside a transaction and checks the CID, so a stale record (the key was
+        // overwritten meanwhile) can't rewrite the newer version's replica list.
+        store.RemoveReplica(record.Bucket, record.Key, record.Cid, badNodeUrl);
     }
 }

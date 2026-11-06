@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Protocol;
+using Symposia.Network.Node;
 
 namespace Symposia.BlobStorage.Gateway.Nodes;
 
@@ -26,11 +27,19 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private readonly List<NodeConnection> _nodes = [];
     private Timer? _probeTimer;
 
+    private readonly IStorageRpcSigner? _signer;
+    private readonly INetworkPolicy _policy;
+    private readonly HashSet<string> _tlsSeen = new(StringComparer.OrdinalIgnoreCase);
+
     public NodeRegistry(
         IOptions<GatewayOptions> options,
         GatewayMetadataStore store,
-        ILogger<NodeRegistry> logger)
+        ILogger<NodeRegistry> logger,
+        INetworkPolicy policy,
+        IStorageRpcSigner? signer = null)
     {
+        _signer = signer;
+        _policy = policy;
         _options = options;
         _store = store;
         _logger = logger;
@@ -38,22 +47,10 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        // Merge config nodes + DB-persisted nodes (deduped by URL).
-        var configUrls = _options.Value.Nodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var dbUrls = _store.GetPersistedNodes().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var allUrls = configUrls.Union(dbUrls, StringComparer.OrdinalIgnoreCase);
-
-        lock (_lock)
-        {
-            foreach (var url in allUrls)
-            {
-                if (!_nodes.Any(n => n.Url.Equals(url, StringComparison.OrdinalIgnoreCase)))
-                    _nodes.Add(new NodeConnection(url));
-            }
-        }
-
+        // Nodes arrive through Sync, fed by the configured IStorageNodeSource (issue #137).
         // Probe immediately so the first request has health data.
-        _probeTimer = new Timer(_ => ProbeAll(), null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
+        _probeTimer = new Timer(_ => ProbeAll(), null, TimeSpan.Zero,
+            TimeSpan.FromSeconds(Math.Max(1, _options.Value.ProbeIntervalSeconds)));
         return Task.CompletedTask;
     }
 
@@ -94,8 +91,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         lock (_lock)
         {
             return nodeUrls
-                .Select(url => _nodes.FirstOrDefault(n =>
-                    n.Url.Equals(url, StringComparison.OrdinalIgnoreCase)))
+                .Select(id => _nodes.FirstOrDefault(n =>
+                    n.Id.Equals(id, StringComparison.OrdinalIgnoreCase)))
                 .OfType<NodeConnection>()
                 .OrderByDescending(n => n.IsHealthy)
                 .ThenByDescending(n => n.LastProbeTime)
@@ -136,6 +133,157 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         }
     }
 
+    /// <summary>
+    /// Applies a source's current node list (issue #137):
+    /// <list type="bullet">
+    /// <item>a new ID is added (and, the first time, URL-keyed metadata for it is migrated to its ID);</item>
+    /// <item>a known ID at a new URL gets a fresh connection; metadata is keyed by ID, so nothing is rewritten;</item>
+    /// <item>an ID missing from the source longer than <see cref="GatewayOptions.NodeGracePeriodSeconds"/> is dropped.
+    /// Its replica references stay; the compliance scan stops counting them and repair adds copies elsewhere.</item>
+    /// </list>
+    /// </summary>
+    public void Sync(IReadOnlyList<StorageNodeDescriptor> descriptors)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var added = new List<NodeConnection>();
+        var migrations = new List<(string Url, string Id)>();
+        // TLS is required once storage.grpc.tls is activated on chain (#145), whatever the source.
+        var requireTls = _policy.IsActive(ProtocolFeatures.StorageGrpcTls);
+        var dropped = new List<NodeConnection>();
+        lock (_lock)
+        {
+            foreach (var d in descriptors)
+            {
+                if (d.RefusedBecause is not null)
+                {
+                    // Refused by network policy (#145): stop using it now, not after the grace period.
+                    var refused = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                    if (refused is not null)
+                    {
+                        _logger.LogWarning("Dropping storage node {Node} ({Url}): {Reason}.", refused.Id, refused.Url, d.RefusedBecause);
+                        _nodes.Remove(refused);
+                        dropped.Add(refused);
+                    }
+
+                    continue;
+                }
+
+                // No downgrade (#142 review), whatever the source: never connect in cleartext when TLS is
+                // required, and never to a node in cleartext once it has been seen with a pinned certificate.
+                if (d.TlsFingerprint is null && (requireTls || _tlsSeen.Contains(d.Id)))
+                {
+                    _logger.LogError("Refusing cleartext storage connection to {Node} at {Url} ({Why}).", d.Id, d.Url,
+                        requireTls ? "storage.grpc.tls is activated on this network" : "it previously served pinned TLS");
+                    continue;
+                }
+
+                if (d.TlsFingerprint is not null)
+                {
+                    _tlsSeen.Add(d.Id);
+                }
+
+                var existing = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                if (existing is not null && existing.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(existing.TlsFingerprint, d.TlsFingerprint, StringComparison.OrdinalIgnoreCase))
+                {
+                    existing.LastSeenInSource = now;
+                    continue;
+                }
+
+                // Another node previously reachable at this URL (address reuse) must not keep it.
+                var squatter = _nodes.FirstOrDefault(n => n.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase)
+                    && !n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                if (squatter is not null)
+                {
+                    _logger.LogInformation("URL {Url} now belongs to {Node}; dropping the connection for {Previous}.", d.Url, d.Id, squatter.Id);
+                    _nodes.Remove(squatter);
+                    squatter.Dispose();
+                }
+
+                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint) { LastSeenInSource = now };
+                if (existing is not null)
+                {
+                    _logger.LogInformation("Storage node {Node} changed from {Old} to {New} (certificate {Fingerprint}).",
+                        d.Id, existing.Url, d.Url, d.TlsFingerprint ?? "none");
+                    _nodes.Remove(existing);
+                    existing.Dispose();
+                }
+                else
+                {
+                    if (d.Id != d.Url)
+                    {
+                        // O(objects) rewrite: done after the lock is released (#137 review).
+                        migrations.Add((d.Url, d.Id));
+                    }
+
+                    _logger.LogInformation("Added storage node {Node} at {Url}.", d.Id, d.Url);
+                }
+
+                _nodes.Add(conn);
+                added.Add(conn);
+            }
+
+            var grace = TimeSpan.FromSeconds(_options.Value.NodeGracePeriodSeconds);
+            foreach (var gone in _nodes.Where(n => now - n.LastSeenInSource > grace).ToList())
+            {
+                _logger.LogInformation("Storage node {Node} ({Url}) has been missing from its source for over {Grace}; dropping it.",
+                    gone.Id, gone.Url, grace);
+                _nodes.Remove(gone);
+                gone.Dispose();
+            }
+        }
+
+        if (dropped.Count > 0)
+        {
+            AfterDrop(dropped);
+        }
+
+        foreach (var (url, id) in migrations)
+        {
+            var migrated = _store.RenameReplicaUrl(url, id);
+            if (migrated > 0)
+            {
+                _logger.LogInformation("Migrated {Count} replica reference(s) from URL {Url} to node ID {Node}.", migrated, url, id);
+            }
+        }
+
+        foreach (var conn in added)
+        {
+            _ = ProbeAsync(conn);
+        }
+    }
+
+    /// <summary>Raised when a node becomes healthy (new or back online); used to start a repair sweep at once.</summary>
+    public event Action<NodeConnection>? NodeBecameHealthy;
+
+    /// <summary>Raised after nodes are dropped by network policy, so repair re-replicates their objects promptly.</summary>
+    public event Action<IReadOnlyList<NodeConnection>>? NodesDropped;
+
+    /// <summary>How long a dropped node's connection stays open for calls already in flight.</summary>
+    internal static TimeSpan DrainDelay { get; set; } = TimeSpan.FromSeconds(60);
+
+    private void AfterDrop(IReadOnlyList<NodeConnection> dropped)
+    {
+        // Refusals are synchronous across the network at an activation (#145 review): say loudly when
+        // they leave too few nodes to write, and let in-flight calls finish before closing channels.
+        var healthy = All.Count(n => n.IsHealthy);
+        var quorum = _options.Value.WriteQuorumCount;
+        if (healthy < quorum)
+        {
+            _logger.LogError("Only {Healthy} healthy storage node(s) remain after dropping {Dropped}; writes need {Quorum}. Uploads will fail until nodes upgrade.",
+                healthy, string.Join(", ", dropped.Select(n => n.Id)), quorum);
+        }
+
+        NodesDropped?.Invoke(dropped);
+        _ = Task.Delay(DrainDelay).ContinueWith(_ =>
+        {
+            foreach (var node in dropped)
+            {
+                node.Dispose();
+            }
+        }, TaskScheduler.Default);
+    }
+
     // ── Health probing ────────────────────────────────────────────────────────
 
     private void ProbeAll()
@@ -153,18 +301,31 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         {
             var response = await node.Client.ProbeAsync(new ProbeRequest(),
                 deadline: DateTime.UtcNow.AddSeconds(5));
+            if (node.ExpectedNodeId is { } expected && !string.Equals(response.NodeId, expected, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("Node at {Url} answered as {Actual} but the registry lists {Expected}; not using it.",
+                    node.Url, response.NodeId, expected);
+                node.MarkUnhealthy();
+                return;
+            }
+
             node.LastProbe = response;
             node.LastProbeTime = DateTimeOffset.UtcNow;
+            node.LastProbeError = null;
+            _logger.LogDebug("Node {Url} probe ok: {Used} bytes used, {Available} available, {Blobs} blobs.",
+                node.Url, response.UsedStorageBytes, response.AvailableStorageBytes, response.BlobCount);
 
             if (!wasHealthy && node.IsHealthy)
             {
                 _logger.LogInformation("Node {Url} came back online; flagging for reconciliation.", node.Url);
                 node.JustReconnected = true;
+                NodeBecameHealthy?.Invoke(node);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Node {Url} probe failed: {Message}", node.Url, ex.Message);
+            node.LastProbeError = ex is Grpc.Core.RpcException rpc ? $"{rpc.StatusCode}: {rpc.Status.Detail}" : ex.Message;
+            _logger.LogWarning("Node {Url} probe failed: {Message}", node.Url, node.LastProbeError);
             if (node.IsHealthy || node.LastUnhealthyAt == DateTimeOffset.MinValue)
                 node.LastUnhealthyAt = DateTimeOffset.UtcNow;
             node.LastProbe = null;

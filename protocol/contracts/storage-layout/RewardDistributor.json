@@ -1,0 +1,65 @@
+{
+  "structs": {
+    "MetricRecord": [
+      {
+        "type": "uint256",
+        "name": "score"
+      },
+      {
+        "type": "uint256",
+        "name": "heartbeatBps"
+      },
+      {
+        "type": "bool",
+        "name": "submitted"
+      }
+    ],
+    "EpochSeal": [
+      {
+        "type": "bool",
+        "name": "sealed_"
+      },
+      {
+        "type": "uint256",
+        "name": "sealedAt"
+      }
+    ],
+    "RewardStorage": [
+      {
+        "type": "mapping(uint256 => mapping(address => MetricRecord))",
+        "name": "metrics"
+      },
+      {
+        "type": "mapping(uint256 => EpochSeal)",
+        "name": "seals"
+      },
+      {
+        "type": "mapping(address => uint256)",
+        "name": "reserveBalance"
+      },
+      {
+        "type": "mapping(address => uint256)",
+        "name": "consecutiveCompliantEpochs"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => uint256))",
+        "name": "payoutOf"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => uint256[STORAGE_FACTOR_COUNT]))",
+        "name": "factorValues"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => bool))",
+        "name": "hasFactorReport"
+      },
+      {
+        "type": "mapping(uint256 => uint256[STORAGE_FACTOR_COUNT])",
+        "name": "factorMax"
+      }
+    ]
+  },
+  "locations": {
+    "REWARD_STORAGE_LOCATION": "keccak256(\"symposia.storage.RewardDistributor\")"
+  }
+}

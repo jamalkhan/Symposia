@@ -33,6 +33,7 @@ internal static class ObjectEndpoints
         GatewayMetadataStore store, QuorumWriter writer)
     {
         if (!TenantId(ctx, out var tenantId)) return S3Xml.AccessDenied();
+        if (MultipartEndpoints.IsPartUpload(ctx.Request)) return await MultipartEndpoints.UploadPartAsync(bucket, key, ctx);
 
         // x-amz-copy-source header triggers CopyObject semantics.
         var copySource = ctx.Request.Headers["x-amz-copy-source"].FirstOrDefault();
@@ -43,8 +44,33 @@ internal static class ObjectEndpoints
             return S3Xml.NoSuchBucket(bucket);
 
         var contentType = ctx.Request.ContentType ?? "application/octet-stream";
-        var record = await writer.WriteAsync(tenantId, bucket, key, contentType,
-            ctx.Request.Body, ctx.RequestAborted);
+
+        // Object bytes from the wire format (aws-chunked, #135), with chunk signatures and every
+        // declared checksum verified as they stream (#139). A failed check throws before the body
+        // ends, so the node writes are cancelled and nothing is committed.
+        ObjectRecord? record;
+        ChecksumVerifyingStream body;
+        try
+        {
+            body = UploadBody.Open(ctx);
+            record = await writer.WriteAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted);
+        }
+        catch (InvalidDataException ex)
+        {
+            return S3Xml.IncompleteBody(ex.Message);
+        }
+        catch (S3RequestRejectedException ex)
+        {
+            ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Symposia.BlobStorage.Gateway.S3.Upload")
+                .LogWarning("Rejected PUT {Bucket}/{Key} from {AccessKey}: {Code} {Message}", bucket, key,
+                    (ctx.Items[nameof(Auth.SigV4Context)] as Auth.SigV4Context)?.AccessKeyId, ex.Code, ex.Message);
+            return S3Xml.Error(ex.Status, ex.Code, ex.Message);
+        }
+
+        foreach (var (algorithm, value) in body.Computed.Where(c => c.Key != "md5"))
+        {
+            ctx.Response.Headers[$"x-amz-checksum-{algorithm}"] = value;
+        }
 
         if (record is null)
             return S3Xml.ServiceUnavailable();
@@ -74,7 +100,7 @@ internal static class ObjectEndpoints
         var dest = src with { Bucket = destBucket, Key = destKey, LastModified = DateTimeOffset.UtcNow };
         store.PutObject(dest);
 
-        return S3Xml.CopyObjectResponse(dest.Cid, dest.LastModified);
+        return S3Xml.CopyObjectResponse(dest.ETag, dest.LastModified);
     }
 
     // ── GetObject ─────────────────────────────────────────────────────────────
@@ -86,6 +112,7 @@ internal static class ObjectEndpoints
         RepairQueue repairQueue)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
+        if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.ListParts(bucket, key, ctx);
 
         var record = store.GetObject(bucket, key);
         if (record is null) return S3Xml.NoSuchKey(key);
@@ -99,11 +126,29 @@ internal static class ObjectEndpoints
             isRange = TryParseRange(rangeHeader, record.SizeBytes, out offset, out length);
         }
 
-        var node = nodes.SelectForRead(record.NodeIds);
-        if (node is null) return S3Xml.ServiceUnavailable();
+        var request = new ReadBlobRequest
+        {
+            Cid = record.Cid,
+            Offset = offset,
+            Length = isRange ? length : 0,
+        };
 
+        // Try each replica (healthy ones first) until one starts streaming (#135); shared with Complete (#5).
+        var opened = await ReplicaReader.OpenAsync(ReplicaReader.Order(nodes, record.NodeIds), request, logger, ctx.RequestAborted,
+            onNotFound: missing => repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes));
+        var node = opened?.Node;
+        var call = opened?.Call;
+        var hasFirst = opened?.HasFirst ?? false;
+
+        if (node is null || call is null)
+        {
+            logger.LogWarning("No replica of {Bucket}/{Key} (CID {Cid}) could be read.", bucket, key, record.Cid);
+            return S3Xml.ServiceUnavailable();
+        }
+
+        using var activeCall = call;
         ctx.Response.ContentType = record.ContentType;
-        ctx.Response.Headers.ETag = $"\"{record.Cid}\"";
+        ctx.Response.Headers.ETag = $"\"{record.ETag}\"";
         ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
 
         if (isRange)
@@ -118,14 +163,6 @@ internal static class ObjectEndpoints
             ctx.Response.ContentLength = record.SizeBytes;
         }
 
-        var request = new ReadBlobRequest
-        {
-            Cid = record.Cid,
-            Offset = offset,
-            Length = isRange ? length : 0,
-        };
-
-        var call = node.Client.ReadBlob(request, cancellationToken: ctx.RequestAborted);
 
         // Stream to client while computing SHA-256 for CID verification.
         // Per Requirements/BlobStorage/redundancy-and-data-integrity.md: a read returning data
@@ -137,17 +174,28 @@ internal static class ObjectEndpoints
 
         try
         {
-            await foreach (var chunk in call.ResponseStream.ReadAllAsync(ctx.RequestAborted))
+            var more = hasFirst;
+            while (more)
             {
+                var chunk = call.ResponseStream.Current;
                 hasher?.AppendData(chunk.Data.Span);
                 await ctx.Response.Body.WriteAsync(chunk.Data.Memory, ctx.RequestAborted);
+                more = await call.ResponseStream.MoveNext(ctx.RequestAborted);
             }
+        }
+        catch (RpcException ex) when (ex.StatusCode != StatusCode.NotFound && !ctx.RequestAborted.IsCancellationRequested)
+        {
+            // Headers are already sent: the client gets a broken transfer and retries.
+            logger.LogWarning("Read of CID {Cid} from {Url} failed mid-stream ({Status}); aborting.", record.Cid, node.Url, ex.StatusCode);
+            node.MarkUnhealthy();
+            ctx.Abort();
+            return Results.Empty;
         }
         catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
         {
             // Node claims it doesn't have the blob — it's missing from this replica.
             logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair.", node.Url, record.Cid);
-            repairQueue.EnqueueMissingReplica(record, node.Url, store, nodes);
+            repairQueue.EnqueueMissingReplica(record, node.Id, store, nodes);
             ctx.Abort();
             return Results.Empty;
         }
@@ -163,7 +211,7 @@ internal static class ObjectEndpoints
                     "Aborting connection and flagging node {Url} for repair.",
                     bucket, key, record.Cid, actualHex, node.Url);
 
-                repairQueue.EnqueueCorruptReplica(record, node.Url, store, nodes);
+                repairQueue.EnqueueCorruptReplica(record, node.Id, store, nodes);
                 // Abort the underlying connection — the client receives a broken transfer and must retry.
                 ctx.Abort();
                 return Results.Empty;
@@ -183,7 +231,7 @@ internal static class ObjectEndpoints
         var record = store.GetObject(bucket, key);
         if (record is null) return S3Xml.NoSuchKey(key);
 
-        ctx.Response.Headers.ETag = $"\"{record.Cid}\"";
+        ctx.Response.Headers.ETag = $"\"{record.ETag}\"";
         ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
         ctx.Response.ContentType = record.ContentType;
         ctx.Response.ContentLength = record.SizeBytes;
@@ -197,6 +245,7 @@ internal static class ObjectEndpoints
         GatewayMetadataStore store, INodeRegistry nodes, ILogger<Program> logger)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
+        if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.Abort(bucket, key, ctx);
 
         var record = store.GetObject(bucket, key);
 
@@ -210,7 +259,7 @@ internal static class ObjectEndpoints
             foreach (var nodeUrl in record.NodeIds)
             {
                 var node = nodes.All.FirstOrDefault(n =>
-                    n.Url.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+                    n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
                 if (node is not null)
                     _ = DeleteFromNodeAsync(node, record.Cid, store, logger);
@@ -235,7 +284,7 @@ internal static class ObjectEndpoints
             logger.LogWarning(
                 "Failed to delete blob {Cid} from node {Url}: {Message}. Queued for retry.",
                 cid, node.Url, ex.Message);
-            store.EnqueueNodeDeletion(cid, node.Url);
+            store.EnqueueNodeDeletion(cid, node.Id);
         }
     }
 

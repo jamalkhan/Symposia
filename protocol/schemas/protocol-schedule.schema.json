@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jamalkhan/Symposia/protocol/schemas/protocol-schedule.schema.json",
+  "title": "Protocol activation schedule (GET /v1/protocol on the Blockchain Gateway)",
+  "description": "From the ProtocolActivations contract (#145). Times are Unix seconds. Properties may be added, never removed, retyped or made required (#146).",
+  "type": "object",
+  "required": ["configured", "now", "minProtocolVersion", "features"],
+  "properties": {
+    "configured": { "type": "boolean" },
+    "now": { "type": "integer", "description": "Chain time of the block read." },
+    "minProtocolVersion": {
+      "type": "object",
+      "required": ["effective", "pending", "pendingAt"],
+      "properties": {
+        "effective": { "type": "integer" },
+        "pending": { "type": "integer" },
+        "pendingAt": { "type": "integer" }
+      }
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "activatesAt"],
+        "properties": {
+          "name": { "type": "string" },
+          "activatesAt": { "type": "integer", "description": "0 = not scheduled (cancelled)." }
+        }
+      }
+    }
+  }
+}

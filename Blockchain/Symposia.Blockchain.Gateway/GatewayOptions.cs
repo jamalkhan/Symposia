@@ -13,6 +13,9 @@ public sealed class GatewayOptions
     public string NodeRegistryAddress { get; set; } = "";
     public string EpochRootRegistryAddress { get; set; } = "";
 
+    /// <summary>The ProtocolActivations contract (issue #145); empty = no activations on this network.</summary>
+    public string ProtocolActivationsAddress { get; set; } = "";
+
     /// <summary>
     /// Private key of the foundation-operated relayer account that pays gas
     /// for relayed transactions. The relayed node's identity comes from the

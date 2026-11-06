@@ -1,0 +1,26 @@
+{
+  "$comment": "The protocol feature registry (issue #145). Rules: docs/engineering/protocol-compatibility.md. Checked by tools/protocol-compat (issue #146). Never delete an entry; append to history.",
+  "release": "0.1.0",
+  "protocolVersion": 1,
+  "features": [
+    {
+      "name": "storage.grpc.plaintext",
+      "description": "Storage gRPC API over cleartext HTTP/2 on the node's gRPC port.",
+      "issue": 135,
+      "history": [{ "stage": "offered", "release": "0.1.0" }]
+    },
+    {
+      "name": "storage.grpc.tls",
+      "description": "Storage gRPC API over TLS with a self-signed certificate whose fingerprint the node key signs (StorageTlsProof v2); gateways pin it.",
+      "issue": 142,
+      "replaces": "storage.grpc.plaintext",
+      "history": [{ "stage": "offered", "release": "0.1.0" }]
+    },
+    {
+      "name": "storage.rpc.auth.v1",
+      "description": "Storage RPCs carry an EIP-191 node-identity token; the node accepts only registered network members.",
+      "issue": 140,
+      "history": [{ "stage": "offered", "release": "0.1.0" }]
+    }
+  ]
+}

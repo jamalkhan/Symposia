@@ -43,6 +43,11 @@ All errors from the platform-native API are returned as JSON with a consistent s
 | `InvalidObjectKey` | The object key contains invalid characters or exceeds length limits. | No |
 | `InvalidRange` | The `Range` header specifies a range outside the object's bounds. | No |
 | `InvalidPartOrder` | Multipart complete request lists parts in invalid order. | No |
+| `InvalidPart` | A part listed in a multipart complete request was not uploaded, or its ETag does not match. | No |
+| `InvalidPartSize` | A part other than the last is smaller than the 5 MB minimum. | No |
+| `TooManyParts` | A part number is outside 1–10,000, or the complete request lists more than 10,000 parts. | No |
+| `BadDigest` | A declared checksum (`Content-MD5`, `x-amz-checksum-*`, trailing checksum) does not match the uploaded bytes. | Yes — re-send the data |
+| `PayloadHashMismatch` | The signed payload hash (`x-amz-content-sha256`) does not match the body. | Yes — re-send the data |
 | `MissingContentLength` | A PUT request did not include a `Content-Length` header. | No |
 | `TooManyTags` | The request would result in more than 10 tags on the object. | No |
 | `InvalidTagKey` | A tag key uses reserved prefix `sys:` or contains invalid characters. | No |
@@ -95,6 +100,8 @@ All errors from the platform-native API are returned as JSON with a consistent s
 | `ObjectImmutable` | The object is within an immutability lock period and cannot be modified or deleted. | No — wait for lock to expire |
 | `LegalHoldActive` | A legal hold is preventing this deletion. | No — release the hold first |
 | `VersioningCannotDisable` | Versioning cannot be disabled once enabled; only suspended. | No |
+| `UploadAlreadyCompleted` | A multipart upload was already completed with a different part list. | No |
+| `OperationAborted` | A conflicting operation (e.g. a concurrent complete) is in progress on the multipart upload. | Yes |
 
 ### 412 Precondition Failed
 
@@ -178,6 +185,16 @@ When errors occur on the S3-compatible interface, they are returned in S3's XML 
 | `ObjectImmutable` | `ObjectLockConfigurationNotAllowedError` |
 | `RateLimitExceeded` | `SlowDown` |
 | `InternalError` | `InternalError` |
+| `UploadNotFound` | `NoSuchUpload` |
+| `InvalidPart` | `InvalidPart` |
+| `InvalidPartOrder` | `InvalidPartOrder` |
+| `InvalidPartSize` | `EntityTooSmall` |
+| `TooManyParts` | `InvalidArgument` (part number out of range) or `MalformedXML` (complete list too long) |
+| `UploadAlreadyCompleted` | `UploadAlreadyCompleted` (non-standard, 409) |
+| `OperationAborted` | `OperationAborted` |
+| `BadDigest` | `BadDigest` |
+| `PayloadHashMismatch` | `XAmzContentSHA256Mismatch` |
+| `SignatureMismatch` (chunk or trailer signature) | `SignatureDoesNotMatch` |
 
 ---
 
@@ -206,6 +223,15 @@ Azure errors are returned as JSON with the Azure error format:
 | `BucketAlreadyExists` | `ContainerAlreadyExists` |
 | `RateLimitExceeded` | `ServerBusy` |
 | `InternalError` | `InternalError` |
+| `UploadNotFound` | `BlobNotFound` (uncommitted block list) |
+| `InvalidPart` | `InvalidBlockList` |
+| `InvalidPartOrder` | `InvalidBlockList` |
+| `InvalidPartSize` | `InvalidBlockList` |
+| `TooManyParts` | `BlockCountExceedsLimit` |
+| `UploadAlreadyCompleted` | `InvalidBlockList` |
+| `OperationAborted` | `ServerBusy` |
+| `BadDigest` | `Md5Mismatch` |
+| `PayloadHashMismatch` | `Md5Mismatch` |
 
 ---
 

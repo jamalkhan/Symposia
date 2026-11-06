@@ -176,6 +176,14 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
         assertEq(rewards.reserveBalanceOf(nodeA), 0);
     }
 
+    /// @dev Seals are strictly sequential (code review fix), so epochs before a
+    /// test's first real epoch are sealed with no reporters.
+    function _sealEmptyBefore(uint256 epoch) internal {
+        for (uint256 e = rewards.nextSealableEpoch(); e < epoch; e++) {
+            rewards.sealEpoch(e, new address[](0));
+        }
+    }
+
     function test_newNode_firstEpochAtLaterIndex_judgedOnCurrentEpochAlone() public {
         // nodeB registers/verifies (in setUp) but only becomes eligible
         // starting at epoch 5 (its first-ever metric report), well after
@@ -183,6 +191,7 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
         // exemption, not be penalized for lacking an epoch-4 record.
         rewards.submitMetricReport(nodeB, 5, 100, 9_300, _signMetric(nodeB, 5, 100, 9_300));
         _warpToFinality(5);
+        _sealEmptyBefore(5);
         address[] memory single = new address[](1);
         single[0] = nodeB;
         rewards.sealEpoch(5, single);
@@ -194,6 +203,7 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
     function test_newNode_secondEpoch_revertsToFullTwoEpochTest() public {
         rewards.submitMetricReport(nodeB, 5, 100, 9_300, _signMetric(nodeB, 5, 100, 9_300));
         _warpToFinality(5);
+        _sealEmptyBefore(5);
         address[] memory single = new address[](1);
         single[0] = nodeB;
         rewards.sealEpoch(5, single);

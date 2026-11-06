@@ -1,0 +1,113 @@
+{
+  "structs": {
+    "Telemetry": [
+      {
+        "type": "uint256",
+        "name": "p99LatencyMs"
+      },
+      {
+        "type": "uint256",
+        "name": "restartCount"
+      },
+      {
+        "type": "uint256",
+        "name": "walLagSeconds"
+      },
+      {
+        "type": "uint256",
+        "name": "memoryPressureEvents"
+      },
+      {
+        "type": "uint256",
+        "name": "uptimeBps"
+      },
+      {
+        "type": "uint256",
+        "name": "hostedDatabaseCount"
+      },
+      {
+        "type": "uint256",
+        "name": "tierMedianP99LatencyMs"
+      },
+      {
+        "type": "uint256",
+        "name": "tierCohortSize"
+      },
+      {
+        "type": "bool",
+        "name": "reported"
+      }
+    ],
+    "ComputePenaltyState": [
+      {
+        "type": "Stage",
+        "name": "stage"
+      },
+      {
+        "type": "uint256",
+        "name": "troubleEpochCount"
+      },
+      {
+        "type": "uint256",
+        "name": "cleanEpochStreak"
+      },
+      {
+        "type": "bool",
+        "name": "placementHoldActive"
+      },
+      {
+        "type": "uint8",
+        "name": "placementHoldCleanEpoch"
+      },
+      {
+        "type": "uint256",
+        "name": "stage3EpisodeId"
+      },
+      {
+        "type": "uint256",
+        "name": "stage3EntryStake"
+      },
+      {
+        "type": "uint256",
+        "name": "stage3CumulativeSlashedBps"
+      },
+      {
+        "type": "uint256",
+        "name": "stage4Base"
+      },
+      {
+        "type": "TriggerType",
+        "name": "lastTriggerType"
+      },
+      {
+        "type": "uint256",
+        "name": "lastEvaluatedEpoch"
+      },
+      {
+        "type": "bool",
+        "name": "everEvaluated"
+      }
+    ],
+    "ComputePenaltyStorage": [
+      {
+        "type": "mapping(address => ComputePenaltyState)",
+        "name": "states"
+      },
+      {
+        "type": "mapping(address => mapping(uint256 => Telemetry))",
+        "name": "telemetry"
+      },
+      {
+        "type": "mapping(address => mapping(uint256 => bool))",
+        "name": "sealedEpoch"
+      },
+      {
+        "type": "mapping(address => mapping(uint256 => uint256))",
+        "name": "epochMultiplierBps"
+      }
+    ]
+  },
+  "locations": {
+    "COMPUTE_PENALTY_STORAGE_LOCATION": "keccak256(\"symposia.storage.ComputePenaltyStateMachine\")"
+  }
+}

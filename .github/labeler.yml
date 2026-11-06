@@ -1,0 +1,17 @@
+# Applied by .github/workflows/labeler.yml (issue #146). Keep in step with the protocol paths in CODEOWNERS.
+protocol-change:
+  - changed-files:
+      - any-glob-to-any-file:
+          - protocol/**
+          - BlobStorage/**/Protos/**
+          - Network/Symposia.Network.Node/NodeServices.cs
+          - Network/Symposia.Network.Node/ProtocolFeatures.cs
+          - Network/Symposia.Network.Node/ProtocolSchedule.cs
+          - Network/Symposia.Network.Node/StorageRpcAuth.cs
+          - Network/Symposia.Network.Node/StorageTlsProof.cs
+          - Network/Symposia.Network.Node/NodeIdentity.cs
+          - Network/Symposia.Network.Node/PeerHandshake*.cs
+          - Blockchain/bootstrap-chain/src/**
+          - BlobStorage/Symposia.BlobStorage.Gateway/Nodes/NetworkPolicy.cs
+          - BlobStorage/**/Metadata/**
+          - BlobStorage/Symposia.BlobStorage.StorageNode/Storage/ManifestStore.cs

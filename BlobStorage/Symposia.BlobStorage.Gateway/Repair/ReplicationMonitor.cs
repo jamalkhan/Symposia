@@ -24,12 +24,22 @@ namespace Symposia.BlobStorage.Gateway.Repair;
 public sealed class ReplicationMonitor : BackgroundService
 {
     private const int PageSize = 200;
+    private const int UnderReplicatedBatch = 500;
+
+    // Coalescing wake-up signal: a node coming online or a short write asks for a prompt
+    // under-replication sweep instead of waiting for the next full scan (issue #135).
+    private readonly System.Threading.Channels.Channel<bool> _sweepRequests =
+        System.Threading.Channels.Channel.CreateBounded<bool>(new System.Threading.Channels.BoundedChannelOptions(1)
+        {
+            FullMode = System.Threading.Channels.BoundedChannelFullMode.DropWrite,
+        });
 
     private readonly GatewayMetadataStore _store;
     private readonly INodeRegistry _nodes;
     private readonly RepairQueue _repairQueue;
     private readonly IOptions<GatewayOptions> _options;
     private readonly ILogger<ReplicationMonitor> _logger;
+    private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
     public ReplicationMonitor(
         GatewayMetadataStore store,
@@ -45,16 +55,31 @@ public sealed class ReplicationMonitor : BackgroundService
         _logger = logger;
     }
 
+    /// <summary>Asks for a prompt under-replication sweep; repeated requests coalesce.</summary>
+    public void RequestSweep() => _sweepRequests.Writer.TryWrite(true);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Delay initial scan to let nodes come online after startup.
-        await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
+        // Short settle so the first probes land, then catch anything left short before a restart.
+        // Kept brief: sweep requests (a node coming online) wait behind it.
+        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        RequestSweep();
 
+        var interval = TimeSpan.FromSeconds(_options.Value.ReplicationCheckIntervalSeconds);
+        var nextFullScan = DateTimeOffset.UtcNow + interval;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ScanAsync(stoppingToken);
+                if (DateTimeOffset.UtcNow >= nextFullScan)
+                {
+                    await ScanAsync(stoppingToken);
+                    nextFullScan = DateTimeOffset.UtcNow + interval;
+                }
+                else
+                {
+                    SweepUnderReplicated();
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -65,20 +90,82 @@ public sealed class ReplicationMonitor : BackgroundService
                 _logger.LogError(ex, "ReplicationMonitor scan encountered an unexpected error.");
             }
 
-            await Task.Delay(
-                TimeSpan.FromSeconds(_options.Value.ReplicationCheckIntervalSeconds), stoppingToken);
+            // Sleep until the next full scan or an early sweep request, whichever is first.
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            wait.CancelAfter(nextFullScan - DateTimeOffset.UtcNow is var left && left > TimeSpan.Zero ? left : TimeSpan.Zero);
+            try
+            {
+                await _sweepRequests.Reader.ReadAsync(wait.Token);
+            }
+            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+            {
+                // Full-scan time reached.
+            }
         }
+    }
+
+    /// <summary>
+    /// Queues a repair for every object recorded on fewer than MinCopiesPerObject nodes. Index-backed
+    /// (replica_count), so it's cheap enough to run whenever a node comes online or a write lands short.
+    /// </summary>
+    private void SweepUnderReplicated()
+    {
+        var minCopies = _options.Value.MinCopiesPerObject;
+        if (_nodes.All.Count(n => n.IsHealthy) <= 1)
+        {
+            _logger.LogDebug("ReplicationMonitor: no second healthy node to copy to yet; skipping sweep.");
+            return;
+        }
+
+        // Page through every repairable object in (copies, bucket, key) order; the queue drops CIDs
+        // already waiting, so repeated sweeps don't pile up duplicates.
+        int found = 0, queued = 0;
+        (int Count, string Bucket, string Key)? cursor = null;
+        while (true)
+        {
+            var page = _store.ListUnderReplicated(minCopies, UnderReplicatedBatch, cursor);
+            foreach (var record in page)
+            {
+                found++;
+                if (_repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.UnderReplicated)))
+                {
+                    queued++;
+                }
+            }
+
+            if (page.Count < UnderReplicatedBatch)
+            {
+                break;
+            }
+
+            cursor = (page[^1].NodeIds.Count, page[^1].Bucket, page[^1].Key);
+        }
+
+        if (found == 0)
+        {
+            _logger.LogDebug("ReplicationMonitor: no under-replicated objects.");
+            return;
+        }
+
+        _logger.LogInformation("ReplicationMonitor: {Found} under-replicated object(s), {Queued} newly queued for repair (need {Need} copies).",
+            found, queued, minCopies);
     }
 
     private async Task ScanAsync(CancellationToken ct)
     {
         var minCopies = _options.Value.MinCopiesPerObject;
-        var knownUrls = _nodes.All.Select(n => n.Url).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var knownUrls = _nodes.All.Select(n => n.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Pruning by absence is only safe when the node list is the operator's static config.
+        // Registry-sourced nodes live in memory and appear only once a sync reaches them, so after a
+        // restart (or with the chain gateway down) a node that holds copies may simply not be loaded
+        // yet; pruning then would erase the only record of its replicas (issue #135 review).
+        var prune = _options.Value.NodeSource == NodeSourceKind.Static;
 
         _logger.LogInformation("ReplicationMonitor: starting compliance scan.");
         int scanned = 0, repairQueued = 0;
 
-        var cursor = "";
+        (string Bucket, string Key)? cursor = null;
         while (true)
         {
             var page = _store.ListAllObjectsPaged(cursor, PageSize);
@@ -88,17 +175,17 @@ public sealed class ReplicationMonitor : BackgroundService
             {
                 ct.ThrowIfCancellationRequested();
 
-                // a. Prune node_ids for nodes that have left the registry.
-                var knownReplicas = record.NodeIds
-                    .Where(url => knownUrls.Contains(url))
-                    .ToList();
+                // a. Prune node_ids for nodes that have left the (static) node list.
+                var knownReplicas = prune
+                    ? record.NodeIds.Where(url => knownUrls.Contains(url)).ToList()
+                    : [.. record.NodeIds];
 
                 if (knownReplicas.Count != record.NodeIds.Count)
                 {
                     _logger.LogDebug(
                         "Pruned {Count} stale node_ids from {Bucket}/{Key}.",
                         record.NodeIds.Count - knownReplicas.Count, record.Bucket, record.Key);
-                    _store.UpdateNodeIds(record.Bucket, record.Key, knownReplicas);
+                    _store.UpdateNodeIds(record.Bucket, record.Key, record.Cid, knownReplicas);
                 }
 
                 // b+c. IntegrityChallenge each replica; remove any that fail.
@@ -106,12 +193,20 @@ public sealed class ReplicationMonitor : BackgroundService
                 foreach (var nodeUrl in knownReplicas)
                 {
                     var node = _nodes.All.FirstOrDefault(n =>
-                        n.Url.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+                        n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
+                    var grace = TimeSpan.FromSeconds(_options.Value.NodeGracePeriodSeconds);
                     if (node is null || !node.IsHealthy)
                     {
-                        // Offline but within grace period — keep it, don't challenge.
-                        healthyReplicas.Add(nodeUrl);
+                        // Offline within the grace period: still counts (don't challenge). Past it, or on a
+                        // node that left the node list (once this gateway has run long enough to have
+                        // loaded every node), it no longer counts, so repair adds a copy elsewhere (#137).
+                        var counts = node?.CountsAsReplica(grace) ?? DateTimeOffset.UtcNow - _startedAt < grace;
+                        if (counts)
+                        {
+                            healthyReplicas.Add(nodeUrl);
+                        }
+
                         continue;
                     }
 
@@ -144,7 +239,7 @@ public sealed class ReplicationMonitor : BackgroundService
             }
 
             if (page.Count < PageSize) break;
-            cursor = $"{page[^1].Bucket}/{page[^1].Key}";
+            cursor = (page[^1].Bucket, page[^1].Key);
 
             // Yield between pages to avoid saturating I/O during live traffic.
             await Task.Yield();

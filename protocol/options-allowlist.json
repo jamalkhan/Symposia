@@ -1,0 +1,9 @@
+{
+  "$comment": "Public bool Require* properties on *Options types that are allowed (#146). Peer-acceptance rules belong in NetworkPolicy, driven by on-chain activations (#145); list a property here only if it is node-local, with the reason. Changes need CODEOWNERS review.",
+  "allowed": [
+    {
+      "property": "Symposia.BlobStorage.StorageNode.StorageNodeOptions.RequireCallerAuth",
+      "reason": "Node-local: whether this storage node demands signed calls from registered members (#140). It is advertised as storage.rpc.auth.v1 and does not decide which peers a gateway accepts."
+    }
+  ]
+}

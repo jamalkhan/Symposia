@@ -59,7 +59,7 @@ public sealed class GcWorker : BackgroundService
 
     private async Task DrainBatchAsync(CancellationToken ct)
     {
-        var pending = _store.GetPendingDeletions(BatchSize);
+        var pending = _store.GetPendingDeletions(BatchSize, TimeSpan.FromSeconds(_options.Value.GcMinAgeSeconds));
         if (pending.Count == 0) return;
 
         _logger.LogInformation("GcWorker processing {Count} pending node deletions.", pending.Count);
@@ -77,7 +77,7 @@ public sealed class GcWorker : BackgroundService
             }
 
             var node = _nodes.All.FirstOrDefault(n =>
-                n.Url.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+                n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
             if (node is null || !node.IsHealthy)
             {

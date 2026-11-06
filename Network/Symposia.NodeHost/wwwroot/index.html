@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Symposia</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Symposia</h1>
+    <span id="node-address" class="mono"></span>
+    <nav id="nav" hidden>
+      <button data-view="diagnostics" class="tab active">Diagnostics</button>
+      <button data-view="network" class="tab">Network</button>
+      <button data-view="settings" class="tab">Settings</button>
+      <button id="logout" class="link">Log out</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-setup" class="card narrow" hidden>
+      <h2>Welcome</h2>
+      <p>Set an admin password for this node. You'll need it to view or change settings.</p>
+      <form id="setup-form">
+        <label>Password <input type="password" name="password" minlength="8" required autocomplete="new-password"></label>
+        <label>Confirm <input type="password" name="confirm" minlength="8" required autocomplete="new-password"></label>
+        <label id="setup-token" hidden>Setup token <small>(printed in the node host's console)</small> <input name="setupToken" autocomplete="off"></label>
+        <button type="submit">Set password</button>
+        <p class="error" data-error></p>
+      </form>
+    </section>
+
+    <section id="view-login" class="card narrow" hidden>
+      <h2>Log in</h2>
+      <form id="login-form">
+        <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+        <button type="submit">Log in</button>
+        <p class="error" data-error></p>
+      </form>
+    </section>
+
+    <section id="view-diagnostics" hidden>
+      <div id="stale" class="card notice" hidden></div>
+      <div id="unconfigured" class="card notice" hidden>
+        This node isn't connected to a network yet. Open <a href="#" data-goto="settings">Settings</a> to choose one.
+      </div>
+      <div class="grid">
+        <div class="card"><h2>Components</h2><table id="components"></table></div>
+        <div class="card"><h2>Network</h2><dl id="network"></dl></div>
+        <div class="card"><h2>On-chain registration</h2><dl id="registration"></dl></div>
+        <div class="card" id="blobgateway-card" hidden><h2>Blob gateway (S3)</h2><dl id="blobgateway"></dl></div>
+      </div>
+      <div class="card"><h2>Peers <small>(handshake results)</small></h2><table id="peers"></table></div>
+      <div class="card"><h2>Registry members</h2><table id="members"></table></div>
+      <div class="card"><h2>Recent log</h2><pre id="logs" class="logs"></pre></div>
+    </section>
+
+    <section id="view-network" hidden>
+      <div id="network-error" class="card notice" hidden></div>
+      <div class="card">
+        <h2>Nodes on this network</h2>
+        <table id="network-nodes"></table>
+        <p class="hint">Storage: green healthy, yellow under 40% free, red 20% free or less. Compute: green healthy, yellow over 20% CPU, red over 50%.
+          Gateway: green when it reaches enough storage nodes for every object to have its copies, yellow while short or repairing, red when down. Grey means the role isn't configured or the node couldn't be reached. Hover a light for details.</p>
+      </div>
+      <div class="card">
+        <h2>Protocol activations</h2>
+        <div id="network-protocol"></div>
+        <p class="hint">Gateways stop using storage nodes that don't advertise a feature once its activation time passes. Upgrade flagged nodes before then.</p>
+      </div>
+    </section>
+
+    <section id="view-settings" hidden>
+      <form id="settings-form">
+        <div class="card">
+          <h2>Network</h2>
+          <div id="join-suggestion" class="notice" hidden>
+            Another node host is already running a local network on this machine.
+            <button type="button" id="use-join">Join it</button>
+          </div>
+          <fieldset class="modes">
+            <label><input type="radio" name="Network.Mode" value="LocalDev"> <b>Local dev network</b> — start a local chain (anvil) and gateway on this machine</label>
+            <label><input type="radio" name="Network.Mode" value="Join"> <b>Join a network</b> — connect to an existing network's gateway</label>
+            <label><input type="radio" name="Network.Mode" value="RemoteRpc"> <b>Run a gateway for a remote chain</b> — foundation hosts (Base Sepolia, Symposia L3)</label>
+          </fieldset>
+          <div data-mode="Join"><label>Gateway URL <input name="Network.GatewayUrl" placeholder="http://127.0.0.1:8080"></label></div>
+          <div data-mode="LocalDev">
+            <label>Anvil port <input type="number" name="Network.AnvilPort"></label>
+            <label>Gateway port <input type="number" name="Network.GatewayPort"></label>
+            <label>Foundry bin directory <input name="Network.FoundryBin" placeholder="~/.foundry/bin"></label>
+          </div>
+          <div data-mode="RemoteRpc">
+            <label>Chain preset <select name="Network.Preset" id="presets"></select></label>
+            <label>RPC URL override <input name="Network.RpcUrl"></label>
+            <label>Chain ID override <input type="number" name="Network.ChainId"></label>
+            <label>NodeRegistry override <input name="Network.NodeRegistryAddress"></label>
+            <label>EpochRootRegistry override <input name="Network.EpochRootRegistryAddress"></label>
+            <label>Gateway port <input type="number" name="Network.GatewayPort" data-dup></label>
+            <label>Relayer private key <input type="password" name="relayerKey" autocomplete="off" placeholder="not set"></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2><label><input type="checkbox" name="Storage.Enabled"> Storage role</label></h2>
+          <label>Port <input type="number" name="Storage.Port"></label>
+          <label>Advertised endpoint <input name="Storage.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt; (set your LAN/public address for other machines)"></label>
+          <p class="hint" data-lan hidden>Other machines can't reach 127.0.0.1. <button type="button" data-use-lan="Storage">Use this machine's LAN address</button></p>
+          <label>gRPC TLS port <small>(the blob gateway stores data through this; keep it LAN-only)</small> <input type="number" name="Storage.GrpcTlsPort"></label>
+          <label class="inline"><input type="checkbox" name="Storage.PlaintextGrpc"> Also serve gRPC in cleartext <small>(for gateways on the previous release; turn off once TLS is activated on chain)</small></label>
+          <label>Cleartext gRPC port <input type="number" name="Storage.GrpcPort"></label>
+          <label>Capacity (GB) <input type="number" name="Storage.MaxCapacityGb" min="1"></label>
+        </div>
+
+        <div class="card">
+          <h2><label><input type="checkbox" name="Compute.Enabled"> Compute role</label></h2>
+          <label>Port <input type="number" name="Compute.Port"></label>
+          <label>Advertised endpoint <input name="Compute.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt;"></label>
+          <label class="inline"><input type="checkbox" name="Compute.NetworkingOnly"> Networking only (stub Neon binaries, for testing)</label>
+          <label>pageserver <input name="Compute.PageserverPath"></label>
+          <label>safekeeper <input name="Compute.SafekeeperPath"></label>
+          <label>postgres <input name="Compute.PostgresPath"></label>
+        </div>
+
+        <div class="card">
+          <h2><label><input type="checkbox" name="BlobGateway.Enabled"> Blob gateway <small>(S3-compatible)</small></label></h2>
+          <p class="hint">Accepts uploads with AWS-style access keys and stores them on this network's storage nodes.</p>
+          <label>Port <input type="number" name="BlobGateway.Port"></label>
+          <label>Region <input name="BlobGateway.Region"></label>
+          <label>Access key ID <input name="BlobGateway.AccessKeyId" autocomplete="off"></label>
+          <label>Secret access key <input type="password" name="blobGatewaySecret" autocomplete="off" placeholder="not set"></label>
+          <p><button type="button" id="generate-keys">Generate a new key pair</button> <span class="hint" id="generated-hint"></span></p>
+          <label>Write quorum <small>(copies needed before an upload succeeds)</small> <input type="number" name="BlobGateway.WriteQuorum" min="1"></label>
+          <label>Minimum copies <small>(missing copies are repaired in the background)</small> <input type="number" name="BlobGateway.MinCopies" min="1"></label>
+        </div>
+
+        <div class="card">
+          <h2>Discovery</h2>
+          <label>Interval (seconds) <input type="number" name="Discovery.IntervalSeconds" min="1"></label>
+          <label>Seed peers (comma separated) <input name="Discovery.SeedPeers"></label>
+        </div>
+
+        <div class="card">
+          <h2>Logging</h2>
+          <p class="hint">Each service writes its own daily log files under <code>&lt;data dir&gt;/logs/&lt;service&gt;/</code> (10 MB per file, newest 14 kept). Changes apply immediately.</p>
+          <label>Node <small>(chain, gateway, registration, discovery, this UI)</small> <select name="Logging.Node" data-loglevel></select></label>
+          <label>Storage <select name="Logging.Storage" data-loglevel></select></label>
+          <label>Compute <select name="Logging.Compute" data-loglevel></select></label>
+        </div>
+
+        <div class="actions">
+          <button type="submit">Save and apply</button>
+          <span id="save-result"></span>
+        </div>
+        <p class="hint">Fields set by <code>SYMPOSIA__…</code> environment variables are locked.</p>
+      </form>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

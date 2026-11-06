@@ -1,0 +1,23 @@
+{
+  "base-sepolia": {
+    "description": "Base Sepolia testnet (stopgap testnet until the Symposia L3 testnet exists; see #48/#58)",
+    "rpcUrl": "https://sepolia.base.org",
+    "chainId": 84532,
+    "nodeRegistryAddress": "",
+    "epochRootRegistryAddress": ""
+  },
+  "symposia-l3-testnet": {
+    "description": "Symposia OP Stack L3 testnet settling to Base Sepolia (pending #48)",
+    "rpcUrl": "",
+    "chainId": 0,
+    "nodeRegistryAddress": "",
+    "epochRootRegistryAddress": ""
+  },
+  "symposia-l3-mainnet": {
+    "description": "Symposia OP Stack L3 settling to Base mainnet (pending #48/#49)",
+    "rpcUrl": "",
+    "chainId": 0,
+    "nodeRegistryAddress": "",
+    "epochRootRegistryAddress": ""
+  }
+}

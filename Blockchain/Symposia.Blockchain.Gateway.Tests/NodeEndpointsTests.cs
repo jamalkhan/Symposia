@@ -34,10 +34,11 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
     public async Task Register_FreshNode_Succeeds()
     {
         var (address, privateKey) = NewNode();
-        var signature = Eip712TestSigner.SignRegister(privateKey, address, _fixture.NodeRegistryAddress, ChainFixture.ChainId);
+        var signature = Eip712TestSigner.SignRegister(
+            privateKey, address, Endpoint, 0, _fixture.NodeRegistryAddress, ChainFixture.ChainId);
 
         var resp = await _client.PostAsJsonAsync("/v1/nodes/register",
-            new { node = address, signature = "0x" + Convert.ToHexString(signature) });
+            new { node = address, endpoint = Endpoint, nonce = 0, signature = "0x" + Convert.ToHexString(signature) });
 
         resp.EnsureSuccessStatusCode();
 
@@ -51,10 +52,10 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
     {
         var (address, privateKey) = NewNode();
         var signature = "0x" + Convert.ToHexString(
-            Eip712TestSigner.SignRegister(privateKey, address, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
+            Eip712TestSigner.SignRegister(privateKey, address, Endpoint, 0, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
 
-        var first = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, signature });
-        var second = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, signature });
+        var first = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, endpoint = Endpoint, nonce = 0, signature });
+        var second = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, endpoint = Endpoint, nonce = 0, signature });
 
         first.EnsureSuccessStatusCode();
         second.EnsureSuccessStatusCode();
@@ -168,11 +169,95 @@ public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
     }
 
-    private async Task RegisterAsync(string address, string privateKey)
+    // #129 FR-B5 / TC-6: registered nodes are listed with their endpoints.
+    [Fact]
+    public async Task ListNodes_IncludesRegisteredNodeWithEndpoint()
     {
-        var signature = "0x" + Convert.ToHexString(
-            Eip712TestSigner.SignRegister(privateKey, address, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
-        var resp = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, signature });
+        var (address, privateKey) = NewNode();
+        await RegisterAsync(address, privateKey, "http://10.1.2.3:5180");
+
+        var nodes = await _client.GetFromJsonAsync<JsonElement>("/v1/nodes");
+
+        Assert.Contains(nodes.EnumerateArray(), n =>
+            string.Equals(n.GetProperty("node").GetString(), address, StringComparison.OrdinalIgnoreCase) &&
+            n.GetProperty("endpoint").GetString() == "http://10.1.2.3:5180");
+    }
+
+    // #129 TC-9: an endpoint change is relayed, not short-circuited as a duplicate.
+    [Fact]
+    public async Task Register_EndpointChange_IsRelayedAndUpdatesNonce()
+    {
+        var (address, privateKey) = NewNode();
+        await RegisterAsync(address, privateKey, "http://10.0.0.1:5180");
+        await RegisterAsync(address, privateKey, "http://10.0.0.2:5180", nonce: 1);
+
+        var status = await _client.GetFromJsonAsync<JsonElement>($"/v1/nodes/{address}");
+        Assert.Equal("http://10.0.0.2:5180", status.GetProperty("endpoint").GetString());
+        Assert.Equal(2UL, status.GetProperty("nonce").GetUInt64());
+    }
+
+    // #129 Gherkin: an endpoint not signed by the node's key is rejected.
+    [Fact]
+    public async Task Register_EndpointNotSignedByNode_IsRejected()
+    {
+        var (address, privateKey) = NewNode();
+        var signature = "0x" + Convert.ToHexString(Eip712TestSigner.SignRegister(
+            privateKey, address, "http://honest:5180", 0, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
+
+        var resp = await _client.PostAsJsonAsync("/v1/nodes/register",
+            new { node = address, endpoint = "http://attacker:5180", nonce = 0, signature });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    // #133: a node can join knowing only the gateway URL.
+    [Fact]
+    public async Task Network_DescribesChainAndContracts()
+    {
+        var network = await _client.GetFromJsonAsync<JsonElement>("/v1/network");
+
+        Assert.Equal(ChainFixture.ChainId, network.GetProperty("chainId").GetUInt64());
+        Assert.Equal(_fixture.NodeRegistryAddress, network.GetProperty("nodeRegistryAddress").GetString(), ignoreCase: true);
+        Assert.Equal(_fixture.EpochRootRegistryAddress, network.GetProperty("epochRootRegistryAddress").GetString(), ignoreCase: true);
+        Assert.Equal(_fixture.ProtocolActivationsAddress, network.GetProperty("protocolActivationsAddress").GetString(), ignoreCase: true);
+    }
+
+    // #145 AC6 / TC-13: the schedule lists features with their activation times and the minimum version.
+    [Fact]
+    public async Task Protocol_ListsScheduledActivations()
+    {
+        var web3 = new Nethereum.Web3.Web3(new Nethereum.Web3.Accounts.Account(_fixture.RelayerPrivateKey, ChainFixture.ChainId), _fixture.RpcUrl);
+        var before = await _client.GetFromJsonAsync<JsonElement>("/v1/protocol");
+        var at = before.GetProperty("now").GetUInt64() + 3600;
+        var name = "test.feature." + Guid.NewGuid().ToString("N")[..8];
+
+        await web3.Eth.GetContractTransactionHandler<ScheduleFunction>().SendRequestAndWaitForReceiptAsync(
+            _fixture.ProtocolActivationsAddress, new ScheduleFunction { Name = name, ActivatesAt = at });
+
+        var schedule = await _client.GetFromJsonAsync<JsonElement>("/v1/protocol");
+        Assert.True(schedule.GetProperty("configured").GetBoolean());
+        var feature = schedule.GetProperty("features").EnumerateArray().Single(f => f.GetProperty("name").GetString() == name);
+        Assert.Equal(at, feature.GetProperty("activatesAt").GetUInt64());
+        Assert.Equal(0u, schedule.GetProperty("minProtocolVersion").GetProperty("effective").GetUInt32());
+    }
+
+    [Nethereum.ABI.FunctionEncoding.Attributes.Function("schedule")]
+    private sealed class ScheduleFunction : Nethereum.Contracts.FunctionMessage
+    {
+        [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("string", "name", 1)]
+        public string Name { get; set; } = "";
+
+        [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("uint64", "activatesAt", 2)]
+        public ulong ActivatesAt { get; set; }
+    }
+
+    private const string Endpoint = "http://127.0.0.1:5180";
+
+    private async Task RegisterAsync(string address, string privateKey, string endpoint = Endpoint, ulong nonce = 0)
+    {
+        var signature = "0x" + Convert.ToHexString(Eip712TestSigner.SignRegister(
+            privateKey, address, endpoint, nonce, _fixture.NodeRegistryAddress, ChainFixture.ChainId));
+        var resp = await _client.PostAsJsonAsync("/v1/nodes/register", new { node = address, endpoint, nonce, signature });
         resp.EnsureSuccessStatusCode();
     }
 
