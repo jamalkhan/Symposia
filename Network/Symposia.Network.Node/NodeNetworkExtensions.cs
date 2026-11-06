@@ -76,6 +76,11 @@ public static class NodeNetworkExtensions
         app.EnsureNodeIdentity();
         app.UseRateLimiter();
         app.MapNodeNetworkEndpoints();
+        if (app.Services.GetService<Telemetry.Committee.TelemetryGossipNode>() is not null)
+        {
+            Telemetry.Committee.TelemetryGossipEndpoints.MapTelemetryGossip(app); // #158 telemetry gossip
+        }
+
         return app;
     }
 

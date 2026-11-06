@@ -40,13 +40,14 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
     }
 
     /// @notice All other factors left at 0 (unreported by anyone in the
-    /// epoch => in-epoch max is 0 => those factors contribute 0 to every
-    /// node's weighted score, per FR2.2), isolating the observable score/
-    /// payout ratio to purely the retrieval-speed factor's 0.30 weight so
-    /// the spec's worked 100/50/25 -> 1.0/0.5/0.25 example is directly
-    /// verifiable end-to-end through the payout amounts.
-    function _factorValues(uint256 retrievalSpeed) internal pure returns (uint256[7] memory v) {
-        v[0] = retrievalSpeed;
+    /// epoch => no best value => those factors contribute 0 to every node's
+    /// weighted score), isolating the observable payout ratio to one
+    /// higher-is-better factor (I/O throughput, index 3 of the #76 Storage
+    /// table) so the spec's worked 100/50/25 -> 1.0/0.5/0.25 example is
+    /// directly verifiable end-to-end through the payout amounts.
+    function _factorValues(uint256 value) internal pure returns (uint256[] memory v) {
+        v = new uint256[](7);
+        v[3] = value;
     }
 
     // --- FR2: per-factor normalization against best-in-epoch ---
@@ -115,7 +116,7 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
 
     function test_factorReport_afterFinalityWindow_reverts() public {
         _warpToFinality(0);
-        uint256[7] memory v = _factorValues(100);
+        uint256[] memory v = _factorValues(100);
         vm.expectRevert();
         rewards.submitFactorMetrics(nodeA, 0, v, 9_500, _signFactorMetrics(nodeA, 0, v, 9_500));
     }
@@ -189,6 +190,7 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
         // starting at epoch 5 (its first-ever metric report), well after
         // epoch index 0. It must still get the "no preceding record"
         // exemption, not be penalized for lacking an epoch-4 record.
+        vm.warp(epochs.epochStart(5)); // reports are only accepted once their epoch has started (#72)
         rewards.submitMetricReport(nodeB, 5, 100, 9_300, _signMetric(nodeB, 5, 100, 9_300));
         _warpToFinality(5);
         _sealEmptyBefore(5);
@@ -201,6 +203,7 @@ contract EpochRewardEngineTest is CoreProtocolTestBase {
     }
 
     function test_newNode_secondEpoch_revertsToFullTwoEpochTest() public {
+        vm.warp(epochs.epochStart(5)); // reports are only accepted once their epoch has started (#72)
         rewards.submitMetricReport(nodeB, 5, 100, 9_300, _signMetric(nodeB, 5, 100, 9_300));
         _warpToFinality(5);
         _sealEmptyBefore(5);

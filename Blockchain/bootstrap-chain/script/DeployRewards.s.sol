@@ -13,12 +13,14 @@ import {RewardDistributor} from "../src/RewardDistributor.sol";
 import {ReliabilityRegistry} from "../src/ReliabilityRegistry.sol";
 import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.sol";
 import {NetworkRewardsEmission} from "../src/NetworkRewardsEmission.sol";
+import {EpochController} from "../src/EpochController.sol";
+import {ScoringWeights} from "../src/ScoringWeights.sol";
 import {IEpochClock} from "../src/interfaces/IEpochClock.sol";
 import {IFeeTreasury} from "../src/interfaces/IFeeTreasury.sol";
 import {ISYMMinter} from "../src/interfaces/ISYMMinter.sol";
 
 /// @notice Deploys and wires the node-rewards stack (issues #70, #73, #75, #79, #80):
-/// SYM token, staking registry, slashing, reward distributor, reliability, telemetry
+/// epoch controller (#72), SYM token, staking registry, slashing, reward distributor, reliability, telemetry
 /// checkpoints and the emission schedule. Separate from Deploy.s.sol, which stays the
 /// Phase 0 set the Gateway and NodeHost LocalDev depend on.
 ///
@@ -32,6 +34,8 @@ import {ISYMMinter} from "../src/interfaces/ISYMMinter.sol";
 /// TELEMETRY_THRESHOLD, DEV_MINT_ALLOWANCE (wei the deployer may mint for staking;
 /// default 10M SYM on chain 31337, 0 elsewhere), DEPLOYMENT_OUT (addresses JSON path).
 contract DeployRewards is Script {
+    string internal constant ECONOMICS_PATH = "../../protocol/economics.json";
+
     struct Roles {
         address timelock;
         address metricSigner;
@@ -45,6 +49,8 @@ contract DeployRewards is Script {
 
     struct Deployment {
         MockProtocolConfig config;
+        EpochController epochs;
+        ScoringWeights weights;
         SYMToken token;
         StakingNodeRegistry registry;
         SlashingController slashing;
@@ -73,9 +79,12 @@ contract DeployRewards is Script {
     function deploy(address deployer, Roles memory roles) public returns (Deployment memory d) {
         d.config = new MockProtocolConfig(deployer);
         IProtocolConfig cfg = d.config;
+        // 24h epochs (NetworkRewardsEmission assumes 365/year) with the spec's 15-minute finality window.
+        d.epochs = new EpochController(cfg, uint64(block.timestamp), 1 days, 15 minutes);
 
         d.registry = StakingNodeRegistry(_proxy(address(new StakingNodeRegistry()), abi.encodeCall(StakingNodeRegistry.initialize, (cfg))));
         d.slashing = SlashingController(_proxy(address(new SlashingController()), abi.encodeCall(SlashingController.initialize, (cfg))));
+        d.weights = ScoringWeights(_proxy(address(new ScoringWeights()), abi.encodeCall(ScoringWeights.initialize, (cfg))));
         d.rewards = RewardDistributor(_proxy(address(new RewardDistributor()), abi.encodeCall(RewardDistributor.initialize, (cfg))));
         d.reliability = ReliabilityRegistry(_proxy(address(new ReliabilityRegistry()), abi.encodeCall(ReliabilityRegistry.initialize, (cfg))));
         d.telemetry = TelemetryCheckpointRegistry(
@@ -91,7 +100,7 @@ contract DeployRewards is Script {
         address tokenImpl = address(new SYMToken());
         address predictedToken = vm.computeCreateAddress(deployer, vm.getNonce(deployer) + 1);
         d.emission = new NetworkRewardsEmission(
-            ISYMMinter(predictedToken), address(d.rewards), IEpochClock(address(d.rewards)), IFeeTreasury(address(0)), roles.timelock
+            ISYMMinter(predictedToken), address(d.rewards), IEpochClock(address(d.epochs)), IFeeTreasury(address(0)), roles.timelock
         );
         d.token = SYMToken(_proxy(tokenImpl, _tokenInit(roles, address(d.emission), deployer)));
         if (address(d.token) != predictedToken) revert PredictedAddressMismatch(predictedToken, address(d.token));
@@ -118,24 +127,35 @@ contract DeployRewards is Script {
         cfg.setAddress(ConfigKeys.REGISTRY_ADDRESS, address(d.registry));
         cfg.setAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER, address(d.slashing));
         cfg.setAddress(ConfigKeys.REGISTRY_VERIFIER_ROLE, roles.verifier);
-        cfg.setUint(ConfigKeys.EPOCH_LENGTH, 1 days); // NetworkRewardsEmission assumes 365 epochs/year
-        cfg.setUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP, block.timestamp);
+        cfg.setAddress(ConfigKeys.EPOCH_CONTROLLER, address(d.epochs));
         cfg.setUint(ConfigKeys.REGISTRY_UNSTAKE_COOLDOWN, 21 days);
-        cfg.setUint(ConfigKeys.registryStakeBase(0), 100e18); // Storage: 100 SYM + 1 SYM/TB
-        cfg.setUint(ConfigKeys.registryStakePerUnit(0), 1e18);
+        // Node Service stakes, pool weights and emission shares come from protocol/economics.json (#163),
+        // the same file the NodeHost earnings catalog is checked against.
+        string memory economics = vm.readFile(ECONOMICS_PATH);
+        string[3] memory services = ["storage", "verifier", "blobGateway"];
+        for (uint256 i; i < services.length; i++) {
+            string memory k = string.concat(".services.", services[i]);
+            uint8 id = uint8(vm.parseJsonUint(economics, string.concat(k, ".id")));
+            cfg.setUint(ConfigKeys.registryStakeBase(id), vm.parseJsonUint(economics, string.concat(k, ".stakeBase")) * 1e18);
+            cfg.setUint(ConfigKeys.registryStakePerUnit(id), vm.parseJsonUint(economics, string.concat(k, ".stakePerUnit")) * 1e18);
+            uint256 weight = vm.parseJsonUint(economics, string.concat(k, ".typeWeightBps"));
+            if (weight > 0) cfg.setUint(ConfigKeys.rewardTypeWeight(id), weight);
+        }
 
         // Rewards (#73, #80).
         cfg.setAddress(ConfigKeys.REWARD_EMISSION_SOURCE, address(d.emission));
         cfg.setAddress(ConfigKeys.REWARD_RELIABILITY_REGISTRY, address(d.reliability));
+        // #76: score storage nodes from finalized telemetry; fall back to signed reports after 24h.
+        cfg.setAddress(ConfigKeys.REWARD_SCORING_WEIGHTS, address(d.weights));
+        cfg.setAddress(ConfigKeys.REWARD_TELEMETRY_REGISTRY, address(d.telemetry));
+        cfg.setUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT, 24 hours);
         cfg.setAddress(ConfigKeys.REWARD_METRIC_SIGNER, roles.metricSigner);
-        cfg.setUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS, 9_200);
-        cfg.setUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS, 800);
-        cfg.setUint(ConfigKeys.rewardTypeWeight(0), 10_000); // Storage is the only paid type so far
+        cfg.setUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS, vm.parseJsonUint(economics, ".emission.capacityShareBps"));
+        cfg.setUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS, vm.parseJsonUint(economics, ".emission.verifierShareBps"));
         cfg.setUint(ConfigKeys.REWARD_MULT_MIN, 0);
         cfg.setUint(ConfigKeys.REWARD_MULT_MAX, 10_000);
         cfg.setUint(ConfigKeys.REWARD_HEARTBEAT_THRESHOLD_BPS, 9_000);
         cfg.setUint(ConfigKeys.REWARD_RESERVE_SWEEP_EPOCHS, 2);
-        cfg.setUint(ConfigKeys.REWARD_FINALITY_WINDOW, 1 hours);
         cfg.setUint(ConfigKeys.REWARD_RELIABILITY_BONUS_THRESHOLD_BPS, 9_800);
         cfg.setUint(ConfigKeys.REWARD_RELIABILITY_BONUS_BPS, 10_500);
         cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 0), 3_000); // retrieval speed
@@ -160,7 +180,9 @@ contract DeployRewards is Script {
 
         // Telemetry checkpoints (#75).
         cfg.setUint(ConfigKeys.TELEMETRY_CHECKPOINTS_PER_EPOCH, 24);
-        cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, 30 minutes);
+        cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, 20 minutes);
+        cfg.setUint(ConfigKeys.TELEMETRY_COMMIT_WINDOW, 30 minutes); // checkpoints until finality + 30 min (#158)
+        cfg.setUint(ConfigKeys.TELEMETRY_RECORDS_PER_TX, 200);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_UPTIME_BPS, 1_000);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_LATENCY_BPS, 5_000);
 
@@ -198,6 +220,8 @@ contract DeployRewards is Script {
 
     function _log(Deployment memory d) internal pure {
         console.log("ProtocolConfig:", address(d.config));
+        console.log("EpochController:", address(d.epochs));
+        console.log("ScoringWeights:", address(d.weights));
         console.log("SYMToken:", address(d.token));
         console.log("StakingNodeRegistry:", address(d.registry));
         console.log("SlashingController:", address(d.slashing));
@@ -211,6 +235,8 @@ contract DeployRewards is Script {
         string memory k = "rewards";
         vm.serializeUint(k, "chainId", block.chainid);
         vm.serializeAddress(k, "ProtocolConfig", address(d.config));
+        vm.serializeAddress(k, "EpochController", address(d.epochs));
+        vm.serializeAddress(k, "ScoringWeights", address(d.weights));
         vm.serializeAddress(k, "SYMToken", address(d.token));
         vm.serializeAddress(k, "StakingNodeRegistry", address(d.registry));
         vm.serializeAddress(k, "SlashingController", address(d.slashing));

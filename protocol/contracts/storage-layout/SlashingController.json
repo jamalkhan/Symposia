@@ -26,6 +26,10 @@
       {
         "type": "mapping(address => NodePenaltyState)",
         "name": "states"
+      },
+      {
+        "type": "mapping(address => mapping(uint8 => NodePenaltyState))",
+        "name": "serviceStates"
       }
     ]
   },

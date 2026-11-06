@@ -24,6 +24,18 @@ public sealed class TelemetryOptions
     public int CheckpointsPerEpoch { get; set; } = 24;
 
     public TelemetrySchedule Schedule => new(GenesisUnixSeconds, EpochSeconds, CadenceSeconds, CheckpointsPerEpoch);
+
+    /// <summary>Telemetry contracts (#158). Setting <c>TelemetryRegistryAddress</c> turns on HTTP gossip, the self-checkpoint fallback and committee duties.</summary>
+    public Committee.TelemetryChainOptions Chain { get; set; } = new();
+
+    public Committee.TelemetryGossipOptions Gossip { get; set; } = new();
+
+    public Committee.TelemetryCommitteeOptions Committee { get; set; } = new();
+
+    /// <summary>Blob store for committee batches; only committee members need credentials.</summary>
+    public Committee.TelemetryBlobOptions Blobs { get; set; } = new();
+
+    public bool NetworkEnabled => !string.IsNullOrEmpty(Chain.TelemetryRegistryAddress) && !string.IsNullOrEmpty(Chain.RpcUrl);
 }
 
 /// <summary>Current raw readings for a heartbeat. Each node role supplies its own.</summary>
@@ -60,7 +72,8 @@ public sealed class HeartbeatEmitter(
     IHeartbeatMetricsSource metrics,
     IOptions<TelemetryOptions> options,
     TimeProvider time,
-    ILogger<HeartbeatEmitter> logger) : BackgroundService
+    ILogger<HeartbeatEmitter> logger,
+    TelemetryScheduleSource? schedules = null) : BackgroundService
 {
     private uint? _lastSlot;
     private ulong? _lastEpoch;
@@ -68,7 +81,7 @@ public sealed class HeartbeatEmitter(
     /// <summary>Builds, signs and publishes the heartbeat for the slot containing now; null if already sent.</summary>
     public async Task<SignedTelemetry<HeartbeatSample>?> EmitOnceAsync(CancellationToken ct)
     {
-        var schedule = options.Value.Schedule;
+        var schedule = schedules?.Current ?? options.Value.Schedule;
         var now = time.GetUtcNow().ToUnixTimeSeconds();
         if (now < schedule.GenesisUnixSeconds)
         {
@@ -110,7 +123,7 @@ public sealed class HeartbeatEmitter(
             }
 
             var now = time.GetUtcNow().ToUnixTimeSeconds();
-            var offset = (now - options.Value.GenesisUnixSeconds) % cadence;
+            var offset = (now - (schedules?.Current ?? options.Value.Schedule).GenesisUnixSeconds) % cadence;
             var wait = TimeSpan.FromSeconds(offset < 0 ? -offset : cadence - offset);
             await Task.Delay(wait, time, stoppingToken).ConfigureAwait(false);
         }
@@ -134,7 +147,13 @@ public static class TelemetryServiceExtensions
         }
 
         services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton(sp => new TelemetryScheduleSource(sp.GetRequiredService<IOptions<TelemetryOptions>>().Value.Schedule));
         services.TryAddSingleton<IHeartbeatMetricsSource, LivenessOnlyMetricsSource>();
+        if (section.GetSection("Chain").Get<Committee.TelemetryChainOptions>() is { TelemetryRegistryAddress.Length: > 0, RpcUrl.Length: > 0 })
+        {
+            Committee.TelemetryNetworkExtensions.AddTelemetryNetwork(services, section);
+        }
+
         services.TryAddSingleton<ITelemetryGossip>(sp =>
         {
             var network = sp.GetRequiredService<IOptions<NodeNetworkOptions>>().Value;

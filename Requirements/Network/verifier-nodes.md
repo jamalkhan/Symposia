@@ -4,7 +4,7 @@
 
 Verifier nodes are the trust anchors of the network. They independently measure the performance and geographic location of other nodes, produce signed attestations that are recorded on-chain, and ensure that self-reported metrics cannot be fabricated. Without verifiers, every node's claims about its tier, region, and uptime are unverifiable self-reports. With verifiers, those claims must be consistent with what independent third parties observe.
 
-Verifier nodes are a distinct operational role within the network. Not every storage node is a verifier, and not every verifier must run storage. The roles may be combined, but their responsibilities and reward structures are separate.
+Verifier is a **Node Service** (#159). A node may run Verifier alone or alongside Storage or other services; each service is staked, scored, penalized and paid separately, so combining them never mixes their stake or rewards.
 
 ---
 
@@ -96,15 +96,17 @@ The minimum verifier quorum scales with the size of the verifier pool to prevent
 
 ## Verifier Compensation
 
-Verifiers are compensated separately from their storage node rewards:
+Verifiers are compensated separately from any other Node Service the node runs (#81, superseding the earlier per-action fee draft):
 
-- Each completed, on-chain-confirmed verification action earns a **verification fee** drawn from a dedicated verification fee pool. The fee pool is funded by a portion of each epoch's emission (a governance parameter, initially 2% of epoch emission).
-- Verification fees are proportional to the type of work: region verification (more complex) pays more than a periodic heartbeat check or a simple proof-of-possession challenge.
+- The Verifier service is paid from the **8% verifier slice** of each epoch's emission ([tokenomics-mvp §5.5](../Blockchain/tokenomics-mvp.md#55-who-receives-epoch-emission)), split as `slice × score / Σ scores` across eligible verifiers.
+- **Score:** uptime **40%**, coverage (assigned checks completed) **30%**, accuracy (attestations upheld) **30%**, each as ratio-to-best across verifiers (ScoringWeights table 5). Harder work such as region verification counts through coverage of what was assigned.
+- **Eligibility:** the Verifier service must be Active, region-verified and staked at its own minimum (125,000 SYM). The usual reliability, stage and reserve rules apply.
+- An epoch with no eligible verifier leaves the slice undistributed for a governed sweep.
 - Verifiers who produce attestations that later prove to be incorrect (e.g., a verifier falsely attesting that a node is in a region when it is not) are subject to their own penalty stage progression and slash of the additional verifier stake.
 
 ### Fee Distribution
 
-At epoch seal, each verifier's accumulated verification actions for the epoch are tallied from the on-chain record. Fees are distributed automatically via the same auto-payout mechanism as storage rewards (see [Node Runner Incentives and Penalties](./node-runner-incentives-and-penalties.md)).
+At epoch seal, each verifier's factor report for the epoch (signed by the metric signer, `submitServiceFactorMetrics(node, Verifier, …)`) is scored and paid automatically via the same auto-payout mechanism as storage rewards (see [Node Runner Incentives and Penalties](./node-runner-incentives-and-penalties.md)).
 
 ---
 

@@ -11,7 +11,11 @@ public sealed record NetworkInfo(
     string NodeRegistryAddress,
     string EpochRootRegistryAddress,
     string? RpcUrl,
-    string? ProtocolActivationsAddress = null);
+    string? ProtocolActivationsAddress = null,
+    string? RewardDistributorAddress = null,
+    string? EpochControllerAddress = null,
+    string? TelemetryRegistryAddress = null,
+    string? StakingRegistryAddress = null);
 
 /// <summary>Shared state components read while starting.</summary>
 public sealed class HostContext

@@ -1,3 +1,4 @@
+using Symposia.Blockchain.Contracts;
 namespace Symposia.Network.Node.Telemetry;
 
 /// <summary>Per-field aggregated values; mirrors <c>TelemetryCheckpointRegistry.MetricValues</c>.</summary>
@@ -26,7 +27,9 @@ public sealed record AggregatedMetricRecord(
     uint HeartbeatsExpected,
     ushort AttestationCount,
     ushort FirstCheckpoint,
-    ushort LastCheckpoint)
+    ushort LastCheckpoint,
+    ulong AvailableBytes = 0,
+    ulong UsedBytes = 0)
 {
     public ushort HeartbeatComplianceBps =>
         HeartbeatsExpected == 0 ? (ushort)0 : (ushort)((ulong)HeartbeatsReceived * 10_000 / HeartbeatsExpected);
@@ -46,8 +49,27 @@ public sealed record TelemetrySchedule(long GenesisUnixSeconds, long EpochSecond
 
     public uint SlotAt(long unixSeconds) => (uint)((unixSeconds - EpochStart(EpochAt(unixSeconds))) / CadenceSeconds);
 
+    /// <summary>End of checkpoint window <paramref name="k"/>, matching <c>TelemetryCheckpointRegistry.checkpointWindowEnd</c>.</summary>
+    public long CheckpointWindowEnd(ulong epoch, ushort k) => EpochStart(epoch) + (k + 1) * EpochSeconds / CheckpointsPerEpoch;
+
     /// <summary>The checkpoint window a slot falls in.</summary>
     public ushort CheckpointOf(uint slot) => (ushort)((ulong)slot * (ulong)CheckpointsPerEpoch / SlotsPerEpoch);
+}
+
+/// <summary>
+/// The schedule heartbeats are stamped with. Starts from configuration; when the telemetry
+/// network is on (#158), the committee service replaces it with the EpochController's values,
+/// so a node's samples always land in the slots the chain counts.
+/// </summary>
+public sealed class TelemetryScheduleSource(TelemetrySchedule initial)
+{
+    private volatile TelemetrySchedule _current = initial;
+
+    public TelemetrySchedule Current
+    {
+        get => _current;
+        set => _current = value;
+    }
 }
 
 /// <summary>
@@ -123,8 +145,11 @@ public sealed class EpochMetricAggregator(TelemetrySchedule schedule, ulong chai
 
         var first = heartbeats.Count == 0 ? (ushort)0 : schedule.CheckpointOf(heartbeats[0].SampleIndex);
         var last = heartbeats.Count == 0 ? (ushort)0 : schedule.CheckpointOf(heartbeats[^1].SampleIndex);
+        // Capacity (#76 storage factors): robust median of what the node reported, like the other self-reported fields.
+        var available = heartbeats.Count == 0 ? 0 : RobustAggregator.Aggregate(heartbeats.Select(h => h.AvailableBytes).ToList());
+        var used = heartbeats.Count == 0 ? 0 : RobustAggregator.Aggregate(heartbeats.Select(h => h.UsedBytes).ToList());
         return new AggregatedMetricRecord(nodeId, epoch, self, verifier, received, expected,
-            (ushort)Math.Min(attested.Count, ushort.MaxValue), first, last);
+            (ushort)Math.Min(attested.Count, ushort.MaxValue), first, last, available, used);
     }
 
     /// <summary>

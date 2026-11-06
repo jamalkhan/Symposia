@@ -428,11 +428,11 @@ DELETE /analytics/queries/{job_id}        Cancel a pending job
 
 ### Analytics Node
 
-The analytics service runs on **dedicated Analytics nodes** — a distinct node type from OLTP and Storage. Analytics nodes are optimized for high-RAM, high-CPU workloads. Node operators self-select this type at container configuration time. See [Node Types and Dynamic Rewards](../Platform/node-types-and-rewards.md) for resource requirements, mining reward mechanics, and the dynamic incentive system that governs network composition.
+The analytics service runs on **dedicated Analytics nodes** — a distinct Node Service from OLTP and Storage. Analytics nodes are optimized for high-RAM, high-CPU workloads. Node operators self-select this type at container configuration time. See [Node Services and Dynamic Rewards](../Platform/node-types-and-rewards.md) for resource requirements, mining reward mechanics, and the dynamic incentive system that governs network composition.
 
 ## Answered Questions
 
-1. **Analytics node topology**: Dedicated Analytics node type. High-RAM, high-CPU Docker containers, selected by node operators at configuration time. Resource guarantees are binding — misses reduce mining yield. See [Node Types and Dynamic Rewards](../Platform/node-types-and-rewards.md).
+1. **Analytics node topology**: Dedicated Analytics Node Service. High-RAM, high-CPU Docker containers, selected by node operators at configuration time. Resource guarantees are binding — misses reduce mining yield. See [Node Services and Dynamic Rewards](../Platform/node-types-and-rewards.md).
 
 2. **Query timeout and cost limits**: Synchronous ≤30 seconds; async job model for larger queries. Analytics service performs cost estimation before execution and forces async if projected scan exceeds threshold.
 

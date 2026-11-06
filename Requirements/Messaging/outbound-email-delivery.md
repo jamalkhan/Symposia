@@ -310,9 +310,9 @@ Without at least one healthy Email IP Address node (or shared-pool eligibility),
 |---|---|
 | **No token earnings** | Email IP Address nodes **do not earn** native token rewards, epoch emission, or reliability bonuses from the platform mining system. |
 | **No stake-for-yield** | Participation is not compensated via staking yield. Any stake/deposit required for abuse prevention (if introduced later) is collateral only, not a mining bond. |
-| **Function = relay only** | The **only** function of this node type is outbound and inbound message relay (plus health/heartbeat so the platform can route and fail over). No blob storage, no Postgres, no analytics query serving. |
+| **Function = relay only** | The **only** function of this Node Service is outbound and inbound message relay (plus health/heartbeat so the platform can route and fail over). No blob storage, no Postgres, no analytics query serving. |
 
-See [Node Types and Dynamic Rewards — Email IP Address Node](../Platform/node-types-and-rewards.md#email-ip-address-node).
+See [Node Services and Dynamic Rewards — Email IP Address Node](../Platform/node-types-and-rewards.md#email-ip-address).
 
 ### Minimum requirements
 
@@ -465,7 +465,7 @@ platform ──► VIP / mail IP  (or dual IP)                    ├──► i
 }
 ```
 
-Role changes are config updates, not a new node type. Still **no token rewards** for either role.
+Role changes are config updates, not a new Node Service. Still **no token rewards** for either role.
 
 ### Multiple IP address nodes / endpoints per marketer
 

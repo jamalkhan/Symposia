@@ -33,7 +33,7 @@ public sealed class StorageRoleComponent : WebAppComponent
     protected override bool BindsOwnPort => true;
 
     protected override string? SkipReason(HostContext context) =>
-        !context.Settings.Storage.Enabled ? "Storage role is turned off" : base.SkipReason(context);
+        !context.Settings.Storage.Enabled ? "Storage service is turned off" : base.SkipReason(context);
 
     protected override WebApplication Build(WebApplicationOptions options, Action<WebApplicationBuilder> configure, HostContext context) =>
         StorageNodeApp.Create(options, configure);
@@ -61,6 +61,16 @@ public sealed class StorageRoleComponent : WebAppComponent
             ["StorageNode:Telemetry:Enabled"] = storage.Heartbeats.ToString(),
             ["StorageNode:Telemetry:GenesisUnixSeconds"] = storage.EpochGenesisUnixSeconds.ToString(),
         };
+        var network = context.Network!;
+        if (!string.IsNullOrEmpty(network.TelemetryRegistryAddress) && !string.IsNullOrEmpty(network.RpcUrl) && storage.Heartbeats)
+        {
+            // HTTP gossip, the self-checkpoint fallback and committee duties (#158); the schedule syncs from the EpochController.
+            config["StorageNode:Telemetry:Chain:RpcUrl"] = network.RpcUrl;
+            config["StorageNode:Telemetry:Chain:TelemetryRegistryAddress"] = network.TelemetryRegistryAddress;
+            config["StorageNode:Telemetry:Chain:EpochControllerAddress"] = network.EpochControllerAddress;
+            config["StorageNode:Telemetry:Blobs:CacheDirectory"] = Path.Combine(dir, "telemetry-blobs");
+        }
+
         RoleNetwork.Add(config, "StorageNode", context, HostContext.EndpointFor(storage.AdvertisedEndpoint, storage.Port));
         return config;
     }
@@ -76,7 +86,7 @@ public sealed class ComputeRoleComponent : WebAppComponent
     protected override bool ServesNodeHealth => true;
 
     protected override string? SkipReason(HostContext context) =>
-        !context.Settings.Compute.Enabled ? "Compute role is turned off" : base.SkipReason(context);
+        !context.Settings.Compute.Enabled ? "Compute service is turned off" : base.SkipReason(context);
 
     protected override WebApplication Build(WebApplicationOptions options, Action<WebApplicationBuilder> configure, HostContext context)
     {
@@ -166,12 +176,12 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
         var gateway = context.Settings.BlobGateway;
         if (!gateway.Enabled)
         {
-            return "Blob gateway role is turned off";
+            return "Blob Gateway service is turned off";
         }
 
         if (string.IsNullOrWhiteSpace(gateway.AccessKeyId) || !context.Secrets.HasBlobGatewaySecret)
         {
-            return "Set an access key ID and secret in Settings to start the blob gateway";
+            return "Set an access key ID and secret under Node Services to start the Blob Gateway";
         }
 
         return base.SkipReason(context);

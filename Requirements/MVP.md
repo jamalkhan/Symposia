@@ -24,7 +24,7 @@ This document defines **what ships in MVP** and what is explicitly **out of scop
 | **Audience** | CSV/API contact create, lists, segments for targeting |
 | **Rights** | One-click unsub, preference center, T1 delete/access for a single marketer |
 | **Trust path** | Compliance events on NATS; hourly Merkle commitments to chain |
-| **Network economics** | **Full mining tokenomics live**: emission schedule, epoch scoring, rewards paid to eligible node types, staking + progressive penalties, tenant prepaid credits for storage/compute/egress settled in native token (and stablecoin path if specified) |
+| **Network economics** | **Full mining tokenomics live**: emission schedule, epoch scoring, rewards paid to eligible Node Services, staking + progressive penalties, tenant prepaid credits for storage/compute/egress settled in native token (and stablecoin path if specified) |
 
 ---
 
@@ -56,7 +56,7 @@ This document defines **what ships in MVP** and what is explicitly **out of scop
 | **Marketer** | Tenant account, sender profiles, sending domain, email path (shared pool **or** Email IP node), contacts, campaigns, journeys; pays for platform usage via credits |
 | **Individual (T0/T1)** | Cookie consent, unsub, preference center, OTP delete/view for **one** marketer |
 | **Individual (T2+)** | Nice-to-have if ready; **not** required to launch marketer send |
-| **Node runner** | Onboard, stake, run ≥1 rewarded node type, pass region/verification as required, earn epoch rewards, subject to penalties |
+| **Node runner** | Onboard, stake, run ≥1 rewarded Node Service, pass region/verification as required, earn epoch rewards, subject to penalties |
 | **Email IP operator** | Marketer (or host) runs Email IP node when off shared pool — **no mining yield** |
 | **Verifier** | Enough verifier capacity for region/performance checks (foundation verifiers OK at cold start per network bootstrap) |
 
@@ -98,7 +98,7 @@ MVP launch criterion: **at least one** of welcome/DOI **and** cart abandon is li
 4. **Node registration + staking** for rewarded types: Storage, OLTP, Analytics, Consensus (as applicable to MVP workloads)  
 5. **Epoch loop**: metrics → score → reward share → payout (or claimable reserve on low heartbeat compliance)  
 6. **Penalties / slashing** progressive stages operational (at least through demonstrable Stage 1–3 paths in testnet; Stage 4 path documented and enforceable)  
-7. **Dynamic reward multipliers** by node type supply/demand (per [node-types-and-rewards](./Platform/node-types-and-rewards.md)) — live, not a spreadsheet  
+7. **Dynamic reward multipliers** by Node Service supply/demand (per [node-types-and-rewards](./Platform/node-types-and-rewards.md)) — live, not a spreadsheet  
 8. **Tenant payment path**: prepaid credits; storage/egress (and compute if used) burn credits; stablecoin → token settlement if in payment spec  
 9. **Email IP nodes explicitly excluded** from emission and multipliers  
 10. **Bootstrap**: foundation nodes + cold-start rules so the network can run with few operators initially  
@@ -129,7 +129,7 @@ Without Slice D, MVP is **not** done — even if martech Slice A–C work.
 | **Mining tokenomics (full)** | Emission, stake, epoch rewards, penalties/slash, dynamic type multipliers, tenant credit settlement, vesting/unlock for non-reward allocations as designed |
 | **Chain / settlement** | L3 live; soft finality for protocol ops; hard finality for bridges as designed |
 | **Event integrity** | Hourly Merkle roots committed on-chain |
-| **Rewarded node types** | Storage, OLTP, Analytics, Consensus, **Serverless**, Verifiers (as used); Email IP never rewarded |
+| **Rewarded Node Services** | Storage, OLTP, Analytics, Consensus, **Serverless**, Verifiers (as used); Email IP never rewarded |
 | **Node runner tooling** | Install, stake, register, dashboard for rewards/penalties (MVP-grade) |
 
 ### Out of scope (reiterated)
@@ -151,7 +151,7 @@ Before martech application development begins, the following core infrastructure
 | 3 | **Queue / Pub-Sub** (NATS JetStream) | Event-integrity pipeline needs this to batch events before hourly Merkle commitment to chain |
 | 4 | **Bootstrap / Cold Start (full)** *(concurrent with 5)* | Full phased rollout (private testnet → public testnet → mainnet launch, issue #57 Phases 1–3) beyond the minimal Phase 0 slice already delivered in step 1 |
 | 5 | **Chain (full)** *(concurrent with 4)* | Staking contracts, full decentralized verifier-quorum growth, governance bootstrap — beyond the minimal chain already delivered in step 1. Bootstrap and Chain remain two faces of the same launch effort for their full buildout, not sequential |
-| 6 | **Full Mining Tokenomics** | Emission, epoch scoring, staking/slashing, dynamic reward multipliers — live economic layer for rewarded node types |
+| 6 | **Full Mining Tokenomics** | Emission, epoch scoring, staking/slashing, dynamic reward multipliers — live economic layer for rewarded Node Services |
 | 7 | **OLTP** | Capstone, not a peer to Storage — consumes Blob (WAL/data files locally, bulk archival to blob) and joins the same rewarded-node economy as everything below it; the app's actual data-writing capability comes online last |
 
 ---
