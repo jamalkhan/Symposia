@@ -64,7 +64,9 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
         // Pre-#159 single-type records. Read-only: migrated into `services`.
         mapping(address => NodeRecord) records;
         // #159: per-(node, service) records, registration order, and the
-        // primary service (+1; 0 = none). Service list entries are never
+        // primary service (+1; 0 = none). The primary is set once and never
+        // changes, so reward accounts (and reports, reserves, streaks keyed by
+        // them) can't move between services across exits and re-registration. Service list entries are never
         // removed (bounded by the enum), so history and reward accounts stay stable.
         mapping(address => mapping(uint8 => NodeRecord)) services;
         mapping(address => uint8[]) serviceList;
@@ -464,7 +466,6 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
 
         NodeStatus previousStatus = rec.status;
         rec.status = rec.stake == 0 ? NodeStatus.Unregistered : NodeStatus.Active;
-        _clearPrimaryIfIdle(node);
 
         IERC20 token = IERC20(config().getAddress(ConfigKeys.TOKEN_ADDRESS));
         token.safeTransfer(node, amount);
@@ -476,16 +477,6 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
         if (rec.status == NodeStatus.Unregistered) {
             emit Deregistered(node);
         }
-    }
-
-    /// @dev Primary (and so reward accounts) only resets once the node runs nothing.
-    function _clearPrimaryIfIdle(address node) internal {
-        RegistryStorage storage $ = _registryStorage();
-        uint8[] storage list = $.serviceList[node];
-        for (uint256 i; i < list.length; i++) {
-            if ($.services[node][list[i]].status != NodeStatus.Unregistered) return;
-        }
-        $.primaryPlusOne[node] = 0;
     }
 
     // --- Verification ---

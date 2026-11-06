@@ -148,12 +148,12 @@ contract NodeServicesTest is CoreProtocolTestBase {
         vm.warp(t0 + 42 days);
         registry.withdrawServiceUnstake(VERIFIER);
         vm.stopPrank();
-        assertFalse(registry.hasPrimaryService(node));
+        assertTrue(registry.hasPrimaryService(node), "primary is fixed for the node's lifetime");
         assertEq(uint8(registry.statusOf(node)), uint8(INodeRegistry.NodeStatus.Unregistered));
 
-        // Re-registering makes the new first service primary and reuses the history entry.
+        // Re-registering in a different order keeps Storage primary, so reward accounts never move.
         _registerService(VERIFIER, VERIFIER_STAKE);
-        assertEq(uint8(registry.typeOf(node)), uint8(VERIFIER));
+        assertEq(uint8(registry.typeOf(node)), uint8(STORAGE));
         assertEq(registry.servicesOf(node).length, 2);
     }
 
@@ -369,6 +369,41 @@ contract NodeServicesTest is CoreProtocolTestBase {
         vm.warp(rewards.epochFinalityDeadline(0) + 1);
         vm.expectRevert(abi.encodeWithSelector(RewardDistributor.IncompleteNodeSet.selector, 0, 0, 1));
         rewards.sealEpoch(0, new address[](0));
+    }
+
+    /// Review #1: reporting, fully exiting during finality and re-registering in another
+    /// order must not change any reward account, so the seal still covers every report.
+    function test_SealSurvivesExitAndReregistrationBeforeSeal() public {
+        _twoCapacityServices();
+        rewards.submitServiceMetricReport(node, STORAGE, 0, 100, 9_500, _signService(STORAGE, 0, 100, 9_500));
+        rewards.submitServiceMetricReport(node, OLTP, 0, 100, 9_500, _signService(OLTP, 0, 100, 9_500));
+        address oltpAccount = rewards.accountOf(node, OLTP);
+        uint256 t0 = block.timestamp;
+        vm.startPrank(node);
+        registry.requestServiceUnstake(STORAGE, STORAGE_STAKE);
+        registry.requestServiceUnstake(OLTP, 10_000e18);
+        vm.warp(t0 + 21 days);
+        registry.withdrawServiceUnstake(STORAGE);
+        registry.withdrawServiceUnstake(OLTP);
+        registry.registerService(OLTP, 0, "us-east", 10_000e18);
+        vm.stopPrank();
+        assertEq(rewards.accountOf(node, OLTP), oltpAccount);
+        assertEq(rewards.accountOf(node, STORAGE), node);
+        _seal(0); // previously IncompleteNodeSet
+        assertTrue(rewards.isSealed(0));
+    }
+
+    function test_RevertWhen_PoolsOverAllocated() public {
+        _twoCapacityServices();
+        vm.prank(configOwner);
+        cfg.setUint(ConfigKeys.rewardTypeWeight(1), 10_000); // 50% + 100% of the capacity slice
+        rewards.submitServiceMetricReport(node, STORAGE, 0, 100, 9_500, _signService(STORAGE, 0, 100, 9_500));
+        rewards.submitServiceMetricReport(node, OLTP, 0, 100, 9_500, _signService(OLTP, 0, 100, 9_500));
+        vm.warp(rewards.epochFinalityDeadline(0) + 1);
+        address[] memory nodes = new address[](1);
+        nodes[0] = node;
+        vm.expectPartialRevert(RewardDistributor.PoolsOverAllocated.selector);
+        rewards.sealEpoch(0, nodes);
     }
 
     function test_EmailIpServiceNeverEarns() public {

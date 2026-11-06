@@ -184,6 +184,8 @@ contract RewardDistributor is GovernedUpgradeable {
         // #159: distinct reporting nodes per epoch (reporterCount counts reward accounts).
         mapping(uint256 => mapping(address => bool)) nodeReported;
         mapping(uint256 => uint256) reportingNodeCount;
+        // Review fix: per-seal duplicate guard, so no placeholder settlement is left behind.
+        mapping(uint256 => mapping(address => bool)) sealListed;
     }
 
     bytes32 private constant REWARD_STORAGE_LOCATION = keccak256("symposia.storage.RewardDistributor");
@@ -245,6 +247,7 @@ contract RewardDistributor is GovernedUpgradeable {
     error SweepExceedsUndistributed(uint256 amount, uint256 undistributed);
     error TelemetryRecordsPending(uint256 epoch);
     error FactorCountMismatch(uint256 given, uint256 expected);
+    error PoolsOverAllocated(uint256 assigned, uint256 available);
 
     function _rewardStorage() private pure returns (RewardStorage storage $) {
         bytes32 slot = REWARD_STORAGE_LOCATION;
@@ -587,6 +590,12 @@ contract RewardDistributor is GovernedUpgradeable {
             _distributeType(calc, t, typeSum[t], typePool[t]);
         }
 
+        // Review fix: config whose shares or type weights sum past 100% fails here with
+        // a clear error instead of underflowing `emission - totalDistributed` below.
+        uint256 assigned;
+        for (uint8 t = 0; t < SERVICE_TYPE_COUNT; t++) assigned += typePool[t];
+        if (assigned > emission) revert PoolsOverAllocated(assigned, emission);
+
         uint256 totalDistributed = 0;
         for (uint256 i = 0; i < calc.length; i++) {
             NodeCalc memory c = calc[i];
@@ -671,12 +680,8 @@ contract RewardDistributor is GovernedUpgradeable {
 
         for (uint256 i = 0; i < nodes.length; i++) {
             address node = nodes[i];
-            if ($.settlements[epoch][node].reason != SettlementReason.None) revert DuplicateNode(node);
-            // Dedupe marker, overwritten in sealEpoch by the primary service's settlement
-            // (whose account is the node). Relies on every early exit being a revert; a
-            // non-reverting return here would leave it behind. Duplicates are rejected
-            // before anything counts, so repeats cannot fake coverage.
-            $.settlements[epoch][node].reason = SettlementReason.ZeroAmount;
+            if ($.sealListed[epoch][node]) revert DuplicateNode(node);
+            $.sealListed[epoch][node] = true;
 
             TelemetryCheckpointRegistry.AggregatedMetricRecord memory r;
             if (telemetry) {
@@ -734,8 +739,10 @@ contract RewardDistributor is GovernedUpgradeable {
         c.nodeType = address(registry) == address(0) ? type(uint8).max : uint8(service);
         reported = $.metrics[epoch][c.account].submitted;
         // Telemetry mode: the Storage service is judged on its committee record (#76).
+        bool recordIneligible;
         if (r.exists && service == INodeRegistry.NodeType.Storage && address(registry) != address(0)) {
             _ingestRecord(epoch, c, r);
+            recordIneligible = !r.eligible;
         }
         if (!_isPaidService(c.nodeType)) {
             c.reason = SettlementReason.ExcludedType;
@@ -747,7 +754,7 @@ contract RewardDistributor is GovernedUpgradeable {
             (c.reliabilityBps, c.bonus) = _finalizeReliability(rel, c.account, epoch, m.heartbeatBps);
         }
 
-        if (!_isEligible(node, service, c.account, epoch)) {
+        if (recordIneligible || !_isEligible(node, service, c.account, epoch)) {
             c.reason = SettlementReason.Ineligible;
             return reported;
         }
@@ -767,7 +774,7 @@ contract RewardDistributor is GovernedUpgradeable {
         TelemetryCheckpointRegistry.AggregatedMetricRecord memory r
     ) private {
         _rewardStorage().metrics[epoch][c.account] =
-            MetricRecord({score: 0, heartbeatBps: r.heartbeatComplianceBps, submitted: r.eligible});
+            MetricRecord({score: 0, heartbeatBps: r.heartbeatComplianceBps, submitted: true}); // eligibility checked by the caller
         // Verifier-attested latency/retrieval when a verifier measured them, else self-reported.
         bool attested = r.attestationCount > 0;
         c.raw = new uint256[](7);
@@ -1044,16 +1051,7 @@ contract RewardDistributor is GovernedUpgradeable {
     /// a node that became compliant without a subsequent payout-bearing
     /// epoch being sealed for it).
     ///
-    /// KNOWN GAP (issue #57 follow-up): this path does not route through
-    /// `_payNode`/the foundation reward hook — a foundation node could in
-    /// principle reach this safety-net path with an un-swept reserve
-    /// balance that was never surplus-checked. In practice `sealEpoch`'s
-    /// own sweep (which IS hooked, see `_settle`) fires in the same epoch
-    /// the compliance condition is met, so this is expected to be
-    /// unreachable for a foundation node in normal operation; flagged here
-    /// rather than silently left implicit, and worth closing explicitly
-    /// (either route it through `_payNode` too, or restrict this entry
-    /// point from foundation nodes) before relying on it at mainnet scale.
+    /// Routed through `_payNode`, so the #57 foundation hook applies here too.
     function claimReserve() external whenNotPaused {
         uint256 amount = _claimReserve(msg.sender);
         // The node's own account belongs to its primary service (#159), for the #161 ledger.
@@ -1077,8 +1075,8 @@ contract RewardDistributor is GovernedUpgradeable {
         }
         amount = $.reserveBalance[account];
         $.reserveBalance[account] = 0;
-        IERC20 token = IERC20(config().getAddress(ConfigKeys.TOKEN_ADDRESS));
-        token.safeTransfer(msg.sender, amount);
+        // Through the #57 foundation hook like every other payout (closes the known gap).
+        _payNode(msg.sender, $.nextSealableEpoch == 0 ? 0 : $.nextSealableEpoch - 1, amount);
         emit ReserveSwept(msg.sender, amount);
     }
 }

@@ -110,6 +110,10 @@
       {
         "type": "mapping(uint256 => uint256)",
         "name": "reportingNodeCount"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => bool))",
+        "name": "sealListed"
       }
     ],
     "NodeCalc": [
