@@ -34,6 +34,8 @@ import {ISYMMinter} from "../src/interfaces/ISYMMinter.sol";
 /// TELEMETRY_THRESHOLD, DEV_MINT_ALLOWANCE (wei the deployer may mint for staking;
 /// default 10M SYM on chain 31337, 0 elsewhere), DEPLOYMENT_OUT (addresses JSON path).
 contract DeployRewards is Script {
+    string internal constant ECONOMICS_PATH = "../../protocol/economics.json";
+
     struct Roles {
         address timelock;
         address metricSigner;
@@ -127,10 +129,18 @@ contract DeployRewards is Script {
         cfg.setAddress(ConfigKeys.REGISTRY_VERIFIER_ROLE, roles.verifier);
         cfg.setAddress(ConfigKeys.EPOCH_CONTROLLER, address(d.epochs));
         cfg.setUint(ConfigKeys.REGISTRY_UNSTAKE_COOLDOWN, 21 days);
-        cfg.setUint(ConfigKeys.registryStakeBase(0), 100e18); // Storage: 100 SYM + 1 SYM/TB
-        cfg.setUint(ConfigKeys.registryStakePerUnit(0), 1e18);
-        cfg.setUint(ConfigKeys.registryStakeBase(5), 500e18); // Verifier: 5x the Storage base (#81)
-        cfg.setUint(ConfigKeys.registryStakeBase(8), 40e18); // Blob Gateway: flat, no capacity term (#160 strawman)
+        // Node Service stakes, pool weights and emission shares come from protocol/economics.json (#163),
+        // the same file the NodeHost earnings catalog is checked against.
+        string memory economics = vm.readFile(ECONOMICS_PATH);
+        string[3] memory services = ["storage", "verifier", "blobGateway"];
+        for (uint256 i; i < services.length; i++) {
+            string memory k = string.concat(".services.", services[i]);
+            uint8 id = uint8(vm.parseJsonUint(economics, string.concat(k, ".id")));
+            cfg.setUint(ConfigKeys.registryStakeBase(id), vm.parseJsonUint(economics, string.concat(k, ".stakeBase")) * 1e18);
+            cfg.setUint(ConfigKeys.registryStakePerUnit(id), vm.parseJsonUint(economics, string.concat(k, ".stakePerUnit")) * 1e18);
+            uint256 weight = vm.parseJsonUint(economics, string.concat(k, ".typeWeightBps"));
+            if (weight > 0) cfg.setUint(ConfigKeys.rewardTypeWeight(id), weight);
+        }
 
         // Rewards (#73, #80).
         cfg.setAddress(ConfigKeys.REWARD_EMISSION_SOURCE, address(d.emission));
@@ -140,11 +150,8 @@ contract DeployRewards is Script {
         cfg.setAddress(ConfigKeys.REWARD_TELEMETRY_REGISTRY, address(d.telemetry));
         cfg.setUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT, 24 hours);
         cfg.setAddress(ConfigKeys.REWARD_METRIC_SIGNER, roles.metricSigner);
-        cfg.setUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS, 9_200);
-        cfg.setUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS, 800);
-        // #160 strawman: Storage and Blob Gateway are the only paid capacity services so far.
-        cfg.setUint(ConfigKeys.rewardTypeWeight(0), 9_000);
-        cfg.setUint(ConfigKeys.rewardTypeWeight(8), 1_000);
+        cfg.setUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS, vm.parseJsonUint(economics, ".emission.capacityShareBps"));
+        cfg.setUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS, vm.parseJsonUint(economics, ".emission.verifierShareBps"));
         cfg.setUint(ConfigKeys.REWARD_MULT_MIN, 0);
         cfg.setUint(ConfigKeys.REWARD_MULT_MAX, 10_000);
         cfg.setUint(ConfigKeys.REWARD_HEARTBEAT_THRESHOLD_BPS, 9_000);

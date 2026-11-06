@@ -45,6 +45,9 @@ public interface ILedgerLogSource
 
     Task<long> BlockTimestampAsync(ulong block, CancellationToken ct);
 
+    /// <summary>Hash of <paramref name="block"/>, to detect a reorg past a persisted cursor.</summary>
+    Task<string> BlockHashAsync(ulong block, CancellationToken ct);
+
     /// <summary>Reward reserve currently held for the node's <paramref name="service"/>.</summary>
     Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct);
 }

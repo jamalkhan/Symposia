@@ -63,32 +63,32 @@ public sealed partial class NodeServiceCatalogTests
         Assert.All(new[] { "storage", "blob-gateway", "compute" }, k => Assert.NotNull(byKey[k].SettingsSection));
     }
 
+    /// <summary>protocol/economics.json configures the chain (DeployRewards) and is checked against ScoringWeights by forge (#163).</summary>
+    private static JsonElement Economics() =>
+        JsonDocument.Parse(File.ReadAllText(Path.Combine(Root, "protocol", "economics.json"))).RootElement;
+
     [Fact]
-    public void FactorWeights_MatchScoringWeightsTables()
+    public void FactorWeights_MatchTheEconomicsManifest()
     {
-        var source = Contract("src/ScoringWeights.sol");
+        var services = Economics().GetProperty("services").EnumerateObject().ToDictionary(p => p.Value.GetProperty("id").GetInt32(), p => p.Value);
         foreach (var svc in NodeServiceCatalog.All.Where(s => s.Factors.Count > 0))
         {
             Assert.Equal(10_000, svc.Factors.Sum(f => f.WeightBps));
-            // Tables are pushed by ordinal or by a named constant (VERIFIER, BLOB_GATEWAY).
-            var key = svc.Id switch { 5 => "VERIFIER", 8 => "BLOB_GATEWAY", var id => id.ToString(System.Globalization.CultureInfo.InvariantCulture) };
-            var push = Regex.Match(source, $@"_push\({key}, 0, _u16\(\[uint256\((?<w>[^\]]*)\]\)\)");
-            Assert.True(push.Success, $"ScoringWeights has no table for {svc.Name} ({svc.Id})");
-            var onChain = push.Groups["w"].Value.Replace(")", "").Split(',').Select(w => int.Parse(w.Trim().Replace("_", ""))).ToList();
-            Assert.Equal(onChain, svc.Factors.Select(f => f.WeightBps).ToList());
+            Assert.True(services.TryGetValue(svc.Id, out var manifest), $"economics.json has no entry for {svc.Name} ({svc.Id})");
+            Assert.Equal(manifest.GetProperty("factorsBps").EnumerateArray().Select(w => w.GetInt32()), svc.Factors.Select(f => f.WeightBps));
         }
     }
 
     [Fact]
-    public void PoolShares_MatchTheDeployScript()
+    public void PoolShares_MatchTheEconomicsManifest()
     {
-        var deploy = Contract("script/DeployRewards.s.sol");
-        int Weight(int type) => int.Parse(Regex.Match(deploy, $@"rewardTypeWeight\({type}\), (?<w>[\d_]+)\)").Groups["w"].Value.Replace("_", ""));
+        var e = Economics();
+        int Weight(string key) => e.GetProperty("services").GetProperty(key).GetProperty("typeWeightBps").GetInt32();
         var byKey = NodeServiceCatalog.All.ToDictionary(s => s.Key);
-        Assert.StartsWith($"{Weight(0) / 100}% of the capacity slice", byKey["storage"].PoolShare);
-        Assert.StartsWith($"{Weight(8) / 100}% of the capacity slice", byKey["blob-gateway"].PoolShare);
-        Assert.Contains("REWARD_VERIFIER_SHARE_BPS, 800", deploy);
-        Assert.StartsWith("8%", byKey["verifier"].Funding);
+        Assert.StartsWith($"{Weight("storage") / 100}% of the capacity slice", byKey["storage"].PoolShare);
+        Assert.StartsWith($"{Weight("blobGateway") / 100}% of the capacity slice", byKey["blob-gateway"].PoolShare);
+        Assert.StartsWith($"{e.GetProperty("emission").GetProperty("verifierShareBps").GetInt32() / 100}%", byKey["verifier"].Funding);
+        Assert.StartsWith($"{e.GetProperty("emission").GetProperty("capacityShareBps").GetInt32() / 100}%", byKey["storage"].Funding);
     }
 
     [Fact]

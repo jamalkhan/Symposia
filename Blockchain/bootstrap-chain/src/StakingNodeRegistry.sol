@@ -78,6 +78,9 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
 
     bytes32 private constant REGISTRY_STORAGE_LOCATION = keccak256("symposia.storage.StakingNodeRegistry");
 
+    // Pre-#159 node-level events, still emitted alongside the Service* events. Deprecated (#163):
+    // indexers and the NodeHost Ledger read only the Service* family. Removal at the first
+    // mainnet-genesis redeploy.
     event Registered(address indexed node, NodeType nodeType, uint256 capacity, bytes32 region, uint256 stake);
     event StakeChanged(address indexed node, uint256 previousStake, uint256 newStake);
     event StatusChanged(address indexed node, NodeStatus previousStatus, NodeStatus newStatus);
@@ -295,6 +298,8 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
     // --- Registration ---
 
     /// @notice Pre-#159 entry point: registers `nodeType` as a Node Service.
+    /// @dev Deprecated (#163): use `registerService`. Kept for callers that predate Node
+    /// Services; scheduled for removal at the first mainnet-genesis redeploy.
     function register(NodeType nodeType, uint256 capacity, bytes32 region, uint256 stakeAmount) external whenNotPaused {
         _registerService(nodeType, capacity, region, stakeAmount);
     }
@@ -374,6 +379,7 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
     }
 
     /// @notice Any address may top up a registered node's primary service stake (FR-2).
+    /// @dev Deprecated (#163): use `topUpService`. Removal at the first mainnet-genesis redeploy.
     function topUp(address node, uint256 amount) external whenNotPaused {
         _migrate(node);
         _topUp(node, _primaryService(node), amount);
@@ -402,6 +408,7 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
 
     // --- Unstaking ---
 
+    /// @dev Deprecated (#163): use `requestServiceUnstake`. Removal at the first mainnet-genesis redeploy.
     /// @notice Requests withdrawal of `amount` of the caller's primary service stake.
     /// Partial unstake is only allowed if the remaining stake stays at or
     /// above the current minimum for the service's declared capacity.
@@ -441,6 +448,7 @@ contract StakingNodeRegistry is GovernedUpgradeable, INodeRegistry {
         emit ServiceStatusChanged(node, service, previous, NodeStatus.Deregistering);
     }
 
+    /// @dev Deprecated (#163): use `withdrawServiceUnstake`. Removal at the first mainnet-genesis redeploy.
     /// @notice Completes a previously requested primary-service unstake once
     /// its cooldown has elapsed, transferring the pending amount back to the caller.
     function withdrawUnstake() external whenNotPaused {

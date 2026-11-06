@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Text.Json;
 using Symposia.NodeHost.Ledger;
 
 namespace Symposia.NodeHost.Tests;
@@ -28,6 +29,10 @@ public sealed class LedgerServiceTests
         }
 
         public Task<long> BlockTimestampAsync(ulong block, CancellationToken ct) => Task.FromResult(1_700_000_000L + (long)block);
+
+        public string HashSalt { get; set; } = "a";
+
+        public Task<string> BlockHashAsync(ulong block, CancellationToken ct) => Task.FromResult($"0x{HashSalt}{block}");
 
         public Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct) => Task.FromResult(service == 0 ? 3 * Sym : BigInteger.Zero);
     }
@@ -159,6 +164,57 @@ public sealed class LedgerServiceTests
         Assert.Contains(",3,0xc,7,Storage,Reward,Earned,1.000000000000000001,", csv[1]);
     }
 
+    [Fact]
+    public async Task Restart_ResumesFromThePersistedCursor()
+    {
+        using var dir = new TempDir();
+        var source = new FakeSource { Latest = 10 };
+        SeedLifecycle(source);
+        var first = new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path));
+        await first.SnapshotAsync(default);
+
+        source.Calls.Clear();
+        source.Latest = 12;
+        var restarted = new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path));
+        var snap = await restarted.SnapshotAsync(default);
+
+        Assert.Equal([(11UL, 12UL)], source.Calls);
+        Assert.Equal(8, snap.Entries.Count);
+    }
+
+    [Fact]
+    public async Task Restart_AfterAReorg_RewindsAndRescans()
+    {
+        using var dir = new TempDir();
+        var source = new FakeSource { Latest = 2_000 };
+        source.Logs.Add(new ServiceRegisteredLog(5, 0, "0xa", 0, Sym));
+        source.Logs.Add(new ServiceRegisteredLog(1_500, 0, "0xb", 8, Sym));
+        await new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path)).SnapshotAsync(default);
+
+        source.HashSalt = "b"; // every block hash changed: the persisted cursor block is gone
+        source.Calls.Clear();
+        var snap = await new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path)).SnapshotAsync(default);
+
+        Assert.Equal(1_001UL, source.Calls[0].From);
+        Assert.Equal(2, snap.Entries.Count);
+        Assert.Single(snap.Entries, e => e.Block == 1_500);
+    }
+
+    [Fact]
+    public void Store_IgnoresATornLastLineAndRowsPastTheCursor()
+    {
+        using var dir = new TempDir();
+        var store = new LedgerStore(dir.Path);
+        var row = new LedgerEntry(3, 0, "0xc", 1, 0, "Storage", LedgerCategory.Reward, "Earned", Sym, "");
+        store.Append([row], new LedgerStore.Cursor(3, "0x3"));
+        File.AppendAllText(Path.Combine(dir.Path, "entries.jsonl"), JsonSerializer.Serialize(row with { Block = 9 }) + "\n{\"Block\":");
+
+        var (entries, cursor) = store.Load();
+
+        Assert.Equal(3UL, cursor!.ScannedTo);
+        Assert.Equal(Sym, Assert.Single(entries).AmountWei);
+    }
+
     [Theory]
     [InlineData("1500000000000000000", "1.5")]
     [InlineData("-1500000000000000000", "-1.5")]
@@ -190,6 +246,8 @@ public sealed class LedgerScanSafetyTests
 
         public Task<long> BlockTimestampAsync(ulong block, CancellationToken ct) =>
             FailTimestamps && block == 2 ? throw new HttpRequestException("timeout") : Task.FromResult(1L);
+
+        public Task<string> BlockHashAsync(ulong block, CancellationToken ct) => Task.FromResult($"0x{block}");
 
         public Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct) => Task.FromResult(BigInteger.Zero);
     }

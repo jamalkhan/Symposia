@@ -42,8 +42,13 @@ public sealed record LedgerSnapshot(bool Available, string? Reason, IReadOnlyLis
 /// on later loads (an in-memory cursor; one scan at a time).
 /// </summary>
 /// <param name="confirmations">Blocks behind the head to stop at, so a reorg can't leave orphaned rows behind.</param>
-public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string node, Func<string?> unavailableReason, ulong confirmations = 0)
+/// <param name="storeFor">Where the current network's ledger is persisted (#163); null = memory only.</param>
+public sealed class LedgerService(
+    Func<ILedgerLogSource?> sourceFactory, string node, Func<string?> unavailableReason, ulong confirmations = 0, Func<LedgerStore?>? storeFor = null)
 {
+    /// <summary>On load, a cursor whose block hash no longer matches the chain rewinds this far.</summary>
+    public const ulong ReorgRewind = 1_000;
+
     public const ulong ChunkSize = 5_000;
 
     /// <summary>Labels for <c>RewardDistributor.SettlementReason</c>, by ordinal (pinned by LedgerEnumTests).</summary>
@@ -54,9 +59,10 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly List<LedgerEntry> _entries = [];
-    private readonly Dictionary<ulong, long> _timestamps = [];
     private ILedgerLogSource? _source;
+    private LedgerStore? _store;
     private ulong? _cursor;
+    private (ulong Block, IReadOnlyDictionary<int, BigInteger> Reserves)? _reserves;
 
     public async Task<LedgerSnapshot> SnapshotAsync(CancellationToken ct)
     {
@@ -79,8 +85,10 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
                 // A different network (or redeploy): start over.
                 _source = source;
                 _entries.Clear();
-                _timestamps.Clear();
                 _cursor = null;
+                _reserves = null;
+                _store = storeFor?.Invoke();
+                await LoadAsync(source, ct);
             }
 
             await ScanAsync(source, ct);
@@ -90,6 +98,44 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>Resumes from the persisted ledger, rewinding if the chain no longer has the cursor's block.</summary>
+    private async Task LoadAsync(ILedgerLogSource source, CancellationToken ct)
+    {
+        if (_store is null)
+        {
+            return;
+        }
+
+        var (entries, cursor) = _store.Load();
+        if (cursor is null)
+        {
+            return;
+        }
+
+        string? hash = null;
+        try
+        {
+            hash = await source.BlockHashAsync(cursor.ScannedTo, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Unknown block (e.g. a reset local chain): treat as a mismatch.
+        }
+
+        if (string.Equals(hash, cursor.BlockHash, StringComparison.OrdinalIgnoreCase))
+        {
+            _entries.AddRange(entries);
+            _cursor = cursor.ScannedTo;
+            return;
+        }
+
+        var keepTo = cursor.ScannedTo > ReorgRewind ? cursor.ScannedTo - ReorgRewind : 0;
+        var kept = keepTo == 0 ? [] : entries.Where(e => e.Block <= keepTo).ToList();
+        _entries.AddRange(kept);
+        _cursor = keepTo == 0 ? null : keepTo;
+        _store.Replace(kept, new LedgerStore.Cursor(keepTo, keepTo == 0 ? "" : await source.BlockHashAsync(keepTo, ct)));
     }
 
     private async Task ScanAsync(ILedgerLogSource source, CancellationToken ct)
@@ -108,13 +154,15 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
             var logs = await source.LogsAsync(node, from, to, ct);
             // A chunk lands together with its cursor: a failure part-way leaves nothing behind to duplicate.
             var chunk = new List<LedgerEntry>();
+            (ulong Block, long Ts)? last = null; // only the current block's timestamp is kept
             foreach (var log in logs.OrderBy(l => l.Block).ThenBy(l => l.LogIndex))
             {
-                if (!_timestamps.TryGetValue(log.Block, out var ts))
+                if (last?.Block != log.Block)
                 {
-                    ts = await source.BlockTimestampAsync(log.Block, ct);
-                    _timestamps[log.Block] = ts;
+                    last = (log.Block, await source.BlockTimestampAsync(log.Block, ct));
                 }
+
+                var ts = last.Value.Ts;
 
                 if (Map(log, ts) is { } entry)
                 {
@@ -122,6 +170,7 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
                 }
             }
 
+            _store?.Append(chunk, new LedgerStore.Cursor(to, await source.BlockHashAsync(to, ct)));
             _entries.AddRange(chunk);
             _cursor = to;
             from = to + 1;
@@ -193,11 +242,31 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
             }
 
             var id = NodeServiceCatalog.All.FirstOrDefault(s => s.Name == group.Key)?.Id;
-            var reserve = id is { } sid ? await source.ReserveAsync(node, sid, ct) : BigInteger.Zero;
+            var reserve = id is { } sid ? await ReserveAsync(source, sid, ct) : BigInteger.Zero;
             totals.Add(new ServiceTotals(group.Key, FormatSym(stake), FormatSym(earned), FormatSym(slashed), FormatSym(reserve)));
         }
 
         return totals;
+    }
+
+    /// <summary>Reserve reads are cached until the scan moves to a new block.</summary>
+    private async Task<BigInteger> ReserveAsync(ILedgerLogSource source, int service, CancellationToken ct)
+    {
+        var block = _cursor ?? 0;
+        if (_reserves is not { } cached || cached.Block != block)
+        {
+            cached = (block, new Dictionary<int, BigInteger>());
+            _reserves = cached;
+        }
+
+        var map = (Dictionary<int, BigInteger>)cached.Reserves;
+        if (!map.TryGetValue(service, out var value))
+        {
+            value = await source.ReserveAsync(node, service, ct);
+            map[service] = value;
+        }
+
+        return value;
     }
 
     public static IEnumerable<LedgerEntry> Filter(IEnumerable<LedgerEntry> entries, string? category, string? service, int? limit)

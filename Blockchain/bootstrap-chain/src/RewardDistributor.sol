@@ -17,6 +17,7 @@ import {BonusNormalization} from "./libraries/BonusNormalization.sol";
 import {FactorScoring} from "./libraries/FactorScoring.sol";
 import {ITelemetryRecords, IScoringWeights} from "./interfaces/ITelemetryRecords.sol";
 import {TelemetryRecordReader} from "./libraries/TelemetryRecordReader.sol";
+import {NodeServices} from "./libraries/NodeServices.sol";
 
 /// @title RewardDistributor
 /// @notice Implements FR-4 of issue #52 and reconciles/completes it against
@@ -521,26 +522,16 @@ contract RewardDistributor is GovernedUpgradeable {
             && epochSource(epoch) != EpochSource.Pending;
     }
 
-    /// @notice Number of Node Service types (`INodeRegistry.NodeType`, #159).
-    uint8 internal constant SERVICE_TYPE_COUNT = 11;
+    /// @notice Number of Node Service types and the funding predicates, from NodeServices (#163).
+    uint8 internal constant SERVICE_TYPE_COUNT = NodeServices.COUNT;
+    uint8 internal constant VERIFIER = uint8(INodeRegistry.NodeType.Verifier);
 
-    /// @notice Capacity Node Services that share the 92% emission (tokenomics-mvp.md
-    /// §5.5): Storage, OLTP, Analytics, Consensus, Serverless (ordinals 0-4), and the
-    /// Blob Gateway (8, #160 strawman), each with its own type pool.
-    /// Verifier (8%, #81), EmailIP (0%, never) and Compute (fee-funded, #90) are
-    /// excluded from this flow, as are services whose economics aren't defined yet.
     function _isCapacityService(uint8 t) internal pure returns (bool) {
-        return t < 5 || t == uint8(INodeRegistry.NodeType.BlobGateway);
+        return NodeServices.isCapacity(t);
     }
 
-    uint8 internal constant VERIFIER = uint8(INodeRegistry.NodeType.Verifier);
-    uint8 internal constant EMAIL_IP = uint8(INodeRegistry.NodeType.EmailIP);
-
-    /// @notice Services paid from emission: the capacity services (92%) and Verifier
-    /// (8%, #81). Email IP Address is hardcoded out: no config can route SYM to it.
     function _isPaidService(uint8 t) internal pure returns (bool) {
-        if (t == EMAIL_IP) return false;
-        return _isCapacityService(t) || t == VERIFIER;
+        return NodeServices.isPaid(t);
     }
 
     /// @dev Per-node working state for one `sealEpoch` call.
