@@ -10,10 +10,15 @@ import {ConfigKeys} from "../src/config/ConfigKeys.sol";
 
 /// @dev Stand-in for SlashingController's `stageOf` read by the distributor.
 contract MockStageSource {
-    mapping(address => uint8) public stageOf;
+    mapping(address => uint8) internal _stages;
+
+    /// #166: per-service form read by the distributor; this stand-in applies one stage to every service.
+    function stageOf(address node, INodeRegistry.NodeType) external view returns (uint8) {
+        return _stages[node];
+    }
 
     function setStage(address node, uint8 stage) external {
-        stageOf[node] = stage;
+        _stages[node] = stage;
     }
 }
 
@@ -172,7 +177,8 @@ contract RewardDistributorPayoutTest is CoreProtocolTestBase {
         assertEq(uint8(_reason(0, storageNodes[1])), uint8(RewardDistributor.SettlementReason.Ineligible));
     }
 
-    function test_VerifierEmailIpAndComputeExcluded() public {
+    /// #81: verifiers are paid from their own 8% slice; Email IP and Compute stay excluded.
+    function test_VerifierPaidFromItsSliceEmailIpAndComputeExcluded() public {
         address verifier = makeAddr("verifierNode");
         address emailIp = makeAddr("emailIpNode");
         address compute = makeAddr("computeNode");
@@ -186,11 +192,13 @@ contract RewardDistributorPayoutTest is CoreProtocolTestBase {
         }
         _seal(0, nodes); // previously reverted on the Compute ordinal
         assertEq(rewards.payoutOf(0, storageNodes[0]), POOL);
-        for (uint256 i = 1; i < 4; ++i) {
+        assertEq(rewards.payoutOf(0, verifier), (EMISSION * 800) / 10_000, "sole verifier takes the 8% slice");
+        assertEq(uint8(_reason(0, verifier)), uint8(RewardDistributor.SettlementReason.Paid));
+        assertTrue(rel.isFinalized(verifier, 0));
+        for (uint256 i = 2; i < 4; ++i) {
             assertEq(rewards.payoutOf(0, nodes[i]), 0);
             assertEq(uint8(_reason(0, nodes[i])), uint8(RewardDistributor.SettlementReason.ExcludedType));
         }
-        assertFalse(rel.isFinalized(verifier, 0));
     }
 
     function test_MultiTypePoolsRespectWeights() public {
@@ -288,6 +296,7 @@ contract RewardDistributorSealGuardsTest is RewardDistributorPayoutTest {
     }
 
     function test_RevertWhen_SealOutOfOrder() public {
+        vm.warp(epochs.epochStart(1));
         _report(storageNodes[0], 1, 100);
         vm.warp(rewards.epochFinalityDeadline(1) + 1);
         // Skipping ahead is rejected: epoch 0 must be sealed first.

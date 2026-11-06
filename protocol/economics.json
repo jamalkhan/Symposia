@@ -1,0 +1,9 @@
+{
+  "$comment": "Node Service economics for the dev/testnet deploy (#163). DeployRewards.s.sol reads this file to configure the chain; a forge test checks ScoringWeights' tables against it; the NodeHost catalog tests check the public earnings breakdown against it. Stakes are whole SYM.",
+  "emission": { "capacityShareBps": 9200, "verifierShareBps": 800 },
+  "services": {
+    "storage": { "id": 0, "typeWeightBps": 9000, "stakeBase": 100, "stakePerUnit": 1, "factorsBps": [3000, 2000, 1500, 1000, 1000, 800, 700] },
+    "verifier": { "id": 5, "typeWeightBps": 0, "stakeBase": 500, "stakePerUnit": 0, "factorsBps": [4000, 3000, 3000] },
+    "blobGateway": { "id": 8, "typeWeightBps": 1000, "stakeBase": 40, "stakePerUnit": 0, "factorsBps": [3000, 3000, 2000, 2000] }
+  }
+}

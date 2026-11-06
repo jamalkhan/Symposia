@@ -34,6 +34,10 @@
       {
         "type": "uint128",
         "name": "amount"
+      },
+      {
+        "type": "uint64",
+        "name": "score"
       }
     ],
     "EpochSeal": [
@@ -94,6 +98,26 @@
       {
         "type": "uint256",
         "name": "undistributed"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => uint256[]))",
+        "name": "factorRaw"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => bool))",
+        "name": "nodeReported"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "reportingNodeCount"
+      },
+      {
+        "type": "mapping(uint256 => mapping(address => bool))",
+        "name": "sealListed"
+      },
+      {
+        "type": "mapping(uint256 => uint256)",
+        "name": "firstReportBlock"
       }
     ],
     "NodeCalc": [
@@ -128,6 +152,14 @@
       {
         "type": "SettlementReason",
         "name": "reason"
+      },
+      {
+        "type": "uint256[]",
+        "name": "raw"
+      },
+      {
+        "type": "address",
+        "name": "account"
       }
     ]
   },

@@ -29,6 +29,8 @@ function show(view) {
   if (view === 'diagnostics') { refresh(); pollTimer = setInterval(refresh, 5000); }
   if (view === 'network') { refreshNetwork(); pollTimer = setInterval(refreshNetwork, 5000); }
   if (view === 'settings') loadSettings();
+  if (view === 'services') { loadSettings(); loadServices(); }
+  if (view === 'ledger') { refreshLedger(); pollTimer = setInterval(refreshLedger, 15000); }
 }
 
 async function route() {
@@ -169,8 +171,8 @@ let lanAddress = null;
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-use-lan]');
   if (!b || !lanAddress) return;
-  const role = b.dataset.useLan, port = $(`[name="${role}.Port"]`).value;
-  $(`[name="${role}.AdvertisedEndpoint"]`).value = `http://${lanAddress}:${port}`;
+  const service = b.dataset.useLan, port = $(`[name="${service}.Port"]`).value;
+  $(`[name="${service}.AdvertisedEndpoint"]`).value = `http://${lanAddress}:${port}`;
 });
 // Keys are generated in the browser and only sent when the operator saves.
 const randomString = (alphabet, n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => alphabet[b % alphabet.length]).join('');
@@ -183,15 +185,18 @@ $('#generate-keys').addEventListener('click', () => {
   $('#generated-hint').textContent = 'Copy the secret now; after saving it is never shown again.';
 });
 
+// Settings are split across the Settings and Node Services tabs; both forms edit the same document.
+const settingsForms = () => $$('[data-settings-form]');
+const settingsFields = () => settingsForms().flatMap((f) => $$('[name]', f));
+
 async function loadSettings() {
   let data;
   try { data = await api('GET', '/settings'); }
-  catch (ex) { $('#save-result').textContent = `Could not load settings: ${ex.message}`; return; }
+  catch (ex) { $$('[data-save-result]').forEach((r) => (r.textContent = `Could not load settings: ${ex.message}`)); return; }
   current = data.settings;
-  const form = $('#settings-form');
   $('#presets').innerHTML = data.presets.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}${p.deployed ? '' : ' (not yet deployed)'}</option>`).join('');
   const locked = new Set(data.lockedKeys.map((k) => k.toLowerCase().replaceAll(':', '.')));
-  $$('[name]', form).forEach((el) => {
+  settingsFields().forEach((el) => {
     const name = el.name;
     if (name === 'blobGatewaySecret') { el.value = ''; el.placeholder = data.blobGatewaySecretSet ? '•••••••• (set — enter a new secret to replace)' : 'not set'; return; }
     if (name === 'relayerKey') { el.value = ''; el.placeholder = data.relayerKeySet ? '•••••••• (set — enter a new key to replace)' : 'not set'; return; }
@@ -222,9 +227,9 @@ $('#use-join').addEventListener('click', () => {
   syncModes();
 });
 
-$('#settings-form').addEventListener('submit', async (e) => {
+settingsForms().forEach((f) => f.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const form = e.target, next = structuredClone(current), result = $('#save-result');
+  const form = e.target, next = structuredClone(current), result = $('[data-save-result]', form);
   let relayerKey = null, blobGatewaySecret = null;
   $$('[name]', form).forEach((el) => {
     if (el.disabled || el.hasAttribute('data-dup') && el.closest('[hidden]')) return;
@@ -246,6 +251,62 @@ $('#settings-form').addEventListener('submit', async (e) => {
     result.textContent = 'Saved. Components restarted as needed.';
     await loadSettings();
   } catch (ex) { result.textContent = ex.message; }
-});
+}));
+
+// ---------- node services ----------
+// Public earnings breakdown per Node Service (#159), from /api/node-services.
+const pct = (bps) => `${(bps / 100).toFixed(bps % 100 ? 1 : 0)}%`;
+function earnings(svc) {
+  const factors = svc.factors.length
+    ? `<table class="factors">${svc.factors.map((f) => `<tr><td>${esc(f.name)}${f.lowerIsBetter ? ' <span class="hint">(lower is better)</span>' : ''}</td><td class="num">${pct(f.weightBps)}</td></tr>`).join('')}</table>`
+    : '<p class="hint">No scoring factors defined yet.</p>';
+  return `<p><span class="badge ${svc.earns ? 'earns' : 'no-earn'}">${svc.earns ? 'Earns SYM' : 'Does not earn'}</span> <span class="badge">${esc(svc.status)}</span></p>
+    <p>${esc(svc.description)}</p>
+    ${dl([['Funding', svc.funding], ['Pool share', svc.poolShare], ['Minimum stake', svc.minimumStake]])}
+    <h4>Score</h4>${factors}
+    <h4>Penalties</h4><ul>${svc.penalties.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
+    ${svc.note ? `<p class="hint">${esc(svc.note)}</p>` : ''}`;
+}
+
+async function loadServices() {
+  let list;
+  try { list = await api('GET', '/node-services'); }
+  catch (ex) { $('#service-catalog').innerHTML = `<p class="error">${esc(ex.message)}</p>`; return; }
+  const inline = new Set();
+  $$('[data-earnings]').forEach((el) => {
+    const svc = list.find((x) => x.key === el.dataset.earnings);
+    if (svc) { el.innerHTML = earnings(svc); inline.add(svc.key); }
+  });
+  $('#service-catalog').innerHTML = list.filter((x) => !inline.has(x.key))
+    .map((x) => `<div class="card"><h2>${esc(x.name)}</h2>${earnings(x)}</div>`).join('');
+}
 
 route();
+
+// ---------- ledger ----------
+// Stake, reward and penalty transactions per Node Service (#161), from /api/ledger.
+const signed = (a) => (String(a).startsWith('-') ? `<span class="neg">${esc(a)}</span>` : a === '0' ? '0' : `<span class="pos">+${esc(a)}</span>`);
+function ledgerQuery() {
+  const q = new URLSearchParams();
+  if ($('#ledger-category').value) q.set('category', $('#ledger-category').value);
+  if ($('#ledger-service').value) q.set('service', $('#ledger-service').value);
+  return q.toString();
+}
+
+async function refreshLedger() {
+  let s;
+  try { s = await api('GET', `/ledger?${ledgerQuery()}`); }
+  catch (ex) { $('#ledger-unavailable').hidden = false; $('#ledger-unavailable').textContent = `Ledger unavailable (${ex.message}).`; return; }
+  $('#ledger-unavailable').hidden = s.available;
+  $('#ledger-unavailable').textContent = s.available ? '' : `Ledger unavailable: ${s.reason}`;
+  $('#ledger-csv').href = `/api/ledger.csv?${ledgerQuery()}`;
+  $('#ledger-totals').innerHTML = table(['Node Service', 'Stake (SYM)', 'Earned (SYM)', 'Slashed (SYM)', 'Reserve held (SYM)'], s.totals.map((t) =>
+    `<tr><td>${esc(t.service)}</td><td class="num">${esc(t.stake)}</td><td class="num">${esc(t.earned)}</td><td class="num">${esc(t.slashed)}</td><td class="num">${esc(t.reserveHeld)}</td></tr>`));
+  const services = $('#ledger-service'), chosen = services.value;
+  services.innerHTML = '<option value="">All</option>' + s.totals.map((t) => `<option${t.service === chosen ? ' selected' : ''}>${esc(t.service)}</option>`).join('');
+  $('#ledger-entries').innerHTML = table(['Time', 'Node Service', 'Category', 'Entry', 'Amount (SYM)', 'Epoch', 'Detail', 'Transaction'], s.entries.map((e) =>
+    `<tr><td>${esc(new Date(e.timestamp * 1000).toLocaleString())}</td><td>${esc(e.service)}</td><td>${esc(e.category)}</td><td>${esc(e.type)}</td>` +
+    `<td class="num">${signed(e.amount)}</td><td>${e.epoch ?? ''}</td><td>${esc(e.detail)}</td>` +
+    `<td class="mono" title="${esc(e.txHash)}">${esc(shortAddress(e.txHash))} <span class="hint">#${esc(e.block)}</span></td></tr>`));
+}
+['#ledger-category', '#ledger-service'].forEach((sel) => $(sel).addEventListener('change', refreshLedger));

@@ -12,7 +12,12 @@ import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
 import {IFoundationRewardHook} from "./interfaces/IFoundationRewardHook.sol";
 import {INetworkRewardsEmission} from "./interfaces/INetworkRewardsEmission.sol";
 import {IReliabilityRegistry} from "./interfaces/IReliabilityRegistry.sol";
+import {IEpochController} from "./interfaces/IEpochController.sol";
 import {BonusNormalization} from "./libraries/BonusNormalization.sol";
+import {FactorScoring} from "./libraries/FactorScoring.sol";
+import {ITelemetryRecords, IScoringWeights} from "./interfaces/ITelemetryRecords.sol";
+import {TelemetryRecordReader} from "./libraries/TelemetryRecordReader.sol";
+import {NodeServices} from "./libraries/NodeServices.sol";
 
 /// @title RewardDistributor
 /// @notice Implements FR-4 of issue #52 and reconciles/completes it against
@@ -105,6 +110,12 @@ import {BonusNormalization} from "./libraries/BonusNormalization.sol";
 /// implementation. Any surplus-routing hook #57 wraps around payout should
 /// hook `_settle` (or wrap `sealEpoch` itself), not assume a two-phase
 /// entitlement-then-settle call sequence.
+/// @dev Typed view of SlashingController's penalty stage (replaces a string-signature staticcall).
+interface IStageSource {
+    /// @dev #166: the higher of the node-level stage and `service`'s own hardware stage.
+    function stageOf(address node, INodeRegistry.NodeType service) external view returns (uint8);
+}
+
 contract RewardDistributor is GovernedUpgradeable {
     using SafeERC20 for IERC20;
 
@@ -127,7 +138,7 @@ contract RewardDistributor is GovernedUpgradeable {
     enum SettlementReason {
         None,
         Paid, // positive payout, auto-paid or held per the heartbeat gate (see Payout/ReserveCredit)
-        ExcludedType, // Verifier / EmailIP / Compute: not in the capacity emission flow
+        ExcludedType, // EmailIP (never), Compute (fee-funded) and services without defined economics
         Ineligible, // failed region-verification, stake or metric-report gate, or zero score
         ZeroStagePenalty, // Stage 3/4: multiplier 0
         ZeroAmount // eligible but rounded to 0 (or reliability 0)
@@ -139,6 +150,14 @@ contract RewardDistributor is GovernedUpgradeable {
         uint16 stagePenaltyBps;
         bool reliabilityBonus;
         uint128 amount;
+        uint64 score; // #76: epoch score (WAD on the factor path), appended within the same slot
+    }
+
+    /// @notice Where an epoch's metrics come from at settlement (#76/#158).
+    enum EpochSource {
+        Pending, // telemetry records not final yet and the fallback wait hasn't passed
+        Telemetry, // finalized committee records (storage nodes), signed reports for other types
+        Signed // no telemetry registry, or records never finalized within REWARD_RECORDS_MAX_WAIT
     }
 
     struct EpochSeal {
@@ -167,6 +186,15 @@ contract RewardDistributor is GovernedUpgradeable {
         mapping(uint256 => uint256) reporterCount;
         uint256 nextSealableEpoch;
         uint256 undistributed;
+        // #76: signed per-type factor reports (length = ScoringWeights.factorCount(type)).
+        mapping(uint256 => mapping(address => uint256[])) factorRaw;
+        // #159: distinct reporting nodes per epoch (reporterCount counts reward accounts).
+        mapping(uint256 => mapping(address => bool)) nodeReported;
+        mapping(uint256 => uint256) reportingNodeCount;
+        // Review fix: per-seal duplicate guard, so no placeholder settlement is left behind.
+        mapping(uint256 => mapping(address => bool)) sealListed;
+        // #165: block of each epoch's first metric report (0 = none).
+        mapping(uint256 => uint256) firstReportBlock;
     }
 
     bytes32 private constant REWARD_STORAGE_LOCATION = keccak256("symposia.storage.RewardDistributor");
@@ -179,6 +207,8 @@ contract RewardDistributor is GovernedUpgradeable {
     /// @notice One per node per sealed epoch: enough to reconstruct the
     /// payout (`typePool * score / typeScoreSum * reliability * stage`, then
     /// the #79 bonus normalization) for #87 alerting and audit.
+    /// @notice #76 per-factor transparency: raw inputs and the resulting score.
+    event NodeScored(address indexed node, uint256 indexed epoch, uint8 nodeType, uint256[] raw, uint256 score);
     event NodeSettled(
         address indexed node,
         uint256 indexed epoch,
@@ -191,6 +221,21 @@ contract RewardDistributor is GovernedUpgradeable {
         bool reliabilityBonus,
         uint256 amount
     );
+    /// @notice #159: one per settled Node Service. `account` is the service's reward
+    /// account (the node itself for its primary service); `paid` is what was transferred
+    /// to the node now (including any released reserve) and `held` what went to reserve.
+    event ServiceSettled(
+        address indexed node,
+        INodeRegistry.NodeType indexed service,
+        uint256 indexed epoch,
+        SettlementReason reason,
+        address account,
+        uint256 amount,
+        uint256 paid,
+        uint256 held
+    );
+    event ServiceMetricsReported(address indexed node, INodeRegistry.NodeType indexed service, uint256 indexed epoch);
+    event ServiceReserveClaimed(address indexed node, INodeRegistry.NodeType indexed service, uint256 amount);
     event Payout(address indexed node, uint256 indexed epoch, uint256 amount);
     event ReserveCredit(address indexed node, uint256 indexed epoch, uint256 amount);
     event ReserveSwept(address indexed node, uint256 amount);
@@ -209,6 +254,15 @@ contract RewardDistributor is GovernedUpgradeable {
     error IncompleteNodeSet(uint256 epoch, uint256 covered, uint256 reporters);
     error EpochSealOutOfOrder(uint256 epoch, uint256 nextSealable);
     error SweepExceedsUndistributed(uint256 amount, uint256 undistributed);
+    error TelemetryRecordsPending(uint256 epoch);
+    error FactorCountMismatch(uint256 given, uint256 expected);
+    error PoolsOverAllocated(uint256 assigned, uint256 available);
+
+    /// @notice Review fix: a configured stage source that can't answer no longer fails silently.
+    event StageLookupFailed(address indexed node, address controller);
+    /// @notice Review fix: a paid service with factor reports but no weight table is
+    /// settled Ineligible for the epoch instead of reverting the whole seal.
+    event WeightTableMissing(uint8 indexed service, uint256 indexed epoch);
 
     function _rewardStorage() private pure returns (RewardStorage storage $) {
         bytes32 slot = REWARD_STORAGE_LOCATION;
@@ -238,16 +292,38 @@ contract RewardDistributor is GovernedUpgradeable {
         whenNotPaused
     {
         _checkReportWindow(epoch);
-
-        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
-            keccak256(abi.encode(address(this), node, epoch, score, heartbeatBps))
-        );
-        address signer = ECDSA.recover(digest, signature);
-        if (signer != config().getAddress(ConfigKeys.REWARD_METRIC_SIGNER)) revert InvalidSignature();
-
-        _countReporter(epoch, node);
-        _rewardStorage().metrics[epoch][node] = MetricRecord({score: score, heartbeatBps: heartbeatBps, submitted: true});
+        _checkSigner(keccak256(abi.encode(address(this), node, epoch, score, heartbeatBps)), signature);
+        _storeMetric(epoch, node, score, heartbeatBps);
+        _countReportingNode(epoch, node);
         emit MetricReported(node, epoch, score, heartbeatBps);
+    }
+
+    /// @notice #159: single-score report for one of `node`'s Node Services. The service
+    /// is part of the signed digest, so a report can't be replayed for another service.
+    function submitServiceMetricReport(
+        address node,
+        INodeRegistry.NodeType service,
+        uint256 epoch,
+        uint256 score,
+        uint256 heartbeatBps,
+        bytes calldata signature
+    ) external whenNotPaused {
+        _checkReportWindow(epoch);
+        _checkSigner(keccak256(abi.encode(address(this), node, uint8(service), epoch, score, heartbeatBps)), signature);
+        _storeMetric(epoch, accountOf(node, service), score, heartbeatBps);
+        _countReportingNode(epoch, node);
+        emit MetricReported(node, epoch, score, heartbeatBps);
+        emit ServiceMetricsReported(node, service, epoch);
+    }
+
+    function _storeMetric(uint256 epoch, address account, uint256 score, uint256 heartbeatBps) private {
+        _countReporter(epoch, account);
+        _rewardStorage().metrics[epoch][account] = MetricRecord({score: score, heartbeatBps: heartbeatBps, submitted: true});
+    }
+
+    function _checkSigner(bytes32 hash, bytes calldata signature) private view {
+        address signer = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(hash), signature);
+        if (signer != config().getAddress(ConfigKeys.REWARD_METRIC_SIGNER)) revert InvalidSignature();
     }
 
     /// @notice Ingests a signed per-node, per-epoch **per-factor** metric
@@ -264,44 +340,79 @@ contract RewardDistributor is GovernedUpgradeable {
     /// `submitMetricReport`'s raw-score path remains available for node
     /// types without a wired factor table (FR2.5 pluggability) and is left
     /// untouched for #52's existing test coverage.
+    /// @notice Signed per-factor report for one node (#53 FR2, generalized by #76):
+    /// `values` follows ScoringWeights' factor order for the node's type. Storage
+    /// nodes are scored from telemetry records instead whenever those finalize.
     function submitFactorMetrics(
         address node,
         uint256 epoch,
-        uint256[STORAGE_FACTOR_COUNT] calldata values,
+        uint256[] calldata values,
         uint256 heartbeatBps,
         bytes calldata signature
     ) external whenNotPaused {
         _checkReportWindow(epoch);
-
-        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
-            keccak256(abi.encode(address(this), node, epoch, values, heartbeatBps))
-        );
-        address signer = ECDSA.recover(digest, signature);
-        if (signer != config().getAddress(ConfigKeys.REWARD_METRIC_SIGNER)) revert InvalidSignature();
-
-        RewardStorage storage $ = _rewardStorage();
-        for (uint8 i = 0; i < STORAGE_FACTOR_COUNT; i++) {
-            $.factorValues[epoch][node][i] = values[i];
-            if (values[i] > $.factorMax[epoch][i]) {
-                $.factorMax[epoch][i] = values[i];
-            }
-        }
-        _countReporter(epoch, node);
-        $.hasFactorReport[epoch][node] = true;
-        // Reuses MetricRecord for eligibility (`submitted`) and heartbeat
-        // compliance bookkeeping; `score` is unused on this path (ignored by
-        // `_computeScore` whenever `hasFactorReport` is set).
-        $.metrics[epoch][node] = MetricRecord({score: 0, heartbeatBps: heartbeatBps, submitted: true});
+        _checkFactorCount(uint8(_registry().typeOf(node)), values.length);
+        _checkSigner(keccak256(abi.encode(address(this), node, epoch, values, heartbeatBps)), signature);
+        _storeFactors(epoch, node, values, heartbeatBps);
+        _countReportingNode(epoch, node);
         emit FactorMetricsReported(node, epoch, heartbeatBps);
     }
 
-    /// @notice Rejects metric/factor reports once the epoch's 15-minute (MVP
-    /// default, governance-configurable) finality window has elapsed, or the
-    /// epoch has already been sealed (#53 FR1.2/FR1.5) — late reports must
-    /// not be silently incorporated into a seal that reads current storage.
+    /// @notice #159: per-factor report for one of `node`'s Node Services (service in the digest).
+    function submitServiceFactorMetrics(
+        address node,
+        INodeRegistry.NodeType service,
+        uint256 epoch,
+        uint256[] calldata values,
+        uint256 heartbeatBps,
+        bytes calldata signature
+    ) external whenNotPaused {
+        _checkReportWindow(epoch);
+        _checkFactorCount(uint8(service), values.length);
+        _checkSigner(keccak256(abi.encode(address(this), node, uint8(service), epoch, values, heartbeatBps)), signature);
+        _storeFactors(epoch, accountOf(node, service), values, heartbeatBps);
+        _countReportingNode(epoch, node);
+        emit FactorMetricsReported(node, epoch, heartbeatBps);
+        emit ServiceMetricsReported(node, service, epoch);
+    }
+
+    function _checkFactorCount(uint8 service, uint256 given) private view {
+        uint256 expected = _weights().factorCount(service);
+        if (given != expected) revert FactorCountMismatch(given, expected);
+    }
+
+    function _storeFactors(uint256 epoch, address account, uint256[] calldata values, uint256 heartbeatBps) private {
+        RewardStorage storage $ = _rewardStorage();
+        $.factorRaw[epoch][account] = values;
+        _countReporter(epoch, account);
+        $.hasFactorReport[epoch][account] = true;
+        // `score` is unused on the factor path; MetricRecord carries eligibility and heartbeat.
+        $.metrics[epoch][account] = MetricRecord({score: 0, heartbeatBps: heartbeatBps, submitted: true});
+    }
+
+    /// @notice #159: the reward account of `node`'s `service`. The primary (first
+    /// registered) service uses the node address itself, so single-service nodes are
+    /// unchanged; every other service gets a deterministic derived address that has no
+    /// key and never receives tokens (payouts always go to `node`). Metric reports,
+    /// reserves, streaks, payouts, settlements and ReliabilityRegistry state for that
+    /// service are keyed by this account.
+    /// Invariant: the registry's primary service is immutable once set, so this mapping
+    /// never changes for a node; clearing it would re-key reserves, streaks and settlements.
+    function accountOf(address node, INodeRegistry.NodeType service) public view returns (address) {
+        INodeRegistry registry = _registry();
+        if (address(registry) == address(0) || !registry.hasPrimaryService(node) || registry.typeOf(node) == service) {
+            return node;
+        }
+        return address(uint160(uint256(keccak256(abi.encode("symposia.service-account", node, uint8(service))))));
+    }
+
+    /// @notice Rejects metric/factor reports for an epoch that hasn't started,
+    /// whose finality window (EpochController, #72) has elapsed, or that has
+    /// already been sealed (#53 FR1.2/FR1.5). Late reports are rejected, never
+    /// rolled into the next epoch.
     function _checkReportWindow(uint256 epoch) internal view {
         if (_rewardStorage().seals[epoch].sealed_) revert EpochAlreadySealed(epoch);
-        if (block.timestamp >= epochFinalityDeadline(epoch)) revert FinalityWindowElapsed(epoch);
+        if (!_epochs().acceptsReports(epoch)) revert FinalityWindowElapsed(epoch);
     }
 
     function metricOf(uint256 epoch, address node) external view returns (MetricRecord memory) {
@@ -328,28 +439,32 @@ contract RewardDistributor is GovernedUpgradeable {
 
     // --- Eligibility ---
 
-    function _isEligible(address node, uint256 epoch) internal view returns (bool) {
+    function _isEligible(address node, INodeRegistry.NodeType service, address account, uint256 epoch)
+        internal
+        view
+        returns (bool)
+    {
         INodeRegistry registry = _registry();
         if (address(registry) == address(0)) return false;
 
-        MetricRecord memory m = _rewardStorage().metrics[epoch][node];
+        MetricRecord memory m = _rewardStorage().metrics[epoch][account];
         if (!m.submitted) return false;
 
-        if (registry.statusOf(node) != INodeRegistry.NodeStatus.Active) return false;
+        if (registry.serviceStatusOf(node, service) != INodeRegistry.NodeStatus.Active) return false;
         // Approximates "passed region verification before epoch start" (FR-4
         // item 6): the node's most recent recorded verification must be at
         // or before the epoch being sealed. `Active` status already implies
         // at least one passing verification, so this only needs to check
         // recency, not presence.
-        if (registry.lastVerifiedEpochOf(node) > epoch) return false;
+        if (registry.serviceLastVerifiedEpochOf(node, service) > epoch) return false;
 
-        uint256 required = registry.minStakeFor(registry.typeOf(node), 0);
+        uint256 required = registry.minStakeFor(service, 0);
         // NOTE: capacity is not re-read here (registry does not expose it via
         // INodeRegistry's narrow interface); this checks stake against the
         // node-type base minimum as a floor. A tighter per-capacity check is
         // available to callers via the full StakingNodeRegistry ABI and is
         // left as a documented follow-up for #53/#57 to tighten if needed.
-        if (registry.stakeOf(node) < required) return false;
+        if (registry.serviceStakeOf(node, service) < required) return false;
 
         return true;
     }
@@ -360,27 +475,64 @@ contract RewardDistributor is GovernedUpgradeable {
 
     // --- Epoch sealing ---
 
-    /// @notice IEpochClock (#73): timestamp at which `epoch` ends.
+    /// @notice IEpochClock (#73): timestamp at which `epoch` ends. Forwards to
+    /// the EpochController (#72), which owns all epoch math.
     function epochEndTimestamp(uint256 epoch) public view returns (uint256) {
-        uint256 genesis = config().getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP);
-        uint256 length = config().getUint(ConfigKeys.EPOCH_LENGTH);
-        return genesis + (epoch + 1) * length;
+        return _epochs().epochEnd(epoch);
     }
 
-    // TODO(#72): move epoch math into the epoch controller / a shared EpochMath library
-    // (duplicated in TelemetryCheckpointRegistry.epochFinalityDeadline).
+    /// @notice Last second (inclusive) at which reports for `epoch` are accepted.
     function epochFinalityDeadline(uint256 epoch) public view returns (uint256) {
-        uint256 genesis = config().getUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP);
-        uint256 length = config().getUint(ConfigKeys.EPOCH_LENGTH);
-        uint256 finality = config().getUint(ConfigKeys.REWARD_FINALITY_WINDOW);
-        return genesis + (epoch + 1) * length + finality;
+        return _epochs().finalityDeadline(epoch);
     }
 
-    /// @notice Capacity node types that share the 92% emission (tokenomics-mvp.md
-    /// §5.5): Storage, OLTP, Analytics, Consensus, Serverless (ordinals 0-4).
-    /// Verifier (8%, #81), EmailIP (0%) and Compute (fee-funded, #90) are
-    /// excluded from this flow.
-    uint8 internal constant CAPACITY_TYPE_COUNT = 5;
+    function _epochs() internal view returns (IEpochController) {
+        return IEpochController(config().getAddress(ConfigKeys.EPOCH_CONTROLLER));
+    }
+
+    function _telemetry() internal view returns (ITelemetryRecords) {
+        return ITelemetryRecords(config().getAddress(ConfigKeys.REWARD_TELEMETRY_REGISTRY));
+    }
+
+    function _weights() internal view returns (IScoringWeights) {
+        return IScoringWeights(config().getAddress(ConfigKeys.REWARD_SCORING_WEIGHTS));
+    }
+
+    uint256 internal constant DEFAULT_RECORDS_MAX_WAIT = 24 hours;
+
+    /// @notice Where `epoch`'s metrics will come from if it's settled now (#76/#158):
+    /// finalized telemetry records; or, with no telemetry registry or once
+    /// `telemetryDeadline + REWARD_RECORDS_MAX_WAIT` has passed without them, signed
+    /// reports, so a committee outage can't stall payouts forever.
+    function epochSource(uint256 epoch) public view returns (EpochSource) {
+        ITelemetryRecords t = _telemetry();
+        if (address(t) == address(0)) return EpochSource.Signed;
+        if (t.recordsFinalized(epoch)) return EpochSource.Telemetry;
+        uint256 wait = config().getUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT);
+        if (block.timestamp > t.telemetryDeadline(epoch) + (wait == 0 ? DEFAULT_RECORDS_MAX_WAIT : wait)) {
+            return EpochSource.Signed;
+        }
+        return EpochSource.Pending;
+    }
+
+    /// @notice Whether `sealEpoch(epoch, …)` can succeed now (given a complete node list).
+    function canSeal(uint256 epoch) external view returns (bool) {
+        RewardStorage storage $ = _rewardStorage();
+        return !$.seals[epoch].sealed_ && epoch == $.nextSealableEpoch && _epochs().isSealed(epoch)
+            && epochSource(epoch) != EpochSource.Pending;
+    }
+
+    /// @notice Number of Node Service types and the funding predicates, from NodeServices (#163).
+    uint8 internal constant SERVICE_TYPE_COUNT = NodeServices.COUNT;
+    uint8 internal constant VERIFIER = uint8(INodeRegistry.NodeType.Verifier);
+
+    function _isCapacityService(uint8 t) internal pure returns (bool) {
+        return NodeServices.isCapacity(t);
+    }
+
+    function _isPaidService(uint8 t) internal pure returns (bool) {
+        return NodeServices.isPaid(t);
+    }
 
     /// @dev Per-node working state for one `sealEpoch` call.
     struct NodeCalc {
@@ -392,6 +544,8 @@ contract RewardDistributor is GovernedUpgradeable {
         bool bonus;
         uint256 amount;
         SettlementReason reason;
+        uint256[] raw; // #76 factor values; empty = legacy single-score report
+        address account; // #159 reward account of (node, nodeType)
     }
 
     /// @notice Computes and pays out (or reserves) rewards for `epoch`
@@ -410,31 +564,44 @@ contract RewardDistributor is GovernedUpgradeable {
     /// score sum of eligible nodes. Shares cut by reliability or stage
     /// penalties (Stage 3/4 = 0) are forfeited, not redistributed to peers,
     /// so per-type payouts are always `<= typePool`. Forfeited and rounding
-    /// amounts, and the 8% verifier share until #81, stay in this contract.
+    /// amounts stay in this contract. Verifiers (#81) are paid the same way from the
+    /// 8% verifier slice, scored on uptime, coverage and accuracy.
     function sealEpoch(uint256 epoch, address[] calldata nodes) external whenNotPaused {
         RewardStorage storage $ = _rewardStorage();
         if ($.seals[epoch].sealed_) revert EpochAlreadySealed(epoch);
-        if (block.timestamp < epochFinalityDeadline(epoch)) revert FinalityWindowNotElapsed(epoch);
+        if (!_epochs().isSealed(epoch)) revert FinalityWindowNotElapsed(epoch);
         if (epoch != $.nextSealableEpoch) revert EpochSealOutOfOrder(epoch, $.nextSealableEpoch);
+        EpochSource source = epochSource(epoch);
+        if (source == EpochSource.Pending) revert TelemetryRecordsPending(epoch);
         $.nextSealableEpoch = epoch + 1;
         // Latch before any external call (emission mint, reliability finalize, payouts).
         $.seals[epoch] = EpochSeal({sealed_: true, sealedAt: block.timestamp});
+        _epochs().trySeal(epoch); // records the controller seal and its event; no-op if already recorded
 
         uint256 emission = _epochEmission(epoch);
         uint256 capacityAmount = (emission * config().getUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS)) / 10_000;
+        // #81: the verifier slice (tokenomics-mvp.md §5.5), floored; remainders and an
+        // epoch with no eligible verifier leave it in `undistributed`.
+        uint256 verifierAmount = (emission * config().getUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS)) / 10_000;
 
-        NodeCalc[] memory calc = _scoreNodes(epoch, nodes);
+        NodeCalc[] memory calc = _scoreNodes(epoch, nodes, source == EpochSource.Telemetry);
 
-        uint256[] memory typeSum = new uint256[](CAPACITY_TYPE_COUNT);
-        uint256[] memory typePool = new uint256[](CAPACITY_TYPE_COUNT);
+        uint256[] memory typeSum = new uint256[](SERVICE_TYPE_COUNT);
+        uint256[] memory typePool = new uint256[](SERVICE_TYPE_COUNT);
         for (uint256 i = 0; i < calc.length; i++) {
             if (calc[i].reason == SettlementReason.None) typeSum[calc[i].nodeType] += calc[i].score;
         }
-        for (uint8 t = 0; t < CAPACITY_TYPE_COUNT; t++) {
-            if (typeSum[t] == 0) continue;
-            typePool[t] = _typePoolAmount(t, capacityAmount);
+        for (uint8 t = 0; t < SERVICE_TYPE_COUNT; t++) {
+            if (typeSum[t] == 0 || !_isPaidService(t)) continue;
+            typePool[t] = t == VERIFIER ? verifierAmount : _typePoolAmount(t, capacityAmount);
             _distributeType(calc, t, typeSum[t], typePool[t]);
         }
+
+        // Review fix: config whose shares or type weights sum past 100% fails here with
+        // a clear error instead of underflowing `emission - totalDistributed` below.
+        uint256 assigned;
+        for (uint8 t = 0; t < SERVICE_TYPE_COUNT; t++) assigned += typePool[t];
+        if (assigned > emission) revert PoolsOverAllocated(assigned, emission);
 
         uint256 totalDistributed = 0;
         for (uint256 i = 0; i < calc.length; i++) {
@@ -446,35 +613,43 @@ contract RewardDistributor is GovernedUpgradeable {
                     ? SettlementReason.ZeroStagePenalty
                     : (c.amount == 0 ? SettlementReason.ZeroAmount : SettlementReason.Paid);
             }
-            $.settlements[epoch][c.node] = SettlementRecord({
+            $.settlements[epoch][c.account] = SettlementRecord({
                 reason: c.reason,
                 reliabilityBps: uint16(c.reliabilityBps),
                 stagePenaltyBps: uint16(c.stagePenaltyBps),
                 reliabilityBonus: c.bonus,
-                amount: uint128(c.amount)
+                amount: uint128(c.amount),
+                score: uint64(c.score)
             });
-            bool capacity = c.nodeType < CAPACITY_TYPE_COUNT;
+            bool pooled = c.nodeType < SERVICE_TYPE_COUNT;
             emit NodeSettled(
-                c.node,
+                c.account,
                 epoch,
                 c.reason,
                 c.score,
-                capacity ? typeSum[c.nodeType] : 0,
-                capacity ? typePool[c.nodeType] : 0,
+                pooled ? typeSum[c.nodeType] : 0,
+                pooled ? typePool[c.nodeType] : 0,
                 c.reliabilityBps,
                 c.stagePenaltyBps,
                 c.bonus,
                 c.amount
             );
+            uint256 paid;
+            uint256 held;
             if (c.reason == SettlementReason.Paid) {
-                $.payoutOf[epoch][c.node] = c.amount;
+                $.payoutOf[epoch][c.account] = c.amount;
                 totalDistributed += c.amount;
-                _settle(c.node, epoch, c.amount);
+                (paid, held) = _settle(c.account, c.node, epoch, c.amount);
+            }
+            if (c.nodeType < SERVICE_TYPE_COUNT) {
+                emit ServiceSettled(
+                    c.node, INodeRegistry.NodeType(c.nodeType), epoch, c.reason, c.account, c.amount, paid, held
+                );
             }
         }
 
-        // Everything received for the epoch but not assigned to a node (verifier
-        // share until #81, forfeits, ineligible and empty type pools, rounding).
+        // Everything received for the epoch but not assigned to a node (forfeits,
+        // ineligible and empty pools, an epoch without eligible verifiers, rounding).
         // Held reserve credits count as assigned: they are owed to the node.
         uint256 leftover = emission - totalDistributed;
         if (leftover > 0) {
@@ -491,55 +666,165 @@ contract RewardDistributor is GovernedUpgradeable {
     /// reports. #75's TelemetryCheckpointRegistry.getEpochMetricRecord is
     /// the intended source once #76 (scoring engine) reads from it. Until
     /// then, the signer is expected to sign from those aggregated records.
-    function _scoreNodes(uint256 epoch, address[] calldata nodes) internal returns (NodeCalc[] memory calc) {
+    function _scoreNodes(uint256 epoch, address[] calldata nodes, bool telemetry)
+        internal
+        returns (NodeCalc[] memory calc)
+    {
         RewardStorage storage $ = _rewardStorage();
         INodeRegistry registry = _registry();
         IReliabilityRegistry rel = IReliabilityRegistry(config().getAddress(ConfigKeys.REWARD_RELIABILITY_REGISTRY));
-        calc = new NodeCalc[](nodes.length);
-        uint256 covered;
+        // #159: every listed node expands into one unit per Node Service.
+        INodeRegistry.NodeType[][] memory services = new INodeRegistry.NodeType[][](nodes.length);
+        uint256 units;
+        for (uint256 i = 0; i < nodes.length; i++) {
+            services[i] = _settlementServices(registry, nodes[i]);
+            units += services[i].length;
+        }
+        calc = new NodeCalc[](units);
+        uint256 coveredReports;
+        uint256 coveredRecords;
+        uint256 u;
 
         for (uint256 i = 0; i < nodes.length; i++) {
             address node = nodes[i];
-            if ($.settlements[epoch][node].reason != SettlementReason.None) revert DuplicateNode(node);
-            // Dedupe marker, overwritten in sealEpoch. Relies on every early exit being a
-            // revert; a non-reverting return here would leave it behind. Duplicates are
-            // rejected before `covered` counts, so repeats cannot fake reporter coverage.
-            $.settlements[epoch][node].reason = SettlementReason.ZeroAmount;
+            if ($.sealListed[epoch][node]) revert DuplicateNode(node);
+            $.sealListed[epoch][node] = true;
 
-            NodeCalc memory c = calc[i];
-            c.node = node;
-            c.reliabilityBps = 10_000;
-            c.stagePenaltyBps = 10_000;
-            MetricRecord memory m = $.metrics[epoch][node];
-            if (m.submitted) covered++;
-            c.nodeType = address(registry) == address(0) ? type(uint8).max : uint8(registry.typeOf(node));
-            if (c.nodeType >= CAPACITY_TYPE_COUNT) {
-                c.reason = SettlementReason.ExcludedType;
-                continue;
+            TelemetryRecordReader.Summary memory r;
+            if (telemetry) {
+                r = TelemetryRecordReader.read(address(_telemetry()), node, epoch);
+                if (r.exists) coveredRecords++;
             }
-
-            if (address(rel) != address(0) && m.submitted) {
-                (c.reliabilityBps, c.bonus) = _finalizeReliability(rel, node, epoch, m.heartbeatBps);
+            for (uint256 k = 0; k < services[i].length; k++) {
+                NodeCalc memory c = calc[u++];
+                if (_scoreUnit(epoch, node, services[i][k], registry, rel, r, c)) coveredReports++;
             }
-
-            if (!_isEligible(node, epoch)) {
-                c.reason = SettlementReason.Ineligible;
-                continue;
-            }
-            c.score = _computeScore(epoch, node);
-            if (c.score == 0) {
-                c.reason = SettlementReason.Ineligible;
-                continue;
-            }
-            c.stagePenaltyBps = _stagePenaltyBpsFor(node);
         }
-        if (covered != $.reporterCount[epoch]) revert IncompleteNodeSet(epoch, covered, $.reporterCount[epoch]);
+        if (coveredReports != $.reporterCount[epoch]) {
+            revert IncompleteNodeSet(epoch, coveredReports, $.reporterCount[epoch]);
+        }
+        if (telemetry && coveredRecords != _telemetry().recordCount(epoch)) {
+            revert IncompleteNodeSet(epoch, coveredRecords, _telemetry().recordCount(epoch));
+        }
+
+        _scoreFactors(epoch, calc);
     }
 
-    /// @dev Finalizes the node's reliability for `epoch`. Any registry
-    /// failure (paused, misconfigured finalizer) reverts the seal rather than
-    /// silently paying neutral reliability. Monotonic seals rule out the
-    /// out-of-order case.
+    /// @dev The services settled for `node`: its registered services, or a single
+    /// legacy unit (primary type, account = node) for a node with none. Without a
+    /// registry, one unit that is always excluded.
+    function _settlementServices(INodeRegistry registry, address node)
+        private
+        view
+        returns (INodeRegistry.NodeType[] memory list)
+    {
+        if (address(registry) != address(0)) {
+            list = registry.servicesOf(node);
+            if (list.length > 0) return list;
+        }
+        list = new INodeRegistry.NodeType[](1);
+        if (address(registry) != address(0)) list[0] = registry.typeOf(node);
+    }
+
+    /// @dev Pass 1 for one (node, service) unit: account, type exclusion, telemetry
+    /// ingestion, reliability finalization (#79), eligibility, raw score and stage
+    /// multiplier. Returns whether the unit's account had a metric report.
+    function _scoreUnit(
+        uint256 epoch,
+        address node,
+        INodeRegistry.NodeType service,
+        INodeRegistry registry,
+        IReliabilityRegistry rel,
+        TelemetryRecordReader.Summary memory r,
+        NodeCalc memory c
+    ) private returns (bool reported) {
+        RewardStorage storage $ = _rewardStorage();
+        c.node = node;
+        c.reliabilityBps = 10_000;
+        c.stagePenaltyBps = 10_000;
+        c.account = accountOf(node, service);
+        c.nodeType = address(registry) == address(0) ? type(uint8).max : uint8(service);
+        reported = $.metrics[epoch][c.account].submitted;
+        // Telemetry mode: the Storage service is judged on its committee record (#76).
+        bool recordIneligible;
+        if (r.exists && service == INodeRegistry.NodeType.Storage && address(registry) != address(0)) {
+            _ingestRecord(epoch, c, r);
+            recordIneligible = !r.eligible;
+        }
+        if (!_isPaidService(c.nodeType)) {
+            c.reason = SettlementReason.ExcludedType;
+            return reported;
+        }
+
+        MetricRecord memory m = $.metrics[epoch][c.account];
+        if (address(rel) != address(0) && m.submitted) {
+            (c.reliabilityBps, c.bonus) = _finalizeReliability(rel, c.account, epoch, m.heartbeatBps);
+        }
+
+        if (recordIneligible || !_isEligible(node, service, c.account, epoch)) {
+            c.reason = SettlementReason.Ineligible;
+            return reported;
+        }
+        if (c.raw.length == 0) {
+            if ($.hasFactorReport[epoch][c.account]) c.raw = $.factorRaw[epoch][c.account];
+            else c.score = m.score; // legacy single-score report (#53)
+        }
+        c.stagePenaltyBps = _stagePenaltyBpsFor(node, service);
+    }
+
+    /// @dev A Storage service with a finalized record is judged on it (#76). Its
+    /// heartbeat compliance replaces any signed report, so the reserve gate and
+    /// reliability read measured data; eligibility is checked by the caller.
+    function _ingestRecord(uint256 epoch, NodeCalc memory c, TelemetryRecordReader.Summary memory r) private {
+        _rewardStorage().metrics[epoch][c.account] = MetricRecord({score: 0, heartbeatBps: r.heartbeatBps, submitted: true});
+        c.raw = r.raw;
+    }
+
+    /// @dev #76 two-pass scoring: per type, find the best value of each factor across
+    /// the eligible factor-path nodes, then score each node against it with the weight
+    /// table in force for this epoch. A zero score makes the node ineligible.
+    function _scoreFactors(uint256 epoch, NodeCalc[] memory calc) private {
+        for (uint8 t = 0; t < SERVICE_TYPE_COUNT; t++) {
+            uint256 count;
+            for (uint256 i; i < calc.length; i++) {
+                if (calc[i].nodeType == t && calc[i].reason == SettlementReason.None && calc[i].raw.length > 0) count++;
+            }
+            if (count > 0) {
+                uint16[] memory weights;
+                bool[] memory lower;
+                try _weights().weightsFor(t, epoch) returns (uint16[] memory w, bool[] memory l) {
+                    (weights, lower) = (w, l);
+                } catch {
+                    emit WeightTableMissing(t, epoch);
+                    for (uint256 i; i < calc.length; i++) {
+                        if (calc[i].nodeType == t && calc[i].reason == SettlementReason.None && calc[i].raw.length > 0) {
+                            calc[i].reason = SettlementReason.Ineligible;
+                        }
+                    }
+                    continue;
+                }
+                uint256[][] memory raws = new uint256[][](count);
+                uint256 k;
+                for (uint256 i; i < calc.length; i++) {
+                    if (calc[i].nodeType == t && calc[i].reason == SettlementReason.None && calc[i].raw.length > 0) {
+                        raws[k++] = calc[i].raw;
+                    }
+                }
+                uint256[] memory best = FactorScoring.bests(raws, lower);
+                for (uint256 i; i < calc.length; i++) {
+                    NodeCalc memory c = calc[i];
+                    if (c.nodeType == t && c.reason == SettlementReason.None && c.raw.length > 0) {
+                        c.score = FactorScoring.score(c.raw, best, weights, lower);
+                        emit NodeScored(c.account, epoch, t, c.raw, c.score);
+                    }
+                }
+            }
+        }
+        for (uint256 i; i < calc.length; i++) {
+            if (calc[i].reason == SettlementReason.None && calc[i].score == 0) calc[i].reason = SettlementReason.Ineligible;
+        }
+    }
+
     function _finalizeReliability(IReliabilityRegistry rel, address node, uint256 epoch, uint256 heartbeatBps)
         internal
         returns (uint256 scoreBps, bool bonus)
@@ -583,7 +868,27 @@ contract RewardDistributor is GovernedUpgradeable {
         if (!$.metrics[epoch][node].submitted) $.reporterCount[epoch] += 1;
     }
 
-    /// @notice Nodes with a metric report for `epoch`; `sealEpoch` must cover all of them.
+    function _countReportingNode(uint256 epoch, address node) private {
+        RewardStorage storage $ = _rewardStorage();
+        if ($.nodeReported[epoch][node]) return;
+        $.nodeReported[epoch][node] = true;
+        if ($.reportingNodeCount[epoch]++ == 0) $.firstReportBlock[epoch] = block.number;
+    }
+
+    /// @notice #165: block of `epoch`'s first metric report (0 = none). Every report event
+    /// for the epoch is at or after it, so sealers query logs from here, not from genesis.
+    function firstReportBlock(uint256 epoch) external view returns (uint256) {
+        return _rewardStorage().firstReportBlock[epoch];
+    }
+
+    /// @notice #159: distinct nodes that reported for `epoch` (any service). Sealers
+    /// compare this with the nodes found in `MetricReported`/`FactorMetricsReported` logs.
+    function reportingNodeCount(uint256 epoch) external view returns (uint256) {
+        return _rewardStorage().reportingNodeCount[epoch];
+    }
+
+    /// @notice Reward accounts with a metric report for `epoch` (one per reporting Node
+    /// Service, #159); `sealEpoch` must cover all of them.
     function reporterCount(uint256 epoch) external view returns (uint256) {
         return _rewardStorage().reporterCount[epoch];
     }
@@ -598,7 +903,7 @@ contract RewardDistributor is GovernedUpgradeable {
         return _rewardStorage().undistributed;
     }
 
-    /// @notice Governed release of unassigned SYM (e.g. to #81's verifier
+    /// @notice Governed release of unassigned SYM (e.g. an unclaimed verifier
     /// path or the ecosystem treasury). Bounded by the ledger, so it can
     /// never touch held reserves owed to nodes.
     function sweepUndistributed(address to, uint256 amount) external onlyTimelock {
@@ -634,23 +939,6 @@ contract RewardDistributor is GovernedUpgradeable {
     /// on that basis alone. Otherwise (no factor report submitted for this
     /// epoch) falls back to the flat `score` from `submitMetricReport`, for
     /// node types without a wired factor table (FR2.5).
-    function _computeScore(uint256 epoch, address node) internal view returns (uint256) {
-        RewardStorage storage $ = _rewardStorage();
-        if (!$.hasFactorReport[epoch][node]) {
-            return $.metrics[epoch][node].score;
-        }
-
-        uint8 nodeType = uint8(_registry().typeOf(node));
-        uint256 weighted;
-        for (uint8 i = 0; i < STORAGE_FACTOR_COUNT; i++) {
-            uint256 maxVal = $.factorMax[epoch][i];
-            if (maxVal == 0) continue;
-            uint256 normalized = ($.factorValues[epoch][node][i] * NORM_SCALE) / maxVal;
-            uint256 weightBps = config().getUint(ConfigKeys.rewardFactorWeightBps(nodeType, i));
-            weighted += (normalized * weightBps) / 10_000;
-        }
-        return weighted;
-    }
 
     function _typePoolAmount(uint8 nodeType, uint256 capacityAmount) internal view returns (uint256) {
         uint256 weight = config().getUint(ConfigKeys.rewardTypeWeight(nodeType));
@@ -661,20 +949,30 @@ contract RewardDistributor is GovernedUpgradeable {
         return (capacityAmount * weight) / 10_000;
     }
 
-    function _stagePenaltyBpsFor(address node) internal view returns (uint256) {
+    /// @dev #166: `service`'s penalty stage (its own hardware stage, or a node-level
+    /// violation), so a fault on one Node Service doesn't cut the node's other services.
+    /// Unconfigured (address 0) is the only silent no-penalty path.
+    function _stagePenaltyBpsFor(address node, INodeRegistry.NodeType service) internal returns (uint256) {
         address controller = config().getAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER);
         if (controller == address(0)) return 10_000;
-        (bool ok, bytes memory data) = controller.staticcall(abi.encodeWithSignature("stageOf(address)", node));
-        if (!ok || data.length == 0) return 10_000;
-        uint8 stage = abi.decode(data, (uint8));
-        if (stage == 0) return 10_000;
-        return config().getUint(ConfigKeys.rewardStagePenaltyBps(stage));
+        try IStageSource(controller).stageOf(node, service) returns (uint8 stage) {
+            if (stage == 0) return 10_000;
+            return config().getUint(ConfigKeys.rewardStagePenaltyBps(stage));
+        } catch {
+            emit StageLookupFailed(node, controller);
+            return 10_000;
+        }
     }
 
-    function _settle(address node, uint256 epoch, uint256 amount) internal {
+    /// @dev Reserve, streak and heartbeat state are per reward `account` (#159);
+    /// tokens always go to `node`. Returns what was paid now and what was held.
+    function _settle(address account, address node, uint256 epoch, uint256 amount)
+        internal
+        returns (uint256 paidNow, uint256 heldNow)
+    {
         RewardStorage storage $ = _rewardStorage();
         uint256 thresholdBps = config().getUint(ConfigKeys.REWARD_HEARTBEAT_THRESHOLD_BPS);
-        uint256 hb = $.metrics[epoch][node].heartbeatBps;
+        uint256 hb = $.metrics[epoch][account].heartbeatBps;
 
         // #53 FR5.2: strict ">90%" (not ">="), evaluated across the current
         // epoch AND the immediately preceding epoch. FR5.5: a node with no
@@ -682,10 +980,10 @@ contract RewardDistributor is GovernedUpgradeable {
         // judged on the current epoch's compliance alone for this one
         // payout — this correctly exempts a node whose first-ever eligible
         // epoch is e.g. epoch 5, not just epoch 0.
-        bool hasPrevRecord = epoch > 0 && $.metrics[epoch - 1][node].submitted;
+        bool hasPrevRecord = epoch > 0 && $.metrics[epoch - 1][account].submitted;
         bool ownEpochCompliant = hb > thresholdBps;
         bool autoPayEligible =
-            ownEpochCompliant && (!hasPrevRecord || $.metrics[epoch - 1][node].heartbeatBps > thresholdBps);
+            ownEpochCompliant && (!hasPrevRecord || $.metrics[epoch - 1][account].heartbeatBps > thresholdBps);
 
         // #53 FR6.1: the sweep streak counts each epoch's OWN >90% reading
         // consecutively (reset to 0 on any non-compliant epoch), which is a
@@ -697,34 +995,35 @@ contract RewardDistributor is GovernedUpgradeable {
         // preceding epoch, epoch0, was non-compliant).
         uint256 sweepEpochs = config().getUint(ConfigKeys.REWARD_RESERVE_SWEEP_EPOCHS);
         if (ownEpochCompliant) {
-            $.consecutiveCompliantEpochs[node] += 1;
+            $.consecutiveCompliantEpochs[account] += 1;
         } else {
-            $.consecutiveCompliantEpochs[node] = 0;
+            $.consecutiveCompliantEpochs[account] = 0;
         }
 
         if (autoPayEligible) {
             uint256 toPay = amount;
-            if ($.reserveBalance[node] > 0 && $.consecutiveCompliantEpochs[node] >= sweepEpochs) {
-                toPay += $.reserveBalance[node];
-                $.reserveBalance[node] = 0;
+            if ($.reserveBalance[account] > 0 && $.consecutiveCompliantEpochs[account] >= sweepEpochs) {
+                toPay += $.reserveBalance[account];
+                $.reserveBalance[account] = 0;
                 emit ReserveSwept(node, toPay - amount);
             }
 
-            uint256 paid = _payNode(node, epoch, toPay);
-            emit Payout(node, epoch, paid);
+            paidNow = _payNode(node, epoch, toPay);
+            emit Payout(node, epoch, paidNow);
         } else {
             // A non-auto-pay epoch can still complete the sweep streak (per
             // FR6.1's example: epoch X's own reading pushes the streak to
             // the threshold even though epoch X's *own* payout is held,
             // because epoch X's preceding epoch failed the two-epoch test).
             // Sweep independently of this epoch's own payout routing.
-            if ($.reserveBalance[node] > 0 && $.consecutiveCompliantEpochs[node] >= sweepEpochs) {
-                uint256 swept = $.reserveBalance[node];
-                $.reserveBalance[node] = 0;
-                uint256 paidSwept = _payNode(node, epoch, swept);
-                emit ReserveSwept(node, paidSwept);
+            if ($.reserveBalance[account] > 0 && $.consecutiveCompliantEpochs[account] >= sweepEpochs) {
+                uint256 swept = $.reserveBalance[account];
+                $.reserveBalance[account] = 0;
+                paidNow = _payNode(node, epoch, swept);
+                emit ReserveSwept(node, paidNow);
             }
-            $.reserveBalance[node] += amount;
+            $.reserveBalance[account] += amount;
+            heldNow = amount;
             emit ReserveCredit(node, epoch, amount);
         }
     }
@@ -768,26 +1067,32 @@ contract RewardDistributor is GovernedUpgradeable {
     /// a node that became compliant without a subsequent payout-bearing
     /// epoch being sealed for it).
     ///
-    /// KNOWN GAP (issue #57 follow-up): this path does not route through
-    /// `_payNode`/the foundation reward hook — a foundation node could in
-    /// principle reach this safety-net path with an un-swept reserve
-    /// balance that was never surplus-checked. In practice `sealEpoch`'s
-    /// own sweep (which IS hooked, see `_settle`) fires in the same epoch
-    /// the compliance condition is met, so this is expected to be
-    /// unreachable for a foundation node in normal operation; flagged here
-    /// rather than silently left implicit, and worth closing explicitly
-    /// (either route it through `_payNode` too, or restrict this entry
-    /// point from foundation nodes) before relying on it at mainnet scale.
+    /// Routed through `_payNode`, so the #57 foundation hook applies here too.
     function claimReserve() external whenNotPaused {
+        uint256 amount = _claimReserve(msg.sender);
+        // The node's own account belongs to its primary service (#159), for the #161 ledger.
+        INodeRegistry registry = _registry();
+        if (address(registry) != address(0) && registry.hasPrimaryService(msg.sender)) {
+            emit ServiceReserveClaimed(msg.sender, registry.typeOf(msg.sender), amount);
+        }
+    }
+
+    /// @notice #159: the same safety-net claim for one of the caller's Node Services.
+    function claimServiceReserve(INodeRegistry.NodeType service) external whenNotPaused {
+        uint256 amount = _claimReserve(accountOf(msg.sender, service));
+        emit ServiceReserveClaimed(msg.sender, service, amount);
+    }
+
+    function _claimReserve(address account) private returns (uint256 amount) {
         RewardStorage storage $ = _rewardStorage();
         uint256 sweepEpochs = config().getUint(ConfigKeys.REWARD_RESERVE_SWEEP_EPOCHS);
-        if ($.reserveBalance[msg.sender] == 0 || $.consecutiveCompliantEpochs[msg.sender] < sweepEpochs) {
+        if ($.reserveBalance[account] == 0 || $.consecutiveCompliantEpochs[account] < sweepEpochs) {
             revert NoReserveToSweep();
         }
-        uint256 amount = $.reserveBalance[msg.sender];
-        $.reserveBalance[msg.sender] = 0;
-        IERC20 token = IERC20(config().getAddress(ConfigKeys.TOKEN_ADDRESS));
-        token.safeTransfer(msg.sender, amount);
+        amount = $.reserveBalance[account];
+        $.reserveBalance[account] = 0;
+        // Through the #57 foundation hook like every other payout (closes the known gap).
+        _payNode(msg.sender, $.nextSealableEpoch == 0 ? 0 : $.nextSealableEpoch - 1, amount);
         emit ReserveSwept(msg.sender, amount);
     }
 }

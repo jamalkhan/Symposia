@@ -132,3 +132,17 @@ The cache is used for placement decisions and node selection. A node that fails 
 - Minimum deployment: 2 gateway instances in at least 2 distinct fault domains (separate data centers or cloud availability zones).
 - Gateway processes must support graceful shutdown: in-flight requests are completed before the process exits; new connections are rejected during the drain window.
 - Gateway logs emit structured JSON for all requests: timestamp, tenant ID, credential ID, operation, bucket, key, response code, bytes transferred, latency, selected node ID, and any error detail.
+
+## Earnings (Blob Gateway Node Service)
+
+The gateway is a **Node Service** (#159): a node runs it next to, or instead of, Storage, and it is staked, scored and paid separately. Strawman economics (#160, subject to governance):
+
+| Item | Strawman |
+|---|---|
+| Funding | Own type pool inside the 92% capacity emission: **10%** of the capacity slice in the MVP deploy (Storage 90%); long-term base weight 4% |
+| Score | Uptime 30% · request success rate 30% · p95 latency 20% (lower is better) · bytes served 20%, each as ratio-to-best across gateways |
+| Minimum stake | 10,000 SYM flat (no capacity term) |
+| Penalties | Node-level violations only. Failed requests cost score, not stake (a gateway holds no data, so there are no data-loss stages) |
+| Measurement (MVP) | Signed factor reports per epoch (`submitServiceFactorMetrics(node, BlobGateway, …)`). Collecting the counters in the gateway process is a follow-up |
+
+The NodeHost **Node Services** tab shows this breakdown next to the gateway's settings.

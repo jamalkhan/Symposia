@@ -13,6 +13,8 @@
     <nav id="nav" hidden>
       <button data-view="diagnostics" class="tab active">Diagnostics</button>
       <button data-view="network" class="tab">Network</button>
+      <button data-view="services" class="tab">Node Services</button>
+      <button data-view="ledger" class="tab">Ledger</button>
       <button data-view="settings" class="tab">Settings</button>
       <button id="logout" class="link">Log out</button>
     </nav>
@@ -62,7 +64,7 @@
         <h2>Nodes on this network</h2>
         <table id="network-nodes"></table>
         <p class="hint">Storage: green healthy, yellow under 40% free, red 20% free or less. Compute: green healthy, yellow over 20% CPU, red over 50%.
-          Gateway: green when it reaches enough storage nodes for every object to have its copies, yellow while short or repairing, red when down. Grey means the role isn't configured or the node couldn't be reached. Hover a light for details.</p>
+          Gateway: green when it reaches enough storage nodes for every object to have its copies, yellow while short or repairing, red when down. Grey means the Node Service isn't running or the node couldn't be reached. Hover a light for details.</p>
       </div>
       <div class="card">
         <h2>Protocol activations</h2>
@@ -71,8 +73,83 @@
       </div>
     </section>
 
+    <section id="view-services" hidden>
+      <div class="card">
+        <h2>Node Services</h2>
+        <p>A node runs zero, one or many <b>Node Services</b>. Each service is staked, scored, penalized and paid on its own:
+          the more services you run to earn, the more you stake. Every service's earnings breakdown is public, so you can see what you're
+          turning on and what you get in return.</p>
+        <p class="hint">Turning a service on here starts it on this machine. Staking it on-chain is a separate step (coming to NodeHost).</p>
+      </div>
+      <form id="services-form" data-settings-form>
+        <div class="card">
+          <h2><label><input type="checkbox" name="Storage.Enabled"> Storage</label></h2>
+          <div class="earnings" data-earnings="storage"></div>
+          <h3>Settings</h3>
+          <label>Port <input type="number" name="Storage.Port"></label>
+          <label>Advertised endpoint <input name="Storage.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt; (set your LAN/public address for other machines)"></label>
+          <p class="hint" data-lan hidden>Other machines can't reach 127.0.0.1. <button type="button" data-use-lan="Storage">Use this machine's LAN address</button></p>
+          <label>gRPC TLS port <small>(the blob gateway stores data through this; keep it LAN-only)</small> <input type="number" name="Storage.GrpcTlsPort"></label>
+          <label class="inline"><input type="checkbox" name="Storage.PlaintextGrpc"> Also serve gRPC in cleartext <small>(for gateways on the previous release; turn off once TLS is activated on chain)</small></label>
+          <label>Cleartext gRPC port <input type="number" name="Storage.GrpcPort"></label>
+          <label>Capacity (GB) <input type="number" name="Storage.MaxCapacityGb" min="1"></label>
+        </div>
+
+        <div class="card">
+          <h2><label><input type="checkbox" name="BlobGateway.Enabled"> Blob Gateway <small>(S3-compatible)</small></label></h2>
+          <div class="earnings" data-earnings="blob-gateway"></div>
+          <h3>Settings</h3>
+          <p class="hint">Accepts uploads with AWS-style access keys and stores them on this network's Storage services.</p>
+          <label>Port <input type="number" name="BlobGateway.Port"></label>
+          <label>Region <input name="BlobGateway.Region"></label>
+          <label>Access key ID <input name="BlobGateway.AccessKeyId" autocomplete="off"></label>
+          <label>Secret access key <input type="password" name="blobGatewaySecret" autocomplete="off" placeholder="not set"></label>
+          <p><button type="button" id="generate-keys">Generate a new key pair</button> <span class="hint" id="generated-hint"></span></p>
+          <label>Write quorum <small>(copies needed before an upload succeeds)</small> <input type="number" name="BlobGateway.WriteQuorum" min="1"></label>
+          <label>Minimum copies <small>(missing copies are repaired in the background)</small> <input type="number" name="BlobGateway.MinCopies" min="1"></label>
+        </div>
+
+        <div class="card">
+          <h2><label><input type="checkbox" name="Compute.Enabled"> Compute</label></h2>
+          <div class="earnings" data-earnings="compute"></div>
+          <h3>Settings</h3>
+          <label>Port <input type="number" name="Compute.Port"></label>
+          <label>Advertised endpoint <input name="Compute.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt;"></label>
+          <label class="inline"><input type="checkbox" name="Compute.NetworkingOnly"> Networking only (stub Neon binaries, for testing)</label>
+          <label>pageserver <input name="Compute.PageserverPath"></label>
+          <label>safekeeper <input name="Compute.SafekeeperPath"></label>
+          <label>postgres <input name="Compute.PostgresPath"></label>
+        </div>
+
+        <div class="actions">
+          <button type="submit">Save and apply</button>
+          <span data-save-result></span>
+        </div>
+      </form>
+      <h2 class="section">Other Node Services</h2>
+      <div class="grid" id="service-catalog"></div>
+    </section>
+
+    <section id="view-ledger" hidden>
+      <div id="ledger-unavailable" class="card notice" hidden></div>
+      <div class="card">
+        <h2>Totals by Node Service</h2>
+        <table id="ledger-totals"></table>
+        <p class="hint">Stake posted leaves your wallet (negative), rewards arrive (positive), slashes are lost (negative). Rewards held in reserve count as earned when settled.</p>
+      </div>
+      <div class="card">
+        <h2>Transactions</h2>
+        <div class="filters">
+          <label>Category <select id="ledger-category"><option value="">All</option><option>Stake</option><option>Reward</option><option>Penalty</option></select></label>
+          <label>Node Service <select id="ledger-service"><option value="">All</option></select></label>
+          <a id="ledger-csv" class="button" href="/api/ledger.csv" download>Export CSV</a>
+        </div>
+        <table id="ledger-entries"></table>
+      </div>
+    </section>
+
     <section id="view-settings" hidden>
-      <form id="settings-form">
+      <form id="settings-form" data-settings-form>
         <div class="card">
           <h2>Network</h2>
           <div id="join-suggestion" class="notice" hidden>
@@ -102,39 +179,6 @@
         </div>
 
         <div class="card">
-          <h2><label><input type="checkbox" name="Storage.Enabled"> Storage role</label></h2>
-          <label>Port <input type="number" name="Storage.Port"></label>
-          <label>Advertised endpoint <input name="Storage.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt; (set your LAN/public address for other machines)"></label>
-          <p class="hint" data-lan hidden>Other machines can't reach 127.0.0.1. <button type="button" data-use-lan="Storage">Use this machine's LAN address</button></p>
-          <label>gRPC TLS port <small>(the blob gateway stores data through this; keep it LAN-only)</small> <input type="number" name="Storage.GrpcTlsPort"></label>
-          <label class="inline"><input type="checkbox" name="Storage.PlaintextGrpc"> Also serve gRPC in cleartext <small>(for gateways on the previous release; turn off once TLS is activated on chain)</small></label>
-          <label>Cleartext gRPC port <input type="number" name="Storage.GrpcPort"></label>
-          <label>Capacity (GB) <input type="number" name="Storage.MaxCapacityGb" min="1"></label>
-        </div>
-
-        <div class="card">
-          <h2><label><input type="checkbox" name="Compute.Enabled"> Compute role</label></h2>
-          <label>Port <input type="number" name="Compute.Port"></label>
-          <label>Advertised endpoint <input name="Compute.AdvertisedEndpoint" placeholder="http://127.0.0.1:&lt;port&gt;"></label>
-          <label class="inline"><input type="checkbox" name="Compute.NetworkingOnly"> Networking only (stub Neon binaries, for testing)</label>
-          <label>pageserver <input name="Compute.PageserverPath"></label>
-          <label>safekeeper <input name="Compute.SafekeeperPath"></label>
-          <label>postgres <input name="Compute.PostgresPath"></label>
-        </div>
-
-        <div class="card">
-          <h2><label><input type="checkbox" name="BlobGateway.Enabled"> Blob gateway <small>(S3-compatible)</small></label></h2>
-          <p class="hint">Accepts uploads with AWS-style access keys and stores them on this network's storage nodes.</p>
-          <label>Port <input type="number" name="BlobGateway.Port"></label>
-          <label>Region <input name="BlobGateway.Region"></label>
-          <label>Access key ID <input name="BlobGateway.AccessKeyId" autocomplete="off"></label>
-          <label>Secret access key <input type="password" name="blobGatewaySecret" autocomplete="off" placeholder="not set"></label>
-          <p><button type="button" id="generate-keys">Generate a new key pair</button> <span class="hint" id="generated-hint"></span></p>
-          <label>Write quorum <small>(copies needed before an upload succeeds)</small> <input type="number" name="BlobGateway.WriteQuorum" min="1"></label>
-          <label>Minimum copies <small>(missing copies are repaired in the background)</small> <input type="number" name="BlobGateway.MinCopies" min="1"></label>
-        </div>
-
-        <div class="card">
           <h2>Discovery</h2>
           <label>Interval (seconds) <input type="number" name="Discovery.IntervalSeconds" min="1"></label>
           <label>Seed peers (comma separated) <input name="Discovery.SeedPeers"></label>
@@ -144,13 +188,13 @@
           <h2>Logging</h2>
           <p class="hint">Each service writes its own daily log files under <code>&lt;data dir&gt;/logs/&lt;service&gt;/</code> (10 MB per file, newest 14 kept). Changes apply immediately.</p>
           <label>Node <small>(chain, gateway, registration, discovery, this UI)</small> <select name="Logging.Node" data-loglevel></select></label>
-          <label>Storage <select name="Logging.Storage" data-loglevel></select></label>
-          <label>Compute <select name="Logging.Compute" data-loglevel></select></label>
+          <label>Storage service <select name="Logging.Storage" data-loglevel></select></label>
+          <label>Compute service <select name="Logging.Compute" data-loglevel></select></label>
         </div>
 
         <div class="actions">
           <button type="submit">Save and apply</button>
-          <span id="save-result"></span>
+          <span id="save-result" data-save-result></span>
         </div>
         <p class="hint">Fields set by <code>SYMPOSIA__…</code> environment variables are locked.</p>
       </form>

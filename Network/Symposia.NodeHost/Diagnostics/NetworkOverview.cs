@@ -153,7 +153,7 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
         if (!rows.Any(r => r.Self))
         {
             var reason = supervisor.Context.PrimaryEndpoint is null
-                ? "Not registered: turn on Storage or Compute in Settings so this node has an endpoint to register."
+                ? "Not registered: turn on Storage or Compute under Node Services so this node has an endpoint to register."
                 : "Not registered on-chain yet (see Diagnostics → On-chain registration).";
             logger.LogDebug("Network overview: this node is not in the registry ({Reason})", reason);
             rows.Insert(0, new NetworkNodeRow(self.Node, supervisor.Context.PrimaryEndpoint, null, true, false,

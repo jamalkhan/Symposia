@@ -42,6 +42,26 @@
       {
         "type": "mapping(address => NodeRecord)",
         "name": "records"
+      },
+      {
+        "type": "mapping(address => mapping(uint8 => NodeRecord))",
+        "name": "services"
+      },
+      {
+        "type": "mapping(address => uint8[])",
+        "name": "serviceList"
+      },
+      {
+        "type": "mapping(address => uint8)",
+        "name": "primaryPlusOne"
+      },
+      {
+        "type": "mapping(address => bool)",
+        "name": "migrated"
+      },
+      {
+        "type": "mapping(address => uint256)",
+        "name": "nodeBanExpiry"
       }
     ]
   },

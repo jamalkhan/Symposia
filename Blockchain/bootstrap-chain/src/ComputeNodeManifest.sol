@@ -113,6 +113,8 @@ contract ComputeNodeManifest is GovernedUpgradeable {
     ) external whenNotPaused {
         address node = msg.sender;
 
+        // TODO(compute) #162: check serviceStatusOf(node, Compute) once Compute is unpinned;
+        // node-level status lets a node with any registered service declare a manifest.
         INodeRegistry.NodeStatus status = _stakingRegistry().statusOf(node);
         if (status == INodeRegistry.NodeStatus.Unregistered || status == INodeRegistry.NodeStatus.Banned) {
             revert NodeNotRegistered(node);

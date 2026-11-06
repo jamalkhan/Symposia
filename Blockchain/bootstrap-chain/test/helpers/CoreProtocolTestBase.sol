@@ -9,6 +9,8 @@ import {StakingNodeRegistry} from "../../src/StakingNodeRegistry.sol";
 import {BlobDeals} from "../../src/BlobDeals.sol";
 import {RewardDistributor} from "../../src/RewardDistributor.sol";
 import {SlashingController} from "../../src/SlashingController.sol";
+import {EpochController} from "../../src/EpochController.sol";
+import {ScoringWeights} from "../../src/ScoringWeights.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice Shared setup for the issue #52 core protocol contract test
@@ -23,6 +25,8 @@ abstract contract CoreProtocolTestBase is Test {
     StakingNodeRegistry internal registry;
     BlobDeals internal deals;
     RewardDistributor internal rewards;
+    EpochController internal epochs;
+    ScoringWeights internal weights;
     SlashingController internal slashing;
 
     address internal timelockAddr = makeAddr("timelock");
@@ -71,6 +75,10 @@ abstract contract CoreProtocolTestBase is Test {
         cfg.setAddress(ConfigKeys.DEALS_BILLING_ROLE, billingRole);
         cfg.setUint(ConfigKeys.EPOCH_LENGTH, EPOCH_LENGTH);
         cfg.setUint(ConfigKeys.EPOCH_GENESIS_TIMESTAMP, genesisTimestamp);
+        epochs = new EpochController(cfg, uint64(genesisTimestamp), uint32(EPOCH_LENGTH), 1 hours);
+        cfg.setAddress(ConfigKeys.EPOCH_CONTROLLER, address(epochs));
+        weights = ScoringWeights(_deployProxy(address(new ScoringWeights()), abi.encodeCall(ScoringWeights.initialize, (cfg))));
+        cfg.setAddress(ConfigKeys.REWARD_SCORING_WEIGHTS, address(weights));
         cfg.setUint(ConfigKeys.REGISTRY_UNSTAKE_COOLDOWN, 21 days);
 
         // Node type 0 = Storage. base 100e18 + 1e18/TB(unit).
@@ -153,7 +161,7 @@ abstract contract CoreProtocolTestBase is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _signFactorMetrics(address node, uint256 epoch, uint256[7] memory values, uint256 heartbeatBps)
+    function _signFactorMetrics(address node, uint256 epoch, uint256[] memory values, uint256 heartbeatBps)
         internal
         view
         returns (bytes memory)

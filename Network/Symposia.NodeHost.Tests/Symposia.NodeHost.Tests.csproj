@@ -26,4 +26,9 @@
     <ProjectReference Include="..\Symposia.NodeHost\Symposia.NodeHost.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Anvil + DeployRewards fixture shared with the Gateway's chain tests (#161 ledger integration). -->
+    <Compile Include="..\..\Blockchain\Symposia.Blockchain.Gateway.Tests\RewardsChainFixture.cs" Link="RewardsChainFixture.cs" />
+  </ItemGroup>
+
 </Project>

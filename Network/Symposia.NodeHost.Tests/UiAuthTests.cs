@@ -46,6 +46,23 @@ public sealed class UiAuthTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task NodeServices_ListsTheEarningsBreakdown_AfterSignIn()
+    {
+        var client = Client();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/node-services")).StatusCode);
+
+        await client.PostAsJsonAsync("/api/setup", new { password = "correct horse", setupToken = SetupToken });
+        var list = await client.GetFromJsonAsync<JsonElement>("/api/node-services");
+
+        Assert.Equal(11, list.GetArrayLength());
+        var storage = list.EnumerateArray().Single(s => s.GetProperty("key").GetString() == "storage");
+        Assert.True(storage.GetProperty("earns").GetBoolean());
+        Assert.Equal(7, storage.GetProperty("factors").GetArrayLength());
+        var email = list.EnumerateArray().Single(s => s.GetProperty("key").GetString() == "email-ip");
+        Assert.False(email.GetProperty("earns").GetBoolean());
+    }
+
+    [Fact]
     public async Task Setup_SignsIn_AndCannotBeRepeated()
     {
         var client = Client();

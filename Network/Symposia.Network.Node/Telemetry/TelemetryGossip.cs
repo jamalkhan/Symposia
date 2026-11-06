@@ -31,15 +31,19 @@ public interface ITelemetryGossip
 /// </summary>
 public sealed record TelemetryAdmission(TelemetrySchedule Schedule, TimeProvider Clock, long ClockSkewSeconds = 30)
 {
+    /// <summary>When set (#158), admission follows the chain-synced schedule instead of <see cref="Schedule"/>.</summary>
+    public TelemetryScheduleSource? Source { get; init; }
+
     public bool Admits(ulong epoch, long claimedUnixSeconds)
     {
+        var schedule = Source?.Current ?? Schedule;
         var now = Clock.GetUtcNow().ToUnixTimeSeconds();
-        if (Math.Abs(now - claimedUnixSeconds) > Schedule.CadenceSeconds + ClockSkewSeconds)
+        if (Math.Abs(now - claimedUnixSeconds) > schedule.CadenceSeconds + ClockSkewSeconds)
         {
             return false;
         }
 
-        var current = Schedule.EpochAt(now);
+        var current = schedule.EpochAt(now);
         return epoch + 1 >= current && epoch <= current + 1;
     }
 }

@@ -406,7 +406,7 @@ contract ComputePenaltyStateMachine is GovernedUpgradeable, IComputePenaltyState
         bool freshEntry = s.stage != Stage.Stage3Suspended;
         if (freshEntry) {
             s.stage3EpisodeId += 1;
-            s.stage3EntryStake = _registry().stakeOf(node);
+            s.stage3EntryStake = _registry().serviceStakeOf(node, INodeRegistry.NodeType.Compute);
             s.stage3CumulativeSlashedBps = 0;
         }
 
@@ -520,7 +520,7 @@ contract ComputePenaltyStateMachine is GovernedUpgradeable, IComputePenaltyState
         ComputePenaltyState storage s = $.states[node];
         Stage previousStage = s.stage;
 
-        uint256 currentStake = _registry().stakeOf(node);
+        uint256 currentStake = _registry().serviceStakeOf(node, INodeRegistry.NodeType.Compute);
         uint256 immediateBps = config().getUint(ConfigKeys.COMPUTE_PENALTY_STAGE4_IMMEDIATE_BPS);
         uint256 immediateAmount = (currentStake * immediateBps) / 10_000;
 

@@ -286,7 +286,9 @@ contract FoundationRegistryTest is CoreProtocolTestBase {
     /// The FOUNDATION_REWARD_HOOK routing in `_payNode` is unchanged and
     /// applies once #81 pays verifiers; until then a foundation node earns
     /// nothing from `sealEpoch` and no surplus is routed.
-    function test_surplusRouting_verifierFoundationNodeExcludedFromCapacityFlow() public {
+    /// #81: a foundation verifier is paid from the 8% verifier slice, and the #57 hook
+    /// routes everything above its operational baseline to the ecosystem reserve.
+    function test_surplusRouting_verifierFoundationNodePaidFromVerifierSlice() public {
         address node = makeAddr("rewardedFoundationNode");
         _registerFoundation(node, "us-east", VERIFIER_MIN, FIVE_X - VERIFIER_MIN);
 
@@ -313,10 +315,11 @@ contract FoundationRegistryTest is CoreProtocolTestBase {
 
         rewards.sealEpoch(0, nodes);
 
-        assertEq(rewards.payoutOf(0, node), 0);
-        assertEq(uint8(rewards.settlementOf(0, node).reason), uint8(RewardDistributor.SettlementReason.ExcludedType));
-        assertEq(token.balanceOf(node), nodeBefore);
-        assertEq(token.balanceOf(ecosystemReserve), ecosystemBefore);
+        uint256 slice = (1_000_000e18 * 800) / 10_000;
+        assertEq(rewards.payoutOf(0, node), slice);
+        assertEq(uint8(rewards.settlementOf(0, node).reason), uint8(RewardDistributor.SettlementReason.Paid));
+        assertEq(token.balanceOf(node), nodeBefore + baseline);
+        assertEq(token.balanceOf(ecosystemReserve), ecosystemBefore + slice - baseline);
     }
 
     function test_surplusRouting_noSurplus_whenRewardAtOrBelowBaseline() public {

@@ -16,8 +16,8 @@ These gaps were identified after the initial 37-document requirement reorganizat
 | **Messaging** | Queue / Pub-Sub service for event-driven workloads | **Done** | Requirements/Platform/queue-and-pubsub.md — NATS with JetStream |
 | **Platform** | Event integrity and Merkle commitments | **Done** | Requirements/Platform/event-integrity.md — blob + hourly on-chain hash commitments |
 | **Platform** | CDN / Edge delivery layer | Not started | Needed for landing pages, email images, ad creative |
-| **Platform** | Serverless functions / edge compute | **Partial** | Node type + mining params in node-types-and-rewards.md + tokenomics-mvp.md; **product surface** (deploy API, runtimes, limits, billing UX) still not fully specced |
-| **Platform** | Extensible node types + app platform model | **Done** (spec) | [extensible-node-types-and-app-platform.md](./Platform/extensible-node-types-and-app-platform.md) — apps vs miners; how new types join emission pools |
+| **Platform** | Serverless functions / edge compute | **Partial** | Node Service + mining params in node-types-and-rewards.md + tokenomics-mvp.md; **product surface** (deploy API, runtimes, limits, billing UX) still not fully specced |
+| **Platform** | Extensible Node Services + app platform model | **Done** (spec) | [extensible-node-types-and-app-platform.md](./Platform/extensible-node-types-and-app-platform.md) — apps vs miners; how new types join emission pools |
 | **Platform** | AppBuilder / vendor incentives (no second protocol token) | **Done** (spec) | [appbuilder-incentives.md](./Platform/appbuilder-incentives.md) — grants, usage match, optional fee kickback from Ecosystem |
 | **Platform** | API rate limiting and throttling | Not started | Not in any current document; needed for event ingestion at scale |
 | **Platform** | Real-time streaming / WebSockets | Not started | Live dashboards, real-time personalization |
@@ -28,9 +28,36 @@ These gaps were identified after the initial 37-document requirement reorganizat
 | **Database** | Read replica billing clarification | Open question | Shared page bucket → is intra-service page fetch billed as egress? |
 | **Database** | Compute overage handling | Open question | What happens mid-epoch if tenant exhausts compute credits? |
 | **Database** | Compute operator compensation split | Open question | Proposed 70/30 operator/platform; needs governance proposal |
-| **Blockchain** | Node types, resource requirements, dynamic reward system | **Done** | Requirements/Platform/node-types-and-rewards.md — 4 node types (OLTP, Storage, Analytics, Consensus); dynamic reward multipliers; reliability scoring; 4 open questions (epoch length, token mechanics, staking, cross-type isolation) |
+| **Blockchain** | Node Services, resource requirements, dynamic reward system | **Done** | Requirements/Platform/node-types-and-rewards.md — Node Services (Storage, Blob Gateway, Verifier, Compute family, …); dynamic reward multipliers; reliability scoring; 4 open questions (epoch length, token mechanics, staking, cross-type isolation) |
 | **Blockchain** | Compute node staking minimums | **Done** (spec) | [tokenomics-mvp.md](./Blockchain/tokenomics-mvp.md) §9 |
 | **Blockchain** | Token emission schedule / tokenomics | **Done** (spec) | [tokenomics-mvp.md](./Blockchain/tokenomics-mvp.md) — MVP genesis parameters; implement contracts next |
+
+---
+
+## Node Services (identified 2026-11-06)
+
+A Node runs 0, 1 or many Node Services, each staked, scored, penalized and paid on its own ([#159](https://github.com/jamalkhan/Symposia/issues/159); vocabulary in [node-types-and-rewards.md](./Platform/node-types-and-rewards.md)).
+
+| Area | Item | Status | Notes |
+|---|---|---|---|
+| **Blockchain** | Per-service stake, penalties and rewards | **Done** | #159 |
+| **Blockchain** | Verifier 8% slice (uptime/coverage/accuracy) | **Done** | #81 |
+| **Blockchain** | Blob Gateway earnings | **Strawman** | #160; numbers subject to governance |
+| **Blob storage** | Collect Blob Gateway factor metrics (uptime, success rate, p95, bytes) and get them signed | Not started | Follow-up to #160 |
+| **Platform** | NodeHost Ledger tab (stake, rewards, penalties) | **Done** | #161 |
+| **Platform** | Stake and register Node Services from NodeHost (on-chain transactions from the host) | Not started | Out of scope of #159 |
+| **Blockchain** | Earnings for Blockchain Gateway and Telemetry Committee services | Open question | Services are defined; economics are not |
+
+### Compute — pinned
+
+Deliberately deferred while Blob Storage is the focus. Full list: [#162](https://github.com/jamalkhan/Symposia/issues/162).
+
+- Decide whether OLTP / Analytics / Consensus / Serverless are Compute flavors or Node Services of their own.
+- Compute fee-funded reward pool settled per (node, Compute) reward account.
+- ScoringWeights tables for Compute and the other compute-family services; confirm stake formulas (Compute's are placeholders).
+- `ComputeNodeManifest` / `ComputeTierRegistry`: switch to `serviceStakeOf/serviceStatusOf(node, Compute)` (`TODO(compute)` in code).
+- Compute telemetry (heartbeats and committee records) and factor definitions.
+- NodeHost Compute card earnings breakdown; revisit Compute settings.
 
 ---
 
