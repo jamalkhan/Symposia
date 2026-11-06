@@ -20,6 +20,8 @@ public sealed class RelayerAccount
 {
     public const int MaxInFlight = 16;
 
+    public static readonly TimeSpan ReceiptTimeout = TimeSpan.FromMinutes(2);
+
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _inFlight = new(MaxInFlight, MaxInFlight);
     private readonly Nethereum.Web3.Accounts.Account _account;
@@ -59,7 +61,17 @@ public sealed class RelayerAccount
                 _gate.Release();
             }
 
-            return await Web3.TransactionReceiptPolling.PollForReceiptAsync(hash, ct);
+            // A dropped or underpriced transaction must not hold an in-flight slot forever.
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(ReceiptTimeout);
+            try
+            {
+                return await Web3.TransactionReceiptPolling.PollForReceiptAsync(hash, timeout.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException($"No receipt for {hash} after {ReceiptTimeout.TotalSeconds:0}s.");
+            }
         }
         finally
         {

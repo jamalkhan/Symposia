@@ -6,6 +6,6 @@ optimizer = true
 optimizer_runs = 200
 via_ir = true
 # DeployRewards.s.sol writes its addresses here for the Gateway/NodeHost/tests to read.
-fs_permissions = [{ access = "read-write", path = "./deployments" }]
+fs_permissions = [{ access = "read-write", path = "./deployments" }, { access = "read", path = "../../protocol" }]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

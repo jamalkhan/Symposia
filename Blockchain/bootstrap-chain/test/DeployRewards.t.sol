@@ -50,27 +50,26 @@ contract DeployRewardsTest is DeployRewards, Test {
         assertEq(d.config.owner(), deployer);
     }
 
-    /// #81/#159/#160: Node Service economics the NodeHost catalog mirrors.
-    function test_NodeServiceEconomics() public view {
-        assertEq(d.config.getUint(ConfigKeys.rewardTypeWeight(0)), 9_000, "Storage pool");
-        assertEq(d.config.getUint(ConfigKeys.rewardTypeWeight(8)), 1_000, "Blob Gateway pool");
-        assertEq(d.config.getUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS), 9_200);
-        assertEq(d.config.getUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS), 800);
-        assertEq(d.config.getUint(ConfigKeys.registryStakeBase(5)), 500e18, "Verifier = 5x Storage base");
-        assertEq(d.config.getUint(ConfigKeys.registryStakeBase(8)), 40e18, "Blob Gateway flat stake");
-        assertEq(d.config.getUint(ConfigKeys.registryStakePerUnit(8)), 0);
+    /// #163: the chain is configured from protocol/economics.json, and ScoringWeights' seeded
+    /// tables match it, so that file is the single source the NodeHost catalog is checked against.
+    function test_NodeServiceEconomicsMatchTheManifest() public view {
+        string memory economics = vm.readFile(ECONOMICS_PATH);
+        assertEq(d.config.getUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS), vm.parseJsonUint(economics, ".emission.capacityShareBps"));
+        assertEq(d.config.getUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS), vm.parseJsonUint(economics, ".emission.verifierShareBps"));
+        string[3] memory services = ["storage", "verifier", "blobGateway"];
+        for (uint256 i; i < services.length; i++) {
+            string memory k = string.concat(".services.", services[i]);
+            uint8 id = uint8(vm.parseJsonUint(economics, string.concat(k, ".id")));
+            assertEq(d.config.getUint(ConfigKeys.registryStakeBase(id)), vm.parseJsonUint(economics, string.concat(k, ".stakeBase")) * 1e18);
+            assertEq(d.config.getUint(ConfigKeys.rewardTypeWeight(id)), vm.parseJsonUint(economics, string.concat(k, ".typeWeightBps")));
+            uint256[] memory expected = vm.parseJsonUintArray(economics, string.concat(k, ".factorsBps"));
+            (uint16[] memory onChain,) = d.weights.weightsFor(id, 0);
+            assertEq(onChain.length, expected.length, services[i]);
+            for (uint256 f; f < expected.length; f++) assertEq(onChain[f], expected[f], services[i]);
+        }
         assertEq(d.config.getUint(ConfigKeys.rewardTypeWeight(6)), 0, "Email IP Address never earns");
-        (uint16[] memory bg, bool[] memory lower) = d.weights.weightsFor(8, 0);
-        assertEq(bg.length, 4);
-        assertEq(bg[0], 3_000);
-        assertEq(bg[1], 3_000);
-        assertEq(bg[2], 2_000);
-        assertEq(bg[3], 2_000);
-        assertTrue(lower[2] && !lower[0] && !lower[1] && !lower[3], "only p95 latency is lower-is-better");
-        (uint16[] memory v,) = d.weights.weightsFor(5, 0);
-        assertEq(v[0], 4_000);
-        assertEq(v[1], 3_000);
-        assertEq(v[2], 3_000);
+        (, bool[] memory lower) = d.weights.weightsFor(8, 0);
+        assertTrue(lower[2] && !lower[0] && !lower[1] && !lower[3], "only Blob Gateway p95 latency is lower-is-better");
     }
 
     function test_EmissionIsTheOnlyLargeMinter() public view {
