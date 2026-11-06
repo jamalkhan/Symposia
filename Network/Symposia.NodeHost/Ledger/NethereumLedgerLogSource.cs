@@ -93,6 +93,9 @@ public sealed class NethereumLedgerLogSource(string rpcUrl, string registry, str
     private static bool TopicIsNode(string? topic, string node) =>
         topic is not null && topic.EndsWith(node[2..], StringComparison.OrdinalIgnoreCase);
 
+    public async Task<string> BlockHashAsync(ulong block, CancellationToken ct) =>
+        (await _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new HexBigInteger(block))).BlockHash;
+
     public async Task<long> BlockTimestampAsync(ulong block, CancellationToken ct)
     {
         var b = await _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new HexBigInteger(block));

@@ -336,7 +336,11 @@ public static class UiApp
         };
 
         // Local anvil has no reorgs; real chains stay a few blocks behind the head.
-        return new Ledger.LedgerService(Source, nodeAddress, Unavailable, context.Network?.ChainId == 31337 ? 0UL : 12UL);
+        // Persisted per (chain, registry), so a restart resumes instead of rescanning (#163).
+        Ledger.LedgerStore? Store() => context.Network is { StakingRegistryAddress: { Length: >= 10 } registry } n
+            ? new Ledger.LedgerStore(Path.Combine(context.Paths.DataDir, "ledger", $"{n.ChainId}-{registry[2..10].ToLowerInvariant()}"))
+            : null;
+        return new Ledger.LedgerService(Source, nodeAddress, Unavailable, context.Network?.ChainId == 31337 ? 0UL : 12UL, Store);
     }
 
     private static void CheckEndpoint(string service, string endpoint, List<string> errors)
