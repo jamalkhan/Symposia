@@ -14,7 +14,8 @@ public sealed record NetworkInfo(
     string? ProtocolActivationsAddress = null,
     string? RewardDistributorAddress = null,
     string? EpochControllerAddress = null,
-    string? TelemetryRegistryAddress = null);
+    string? TelemetryRegistryAddress = null,
+    string? StakingRegistryAddress = null);
 
 /// <summary>Shared state components read while starting.</summary>
 public sealed class HostContext

@@ -12,6 +12,13 @@ A **Node** is this machine's identity (its node key). A node runs zero, one or m
 
 The **Node Services** tab shows every Node Service's public earnings breakdown: what it earns and from which pool, how it is scored, its minimum stake and its penalties. Storage, Blob Gateway and Compute settings live there too.
 
+The **Ledger** tab lists every on-chain transaction affecting this node, per Node Service (#161):
+- stake posted, top-ups, unstake requests and withdrawals;
+- rewards earned each epoch, reserve holds and claims;
+- slashes and bans.
+
+It also shows totals per service and can export to CSV. It reads the chain directly, so it needs Local dev or Remote RPC mode (or a preset with a `StakingRegistryAddress`).
+
 Settings persist, so a restart comes back exactly as it was.
 
 ## Run it

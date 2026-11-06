@@ -14,6 +14,7 @@
       <button data-view="diagnostics" class="tab active">Diagnostics</button>
       <button data-view="network" class="tab">Network</button>
       <button data-view="services" class="tab">Node Services</button>
+      <button data-view="ledger" class="tab">Ledger</button>
       <button data-view="settings" class="tab">Settings</button>
       <button id="logout" class="link">Log out</button>
     </nav>
@@ -127,6 +128,24 @@
       </form>
       <h2 class="section">Other Node Services</h2>
       <div class="grid" id="service-catalog"></div>
+    </section>
+
+    <section id="view-ledger" hidden>
+      <div id="ledger-unavailable" class="card notice" hidden></div>
+      <div class="card">
+        <h2>Totals by Node Service</h2>
+        <table id="ledger-totals"></table>
+        <p class="hint">Stake posted leaves your wallet (negative), rewards arrive (positive), slashes are lost (negative). Rewards held in reserve count as earned when settled.</p>
+      </div>
+      <div class="card">
+        <h2>Transactions</h2>
+        <div class="filters">
+          <label>Category <select id="ledger-category"><option value="">All</option><option>Stake</option><option>Reward</option><option>Penalty</option></select></label>
+          <label>Node Service <select id="ledger-service"><option value="">All</option></select></label>
+          <a id="ledger-csv" class="button" href="/api/ledger.csv" download>Export CSV</a>
+        </div>
+        <table id="ledger-entries"></table>
+      </div>
     </section>
 
     <section id="view-settings" hidden>

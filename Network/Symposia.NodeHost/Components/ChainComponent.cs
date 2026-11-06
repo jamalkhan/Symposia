@@ -116,18 +116,23 @@ public sealed partial class ChainComponent : HostComponent
             context.Logger.LogInformation("Deployed ProtocolActivations at {Address} on the existing local chain.", deployment.ProtocolActivationsAddress);
         }
 
-        if (string.IsNullOrEmpty(deployment.RewardDistributorAddress) || !await HasCodeAsync(rpcUrl, deployment.RewardDistributorAddress, ct))
+        if (string.IsNullOrEmpty(deployment.RewardDistributorAddress) || string.IsNullOrEmpty(deployment.StakingRegistryAddress)
+            || !await HasCodeAsync(rpcUrl, deployment.RewardDistributorAddress, ct))
         {
             // Rewards stack (#70-#80) with its epoch controller (#72), so the hosted gateway's epoch sealer has something to settle.
-            var (distributor, epochs, telemetry) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, ct);
-            deployment = deployment with { RewardDistributorAddress = distributor, EpochControllerAddress = epochs, TelemetryRegistryAddress = telemetry };
+            // Deployments from before #161 didn't record the staking registry, so they redeploy once.
+            var (distributor, epochs, telemetry, staking) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, ct);
+            deployment = deployment with
+            {
+                RewardDistributorAddress = distributor, EpochControllerAddress = epochs, TelemetryRegistryAddress = telemetry, StakingRegistryAddress = staking,
+            };
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
             context.Logger.LogInformation("Deployed the rewards contracts (RewardDistributor {Distributor}, EpochController {Epochs}).", distributor, epochs);
         }
 
         return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl,
             deployment.ProtocolActivationsAddress, deployment.RewardDistributorAddress, deployment.EpochControllerAddress,
-            deployment.TelemetryRegistryAddress);
+            deployment.TelemetryRegistryAddress, deployment.StakingRegistryAddress);
     }
 
     private static NetworkInfo ResolveRemoteRpc(HostContext context)
@@ -147,7 +152,7 @@ public sealed partial class ChainComponent : HostComponent
 
         return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", preset.ChainId, preset.NodeRegistryAddress, preset.EpochRootRegistryAddress, preset.RpcUrl,
             preset.ProtocolActivationsAddress, preset.RewardDistributorAddress, preset.EpochControllerAddress,
-            preset.TelemetryRegistryAddress);
+            preset.TelemetryRegistryAddress, NullIfEmpty(preset.StakingRegistryAddress));
     }
 
     internal static async Task<NetworkInfo> JoinAsync(string gatewayUrl, CancellationToken ct)
@@ -221,12 +226,16 @@ public sealed partial class ChainComponent : HostComponent
         return new Deployment(Extract(output, "NodeRegistry"), Extract(output, "EpochRootRegistry"), rpcUrl, AnvilChainId, Extract(output, "ProtocolActivations"));
     }
 
-    /// <summary>Runs DeployRewards.s.sol (dev roles = the anvil dev key) and returns the distributor and epoch controller.</summary>
-    private static async Task<(string Distributor, string Epochs, string Telemetry)> DeployRewardsAsync(string foundryBin, string rpcUrl, CancellationToken ct)
+    /// <summary>Runs DeployRewards.s.sol (dev roles = the anvil dev key) and returns the addresses the host uses.</summary>
+    private static async Task<(string Distributor, string Epochs, string Telemetry, string Staking)> DeployRewardsAsync(
+        string foundryBin, string rpcUrl, CancellationToken ct)
     {
         var output = await ForgeAsync(foundryBin, ct, "script", "script/DeployRewards.s.sol:DeployRewards", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast");
-        return (Extract(output, "RewardDistributor"), Extract(output, "EpochController"), Extract(output, "TelemetryCheckpointRegistry"));
+        return (Extract(output, "RewardDistributor"), Extract(output, "EpochController"), Extract(output, "TelemetryCheckpointRegistry"),
+            Extract(output, "StakingNodeRegistry"));
     }
+
+    private static string? NullIfEmpty(string value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
     /// <summary>Deploys ProtocolActivations (issue #145) owned by the dev key, with no notice window (local dev).</summary>
     private static async Task<string> DeployProtocolActivationsAsync(string foundryBin, string rpcUrl, CancellationToken ct)
@@ -362,7 +371,7 @@ public sealed partial class ChainComponent : HostComponent
     /// <summary>Deployed addresses, tagged with the chain they were deployed to (checked on load).</summary>
     private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId,
         string? ProtocolActivationsAddress = null, string? RewardDistributorAddress = null, string? EpochControllerAddress = null,
-        string? TelemetryRegistryAddress = null);
+        string? TelemetryRegistryAddress = null, string? StakingRegistryAddress = null);
 
     private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null);
 }

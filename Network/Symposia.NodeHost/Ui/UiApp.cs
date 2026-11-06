@@ -56,6 +56,7 @@ public static class UiApp
         builder.Services.AddMemoryCache();
         builder.Services.AddSingleton(supervisor.Context.Health ?? new NodeHealth(supervisor, nodeAddress));
         builder.Services.AddSingleton<NetworkOverview>();
+        builder.Services.AddSingleton(_ => CreateLedger(context, nodeAddress));
         builder.Services.AddSingleton(sp => new StatusService(supervisor, nodeAddress, sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(), sp.GetRequiredService<NodeHealth>()));
 
         // Session cookies survive host restarts: data-protection keys live in an
@@ -211,6 +212,19 @@ public static class UiApp
 
         api.MapGet("/network", async (NetworkOverview overview) => Results.Ok(await overview.SnapshotAsync()));
 
+        // Stake, reward and penalty transactions of this node, per Node Service (issue #161).
+        api.MapGet("/ledger", async (Ledger.LedgerService ledger, string? category, string? service, int? limit, CancellationToken ct) =>
+        {
+            var snapshot = await ledger.SnapshotAsync(ct);
+            return Results.Ok(snapshot with { Entries = Ledger.LedgerService.Filter(snapshot.Entries, category, service, limit).ToList() });
+        });
+        api.MapGet("/ledger.csv", async (Ledger.LedgerService ledger, string? category, string? service, CancellationToken ct) =>
+        {
+            var snapshot = await ledger.SnapshotAsync(ct);
+            var csv = Ledger.LedgerService.ToCsv(Ledger.LedgerService.Filter(snapshot.Entries, category, service, null));
+            return Results.File(System.Text.Encoding.UTF8.GetBytes(csv), "text/csv", "symposia-ledger.csv");
+        });
+
         // Public earnings breakdown of every Node Service (issue #159).
         api.MapGet("/node-services", () => Results.Ok(ServiceCatalog.NodeServiceCatalog.All));
 
@@ -290,6 +304,38 @@ public static class UiApp
         }
 
         return errors;
+    }
+
+    /// <summary>The ledger reads whatever network the chain component resolved; a new network resets it.</summary>
+    private static Ledger.LedgerService CreateLedger(HostContext context, string nodeAddress)
+    {
+        (NetworkInfo Network, Ledger.ILedgerLogSource Source)? current = null;
+        Ledger.ILedgerLogSource? Source()
+        {
+            var n = context.Network;
+            if (n is null || string.IsNullOrEmpty(n.RpcUrl) || string.IsNullOrEmpty(n.StakingRegistryAddress) || string.IsNullOrEmpty(n.RewardDistributorAddress))
+            {
+                return null;
+            }
+
+            if (current is not { } c || c.Network != n)
+            {
+                current = (n, new Ledger.NethereumLedgerLogSource(n.RpcUrl, n.StakingRegistryAddress, n.RewardDistributorAddress));
+            }
+
+            return current.Value.Source;
+        }
+
+        string? Unavailable() => context.Network switch
+        {
+            null => "This node isn't connected to a network yet.",
+            { RpcUrl: null or "" } => "This host has no direct chain connection (Join mode), so it can't read the ledger yet.",
+            { StakingRegistryAddress: null or "" } => "This network hasn't published its staking registry address.",
+            { RewardDistributorAddress: null or "" } => "This network has no rewards contracts yet.",
+            _ => null,
+        };
+
+        return new Ledger.LedgerService(Source, nodeAddress, Unavailable);
     }
 
     private static void CheckEndpoint(string service, string endpoint, List<string> errors)

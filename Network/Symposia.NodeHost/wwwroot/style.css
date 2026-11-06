@@ -42,3 +42,7 @@ h2.section { font-size:15px; margin:24px 0 12px; }
 .badge.earns { background:#e3f4ea; color:var(--ok); } .badge.no-earn { background:#f6e7e5; color:var(--bad); }
 table.factors td { padding:3px 8px; } td.num { text-align:right; font-variant-numeric:tabular-nums; }
 .earnings { border-bottom:1px solid var(--line); padding-bottom:8px; }
+.filters { display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px; }
+.filters label { margin:0; min-width:180px; }
+a.button { display:inline-block; padding:7px 14px; border-radius:6px; border:1px solid var(--accent); color:var(--accent); text-decoration:none; }
+.neg { color:var(--bad); } .pos { color:var(--ok); }

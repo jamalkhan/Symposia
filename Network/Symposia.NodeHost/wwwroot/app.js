@@ -30,6 +30,7 @@ function show(view) {
   if (view === 'network') { refreshNetwork(); pollTimer = setInterval(refreshNetwork, 5000); }
   if (view === 'settings') loadSettings();
   if (view === 'services') { loadSettings(); loadServices(); }
+  if (view === 'ledger') { refreshLedger(); pollTimer = setInterval(refreshLedger, 15000); }
 }
 
 async function route() {
@@ -281,3 +282,31 @@ async function loadServices() {
 }
 
 route();
+
+// ---------- ledger ----------
+// Stake, reward and penalty transactions per Node Service (#161), from /api/ledger.
+const signed = (a) => (String(a).startsWith('-') ? `<span class="neg">${esc(a)}</span>` : a === '0' ? '0' : `<span class="pos">+${esc(a)}</span>`);
+function ledgerQuery() {
+  const q = new URLSearchParams();
+  if ($('#ledger-category').value) q.set('category', $('#ledger-category').value);
+  if ($('#ledger-service').value) q.set('service', $('#ledger-service').value);
+  return q.toString();
+}
+
+async function refreshLedger() {
+  let s;
+  try { s = await api('GET', `/ledger?${ledgerQuery()}`); }
+  catch (ex) { $('#ledger-unavailable').hidden = false; $('#ledger-unavailable').textContent = `Ledger unavailable (${ex.message}).`; return; }
+  $('#ledger-unavailable').hidden = s.available;
+  $('#ledger-unavailable').textContent = s.available ? '' : `Ledger unavailable: ${s.reason}`;
+  $('#ledger-csv').href = `/api/ledger.csv?${ledgerQuery()}`;
+  $('#ledger-totals').innerHTML = table(['Node Service', 'Stake (SYM)', 'Earned (SYM)', 'Slashed (SYM)', 'Reserve held (SYM)'], s.totals.map((t) =>
+    `<tr><td>${esc(t.service)}</td><td class="num">${esc(t.stake)}</td><td class="num">${esc(t.earned)}</td><td class="num">${esc(t.slashed)}</td><td class="num">${esc(t.reserveHeld)}</td></tr>`));
+  const services = $('#ledger-service'), chosen = services.value;
+  services.innerHTML = '<option value="">All</option>' + s.totals.map((t) => `<option${t.service === chosen ? ' selected' : ''}>${esc(t.service)}</option>`).join('');
+  $('#ledger-entries').innerHTML = table(['Time', 'Node Service', 'Category', 'Entry', 'Amount (SYM)', 'Epoch', 'Detail', 'Transaction'], s.entries.map((e) =>
+    `<tr><td>${esc(new Date(e.timestamp * 1000).toLocaleString())}</td><td>${esc(e.service)}</td><td>${esc(e.category)}</td><td>${esc(e.type)}</td>` +
+    `<td class="num">${signed(e.amount)}</td><td>${e.epoch ?? ''}</td><td>${esc(e.detail)}</td>` +
+    `<td class="mono" title="${esc(e.txHash)}">${esc(shortAddress(e.txHash))} <span class="hint">#${esc(e.block)}</span></td></tr>`));
+}
+['#ledger-category', '#ledger-service'].forEach((sel) => $(sel).addEventListener('change', refreshLedger));

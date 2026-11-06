@@ -1055,7 +1055,12 @@ contract RewardDistributor is GovernedUpgradeable {
     /// (either route it through `_payNode` too, or restrict this entry
     /// point from foundation nodes) before relying on it at mainnet scale.
     function claimReserve() external whenNotPaused {
-        _claimReserve(msg.sender);
+        uint256 amount = _claimReserve(msg.sender);
+        // The node's own account belongs to its primary service (#159), for the #161 ledger.
+        INodeRegistry registry = _registry();
+        if (address(registry) != address(0) && registry.hasPrimaryService(msg.sender)) {
+            emit ServiceReserveClaimed(msg.sender, registry.typeOf(msg.sender), amount);
+        }
     }
 
     /// @notice #159: the same safety-net claim for one of the caller's Node Services.
