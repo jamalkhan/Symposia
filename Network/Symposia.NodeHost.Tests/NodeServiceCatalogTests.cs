@@ -70,7 +70,9 @@ public sealed partial class NodeServiceCatalogTests
         foreach (var svc in NodeServiceCatalog.All.Where(s => s.Factors.Count > 0))
         {
             Assert.Equal(10_000, svc.Factors.Sum(f => f.WeightBps));
-            var push = Regex.Match(source, $@"_push\({svc.Id}, 0, _u16\(\[uint256\((?<w>[^\]]*)\]\)\)");
+            // Tables are pushed by ordinal or by a named constant (VERIFIER, BLOB_GATEWAY).
+            var key = svc.Id switch { 5 => "VERIFIER", 8 => "BLOB_GATEWAY", var id => id.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+            var push = Regex.Match(source, $@"_push\({key}, 0, _u16\(\[uint256\((?<w>[^\]]*)\]\)\)");
             Assert.True(push.Success, $"ScoringWeights has no table for {svc.Name} ({svc.Id})");
             var onChain = push.Groups["w"].Value.Replace(")", "").Split(',').Select(w => int.Parse(w.Trim().Replace("_", ""))).ToList();
             Assert.Equal(onChain, svc.Factors.Select(f => f.WeightBps).ToList());
@@ -103,6 +105,20 @@ public sealed partial class NodeServiceCatalogTests
 
         Assert.Contains("data-view=\"services\"", html);
         Assert.DoesNotMatch(RoleWord(), html);
+    }
+
+    [Fact]
+    public void LedgerLabels_MatchTheSolidityEnums()
+    {
+        static int Count(string source, string name)
+        {
+            var body = Regex.Match(source, $@"enum {name} \{{(?<b>[^}}]*)\}}").Groups["b"].Value;
+            return Regex.Replace(body, @"//[^\n]*", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length;
+        }
+
+        Assert.Equal(Count(Contract("src/RewardDistributor.sol"), "SettlementReason"), Ledger.LedgerService.SettlementReasons.Length);
+        Assert.Equal(Count(Contract("src/interfaces/INodeRegistry.sol"), "NodeStatus"), Ledger.LedgerService.Statuses.Length);
+        Assert.Equal(4, Count(Contract("src/StakingNodeRegistry.sol"), "StakeChangeReason")); // Register, TopUp, Withdraw, Slash in LedgerService.Map
     }
 
     private static string Section(string html, string id)

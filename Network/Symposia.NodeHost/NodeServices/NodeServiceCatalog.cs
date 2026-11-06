@@ -42,6 +42,7 @@ public static class NodeServiceCatalog
     private static readonly string[] NodeLevel =
     [
         "Node-level violations (overcommitment, region-verification fraud) slash every service pro rata and ban the node",
+        "Node-level hardware-fault stages cut every service's rewards: Stage 1 pays 70%, Stage 2 pays 40%, Stages 3-4 pay nothing",
         "Rewards held in reserve while heartbeat compliance is at or below 90%; released after 2 compliant epochs",
     ];
 
@@ -65,7 +66,7 @@ public static class NodeServiceCatalog
             MinimumStake: "25,000 SYM + 2,500 SYM per TB offered",
             Penalties:
             [
-                "Storage penalty stages: Stage 1 pays 70%, Stage 2 pays 40%, Stage 3 slashes 5%/epoch (25% cap), Stage 4 slashes and force-deregisters Storage only",
+                "Storage penalty machine: Stage 3 slashes the Storage stake 5%/epoch (25% cap); Stage 4 slashes and force-deregisters Storage only",
                 .. NodeLevel,
             ],
             SettingsSection: "Storage"),

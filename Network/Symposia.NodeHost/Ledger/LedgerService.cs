@@ -45,8 +45,11 @@ public sealed class LedgerService(Func<ILedgerLogSource?> sourceFactory, string 
 {
     public const ulong ChunkSize = 5_000;
 
-    private static readonly string[] SettlementReasons = ["None", "Paid", "Excluded", "Ineligible", "Stage penalty", "Zero amount"];
-    private static readonly string[] Statuses = ["Unregistered", "Pending verification", "Active", "Suspended", "Banned", "Deregistering"];
+    /// <summary>Labels for <c>RewardDistributor.SettlementReason</c>, by ordinal (pinned by LedgerEnumTests).</summary>
+    public static readonly string[] SettlementReasons = ["None", "Paid", "Excluded", "Ineligible", "Stage penalty", "Zero amount"];
+
+    /// <summary>Labels for <c>INodeRegistry.NodeStatus</c>, by ordinal (pinned by LedgerEnumTests).</summary>
+    public static readonly string[] Statuses = ["Unregistered", "Pending verification", "Active", "Suspended", "Banned", "Deregistering"];
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly List<LedgerEntry> _entries = [];

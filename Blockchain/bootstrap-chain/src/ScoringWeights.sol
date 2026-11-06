@@ -5,6 +5,7 @@ import {GovernedUpgradeable} from "./governance/GovernedUpgradeable.sol";
 import {IProtocolConfig} from "./config/IProtocolConfig.sol";
 import {ConfigKeys} from "./config/ConfigKeys.sol";
 import {IEpochController} from "./interfaces/IEpochController.sol";
+import {INodeRegistry} from "./interfaces/INodeRegistry.sol";
 
 /// @title ScoringWeights
 /// @notice Type-specific factor weight tables for epoch scoring (issue #76,
@@ -23,7 +24,11 @@ import {IEpochController} from "./interfaces/IEpochController.sol";
 /// - Verifier (5, #81): uptime, coverage (assigned checks completed), accuracy (attestations upheld)
 /// - Blob Gateway (8, #160 strawman): uptime, request success rate, p95 latency L, bytes served
 contract ScoringWeights is GovernedUpgradeable {
+    /// @notice Number of capacity tables seeded at the first deploy (ordinals 0-4); later
+    /// Node Service tables (Verifier, Blob Gateway) are named below. Kept for ABI compatibility.
     uint8 public constant TYPE_COUNT = 5;
+    uint8 internal constant VERIFIER = uint8(INodeRegistry.NodeType.Verifier);
+    uint8 internal constant BLOB_GATEWAY = uint8(INodeRegistry.NodeType.BlobGateway);
     uint256 internal constant BPS = 10_000;
 
     struct Table {
@@ -68,8 +73,8 @@ contract ScoringWeights is GovernedUpgradeable {
     }
 
     function _seedNodeServiceTables() private {
-        if (_s().history[5].length == 0) _push(5, 0, _u16([uint256(4_000), 3_000, 3_000])); // Verifier
-        if (_s().history[8].length == 0) _push(8, 0, _u16([uint256(3_000), 3_000, 2_000, 2_000])); // Blob Gateway
+        if (_s().history[VERIFIER].length == 0) _push(VERIFIER, 0, _u16([uint256(4_000), 3_000, 3_000])); // Verifier
+        if (_s().history[BLOB_GATEWAY].length == 0) _push(BLOB_GATEWAY, 0, _u16([uint256(3_000), 3_000, 2_000, 2_000])); // Blob Gateway
     }
 
     /// @notice Tier 3: new weights for `nodeType`, effective from the next epoch. Calling
@@ -83,8 +88,8 @@ contract ScoringWeights is GovernedUpgradeable {
         if (nodeType == 0) return 7;
         if (nodeType == 3) return 4;
         if (nodeType < TYPE_COUNT) return 5;
-        if (nodeType == 5) return 3; // Verifier
-        if (nodeType == 8) return 4; // Blob Gateway
+        if (nodeType == VERIFIER) return 3;
+        if (nodeType == BLOB_GATEWAY) return 4;
         revert UnknownNodeType(nodeType);
     }
 
@@ -100,7 +105,7 @@ contract ScoringWeights is GovernedUpgradeable {
             lower[2] = true; // propagation latency
         } else if (nodeType == 4) {
             lower[2] = true; // p95 invoke latency
-        } else if (nodeType == 8) {
+        } else if (nodeType == BLOB_GATEWAY) {
             lower[2] = true; // p95 request latency
         }
         // Verifier (5): every factor is higher-is-better.

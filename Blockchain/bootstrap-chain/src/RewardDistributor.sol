@@ -109,6 +109,11 @@ import {TelemetryCheckpointRegistry} from "./TelemetryCheckpointRegistry.sol";
 /// implementation. Any surplus-routing hook #57 wraps around payout should
 /// hook `_settle` (or wrap `sealEpoch` itself), not assume a two-phase
 /// entitlement-then-settle call sequence.
+/// @dev Typed view of SlashingController's penalty stage (replaces a string-signature staticcall).
+interface IStageSource {
+    function stageOf(address node) external view returns (uint8);
+}
+
 contract RewardDistributor is GovernedUpgradeable {
     using SafeERC20 for IERC20;
 
@@ -249,6 +254,12 @@ contract RewardDistributor is GovernedUpgradeable {
     error FactorCountMismatch(uint256 given, uint256 expected);
     error PoolsOverAllocated(uint256 assigned, uint256 available);
 
+    /// @notice Review fix: a configured stage source that can't answer no longer fails silently.
+    event StageLookupFailed(address indexed node, address controller);
+    /// @notice Review fix: a paid service with factor reports but no weight table is
+    /// settled Ineligible for the epoch instead of reverting the whole seal.
+    event WeightTableMissing(uint8 indexed service, uint256 indexed epoch);
+
     function _rewardStorage() private pure returns (RewardStorage storage $) {
         bytes32 slot = REWARD_STORAGE_LOCATION;
         assembly {
@@ -381,6 +392,8 @@ contract RewardDistributor is GovernedUpgradeable {
     /// key and never receives tokens (payouts always go to `node`). Metric reports,
     /// reserves, streaks, payouts, settlements and ReliabilityRegistry state for that
     /// service are keyed by this account.
+    /// Invariant: the registry's primary service is immutable once set, so this mapping
+    /// never changes for a node; clearing it would re-key reserves, streaks and settlements.
     function accountOf(address node, INodeRegistry.NodeType service) public view returns (address) {
         INodeRegistry registry = _registry();
         if (address(registry) == address(0) || !registry.hasPrimaryService(node) || registry.typeOf(node) == service) {
@@ -797,7 +810,19 @@ contract RewardDistributor is GovernedUpgradeable {
                 if (calc[i].nodeType == t && calc[i].reason == SettlementReason.None && calc[i].raw.length > 0) count++;
             }
             if (count > 0) {
-                (uint16[] memory weights, bool[] memory lower) = _weights().weightsFor(t, epoch);
+                uint16[] memory weights;
+                bool[] memory lower;
+                try _weights().weightsFor(t, epoch) returns (uint16[] memory w, bool[] memory l) {
+                    (weights, lower) = (w, l);
+                } catch {
+                    emit WeightTableMissing(t, epoch);
+                    for (uint256 i; i < calc.length; i++) {
+                        if (calc[i].nodeType == t && calc[i].reason == SettlementReason.None && calc[i].raw.length > 0) {
+                            calc[i].reason = SettlementReason.Ineligible;
+                        }
+                    }
+                    continue;
+                }
                 uint256[][] memory raws = new uint256[][](count);
                 uint256 k;
                 for (uint256 i; i < calc.length; i++) {
@@ -938,14 +963,19 @@ contract RewardDistributor is GovernedUpgradeable {
         return (capacityAmount * weight) / 10_000;
     }
 
-    function _stagePenaltyBpsFor(address node) internal view returns (uint256) {
+    /// @dev Node-level hardware penalty stage (#159: generic hardware stages apply to
+    /// every service; the storage/compute machines slash their own service directly).
+    /// Unconfigured (address 0) is the only silent no-penalty path.
+    function _stagePenaltyBpsFor(address node) internal returns (uint256) {
         address controller = config().getAddress(ConfigKeys.REGISTRY_SLASHING_CONTROLLER);
         if (controller == address(0)) return 10_000;
-        (bool ok, bytes memory data) = controller.staticcall(abi.encodeWithSignature("stageOf(address)", node));
-        if (!ok || data.length == 0) return 10_000;
-        uint8 stage = abi.decode(data, (uint8));
-        if (stage == 0) return 10_000;
-        return config().getUint(ConfigKeys.rewardStagePenaltyBps(stage));
+        try IStageSource(controller).stageOf(node) returns (uint8 stage) {
+            if (stage == 0) return 10_000;
+            return config().getUint(ConfigKeys.rewardStagePenaltyBps(stage));
+        } catch {
+            emit StageLookupFailed(node, controller);
+            return 10_000;
+        }
     }
 
     /// @dev Reserve, streak and heartbeat state are per reward `account` (#159);
