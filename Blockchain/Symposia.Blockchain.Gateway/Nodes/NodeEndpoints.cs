@@ -47,8 +47,11 @@ public static class NodeEndpoints
 
         // Network descriptor (issue #133): lets a node join this network
         // knowing only the gateway URL.
-        app.MapGet("/v1/network", async (BootstrapChainClient chain) =>
+        // Issue #172: also the rewards stack and an RPC URL, so a joined host can show its Ledger
+        // and run telemetry. Every added field is null when this network doesn't have it.
+        app.MapGet("/v1/network", async (HttpContext http, BootstrapChainClient chain, Microsoft.Extensions.Options.IOptions<GatewayOptions> options) =>
         {
+            var o = options.Value;
             try
             {
                 return Results.Ok(new
@@ -57,6 +60,12 @@ public static class NodeEndpoints
                     nodeRegistryAddress = chain.NodeRegistryAddress,
                     epochRootRegistryAddress = chain.EpochRootRegistryAddress,
                     protocolActivationsAddress = string.IsNullOrEmpty(chain.ProtocolActivationsAddress) ? null : chain.ProtocolActivationsAddress,
+                    rewardDistributorAddress = NullIfEmpty(o.RewardDistributorAddress),
+                    epochControllerAddress = NullIfEmpty(o.EpochControllerAddress),
+                    telemetryRegistryAddress = NullIfEmpty(o.TelemetryRegistryAddress),
+                    stakingRegistryAddress = NullIfEmpty(o.StakingRegistryAddress),
+                    rpcUrl = AdvertisedRpcUrl(o, http.Request),
+                    deployBlock = o.DeployBlock == 0 ? (ulong?)null : o.DeployBlock,
                 });
             }
             catch (Exception ex) when (ex is HttpRequestException or RpcClientUnknownException or RpcResponseException)
@@ -154,5 +163,24 @@ public static class NodeEndpoints
                 ? Results.NotFound(new { node = address, epoch, error = "no root recorded for epoch" })
                 : Results.Ok(new { node = address, epoch, root = root.ToHex(prefix: true) });
         });
+    }
+
+    private static string? NullIfEmpty(string value) => string.IsNullOrEmpty(value) ? null : value;
+
+    /// <summary>The operator's public RPC if set, else this gateway's read-only proxy, else none (#172).</summary>
+    internal static string? AdvertisedRpcUrl(GatewayOptions o, HttpRequest request)
+    {
+        if (!string.IsNullOrEmpty(o.PublicRpcUrl))
+        {
+            return o.PublicRpcUrl;
+        }
+
+        if (!o.RpcProxy.Enabled)
+        {
+            return null;
+        }
+
+        var baseUrl = string.IsNullOrEmpty(o.PublicBaseUrl) ? $"{request.Scheme}://{request.Host}" : o.PublicBaseUrl.TrimEnd('/');
+        return baseUrl + "/v1/rpc";
     }
 }

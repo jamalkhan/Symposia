@@ -39,6 +39,41 @@ public sealed class GatewayOptions
     /// credential. Without an endpoint, batches are kept in <c>CacheDirectory</c> only.
     /// </summary>
     public Symposia.Network.Node.Telemetry.Committee.TelemetryBlobOptions TelemetryBlobs { get; set; } = new();
+
+    /// <summary>StakingNodeRegistry; published to joining hosts (#172). Empty = none.</summary>
+    public string StakingRegistryAddress { get; set; } = "";
+
+    /// <summary>Block the rewards stack was deployed at, so joiners' log scans start there (#172). 0 = unknown.</summary>
+    public ulong DeployBlock { get; set; }
+
+    /// <summary>
+    /// RPC URL advertised to joining hosts instead of this gateway's own <c>/v1/rpc</c> (#172).
+    /// Never put a provider URL that embeds an API key here: every joiner receives it.
+    /// </summary>
+    public string PublicRpcUrl { get; set; } = "";
+
+    /// <summary>This gateway's externally reachable base URL, when the request host isn't (e.g. behind a proxy).</summary>
+    public string PublicBaseUrl { get; set; } = "";
+
+    public RpcProxyOptions RpcProxy { get; set; } = new();
+}
+
+/// <summary>The read-only JSON-RPC proxy joined hosts read the chain through (issue #172).</summary>
+public sealed class RpcProxyOptions
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Largest inclusive block span one <c>eth_getLogs</c> may cover.</summary>
+    public ulong MaxLogBlockRange { get; set; } = 5_000;
+
+    public int MaxRequestBytes { get; set; } = 256 * 1024;
+
+    public int MaxResponseBytes { get; set; } = 8 * 1024 * 1024;
+
+    public int TimeoutSeconds { get; set; } = 10;
+
+    /// <summary>Upstream connections reserved for proxied reads, so they can't starve the sealer and relay.</summary>
+    public int MaxConnections { get; set; } = 16;
 }
 
 /// <summary>
