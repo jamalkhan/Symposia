@@ -14,7 +14,8 @@ namespace Symposia.Blockchain.Gateway.Tests;
 /// Issue #158 end to end on a real chain and the real Gateway relay: a one-member committee
 /// checkpoints window 0, the node self-checkpoints window 1 after the committee stays silent, and
 /// after the telemetry deadline the committee's records land and finalize. This proves the C#
-/// EIP-712 digests, batch encoding and records hash match the contract byte for byte.
+/// EIP-712 digests, batch encoding and records hash match the contract byte for byte. Chain reads
+/// go through the gateway's <c>/v1/rpc</c> proxy, as on a joined host (#172 AC4).
 /// </summary>
 public sealed class TelemetryCommitteeChainTests(RewardsChainFixture chain) : IClassFixture<RewardsChainFixture>, IDisposable
 {
@@ -75,12 +76,16 @@ public sealed class TelemetryCommitteeChainTests(RewardsChainFixture chain) : IC
                 ["Gateway:TelemetryBlobs:CacheDirectory"] = _blobs,
             })));
         var relay = new HttpTelemetryRelay(gateway.CreateClient());
+
+        // #172: read the chain the way a joined host does, through the gateway's read-only proxy,
+        // on a chain taller than the proxy's eth_getLogs cap so the self-checkpoint scan must page.
+        await Mine(6_000);
         var telemetryChain = new NethereumTelemetryChain(new TelemetryChainOptions
         {
-            RpcUrl = chain.RpcUrl,
+            RpcUrl = new Uri(gateway.Server.BaseAddress, "/v1/rpc").ToString(),
             TelemetryRegistryAddress = registry,
             EpochControllerAddress = a["EpochController"],
-        });
+        }, http: gateway.CreateClient());
         var schedule = await telemetryChain.ScheduleAsync(default);
         var eip712 = new TelemetryEip712(chainId, registry);
         var blobs = new CachingTelemetryBlobStore(_blobs, null); // same store the Gateway writes relayed batches to
@@ -146,6 +151,13 @@ public sealed class TelemetryCommitteeChainTests(RewardsChainFixture chain) : IC
         Assert.Equal(1, await sealer.RunOnceAsync(default));
         var rewards = deployer.Eth.GetContract(Abi, a["RewardDistributor"]);
         Assert.True(await rewards.GetFunction("reserveBalanceOf").CallAsync<BigInteger>(node) > 0);
+    }
+
+    private async Task Mine(int blocks)
+    {
+        using var http = new HttpClient();
+        (await http.PostAsync(chain.RpcUrl, new StringContent($$"""{"jsonrpc":"2.0","method":"anvil_mine","params":["0x{{blocks:x}}"],"id":1}""",
+            System.Text.Encoding.UTF8, "application/json"))).EnsureSuccessStatusCode();
     }
 
     private async Task Warp(long timestamp)

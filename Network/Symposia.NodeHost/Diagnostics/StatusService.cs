@@ -39,6 +39,12 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
                 nodeRegistryAddress = network.NodeRegistryAddress,
                 epochRootRegistryAddress = network.EpochRootRegistryAddress,
                 rpcUrl = network.RpcUrl,
+                rpcSource = network.RpcSource.ToString(),
+                rewardsContracts = new[]
+                {
+                    ("RewardDistributor", network.RewardDistributorAddress), ("EpochController", network.EpochControllerAddress),
+                    ("TelemetryRegistry", network.TelemetryRegistryAddress), ("StakingRegistry", network.StakingRegistryAddress),
+                }.Where(c => !string.IsNullOrEmpty(c.Item2)).Select(c => c.Item1),
             },
             chain,
             registry,

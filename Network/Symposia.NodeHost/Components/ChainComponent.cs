@@ -121,20 +121,25 @@ public sealed partial class ChainComponent : HostComponent
         {
             // Rewards stack (#70-#80) with its epoch controller (#72), so the hosted gateway's epoch sealer has something to settle.
             // A stack from an older build (lower RewardsVersion) lacks functions the gateway and host now call, so it redeploys.
+            var deployBlock = await BlockNumberAsync(rpcUrl, ct);
             var (distributor, epochs, telemetry, staking) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, ct);
             deployment = deployment with
             {
                 RewardDistributorAddress = distributor, EpochControllerAddress = epochs, TelemetryRegistryAddress = telemetry, StakingRegistryAddress = staking,
-                RewardsVersion = RewardsStackVersion,
+                RewardsVersion = RewardsStackVersion, RewardsDeployBlock = deployBlock,
             };
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
             context.Logger.LogInformation("Deployed the rewards contracts (RewardDistributor {Distributor}, EpochController {Epochs}).", distributor, epochs);
         }
 
-        return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl,
-            deployment.ProtocolActivationsAddress, deployment.RewardDistributorAddress, deployment.EpochControllerAddress,
-            deployment.TelemetryRegistryAddress, deployment.StakingRegistryAddress);
+        return ToNetworkInfo(deployment, network.GatewayPort, rpcUrl);
     }
+
+    /// <summary>The one place a LocalDev deployment becomes the host's <see cref="NetworkInfo"/> (shared with a rewards reset).</summary>
+    private static NetworkInfo ToNetworkInfo(Deployment deployment, int gatewayPort, string rpcUrl) =>
+        new($"http://127.0.0.1:{gatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl,
+            deployment.ProtocolActivationsAddress, deployment.RewardDistributorAddress, deployment.EpochControllerAddress,
+            deployment.TelemetryRegistryAddress, deployment.StakingRegistryAddress, RpcSource.Direct, deployment.RewardsDeployBlock);
 
     private static NetworkInfo ResolveRemoteRpc(HostContext context)
     {
@@ -153,7 +158,7 @@ public sealed partial class ChainComponent : HostComponent
 
         return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", preset.ChainId, preset.NodeRegistryAddress, preset.EpochRootRegistryAddress, preset.RpcUrl,
             preset.ProtocolActivationsAddress, preset.RewardDistributorAddress, preset.EpochControllerAddress,
-            preset.TelemetryRegistryAddress, NullIfEmpty(preset.StakingRegistryAddress));
+            preset.TelemetryRegistryAddress, NullIfEmpty(preset.StakingRegistryAddress), RpcSource.Direct, preset.DeployBlock);
     }
 
     internal static async Task<NetworkInfo> JoinAsync(string gatewayUrl, CancellationToken ct)
@@ -178,8 +183,27 @@ public sealed partial class ChainComponent : HostComponent
             throw new ComponentFaultException($"Gateway at {gatewayUrl} returned no network descriptor.");
         }
 
-        return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, null,
-            descriptor.ProtocolActivationsAddress);
+        return FromDescriptor(gateway, descriptor);
+    }
+
+    /// <summary>
+    /// Maps a gateway's descriptor to this host's network (issue #172). Chain reads go through the
+    /// RPC the gateway advertises; an older gateway advertises none, so reads stay unavailable.
+    /// </summary>
+    internal static NetworkInfo FromDescriptor(Uri gateway, GatewayNetwork descriptor)
+    {
+        string? rpcUrl = null;
+        var source = RpcSource.Direct;
+        if (!string.IsNullOrWhiteSpace(descriptor.RpcUrl) && Uri.TryCreate(gateway, descriptor.RpcUrl, out var rpc)
+            && rpc.Scheme is "http" or "https")
+        {
+            rpcUrl = rpc.ToString();
+            source = rpc.AbsolutePath.TrimEnd('/') == "/v1/rpc" && rpc.Authority == gateway.Authority ? RpcSource.Gateway : RpcSource.Advertised;
+        }
+
+        return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, rpcUrl,
+            descriptor.ProtocolActivationsAddress, descriptor.RewardDistributorAddress, descriptor.EpochControllerAddress,
+            descriptor.TelemetryRegistryAddress, descriptor.StakingRegistryAddress, source, descriptor.DeployBlock ?? 0);
     }
 
     private static readonly HttpClient ProbeHttp = new() { Timeout = TimeSpan.FromSeconds(1) };
@@ -361,6 +385,11 @@ public sealed partial class ChainComponent : HostComponent
         }
     }
 
+    private static async Task<ulong> BlockNumberAsync(string rpcUrl, CancellationToken ct) =>
+        await RpcAsync(rpcUrl, "eth_blockNumber", [], ct) is { ValueKind: JsonValueKind.String } hex
+            ? Convert.ToUInt64(hex.GetString(), 16)
+            : 0;
+
     private static Task<JsonElement?> TryChainIdAsync(string rpcUrl, CancellationToken ct) => RpcAsync(rpcUrl, "eth_chainId", [], ct);
 
     private static async Task<bool> HasCodeAsync(string rpcUrl, string address, CancellationToken ct)
@@ -372,7 +401,7 @@ public sealed partial class ChainComponent : HostComponent
     /// <summary>Deployed addresses, tagged with the chain they were deployed to (checked on load).</summary>
     private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId,
         string? ProtocolActivationsAddress = null, string? RewardDistributorAddress = null, string? EpochControllerAddress = null,
-        string? TelemetryRegistryAddress = null, string? StakingRegistryAddress = null, int RewardsVersion = 0);
+        string? TelemetryRegistryAddress = null, string? StakingRegistryAddress = null, int RewardsVersion = 0, ulong RewardsDeployBlock = 0);
 
     /// <summary>
     /// Bump whenever the rewards contracts gain a function the gateway or host calls, so existing local
@@ -381,5 +410,8 @@ public sealed partial class ChainComponent : HostComponent
     /// </summary>
     internal const int RewardsStackVersion = 2;
 
-    private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null);
+    /// <summary>A gateway's <c>/v1/network</c> descriptor; fields after the registries are absent on older gateways.</summary>
+    internal sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null,
+        string? RewardDistributorAddress = null, string? EpochControllerAddress = null, string? TelemetryRegistryAddress = null,
+        string? StakingRegistryAddress = null, string? RpcUrl = null, ulong? DeployBlock = null);
 }

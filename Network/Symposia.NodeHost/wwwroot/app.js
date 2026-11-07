@@ -92,7 +92,10 @@ async function refresh() {
     `<tr><td>${esc(c.name)}</td><td class="status ${esc(c.status)}">${esc(c.status)}</td><td>${esc(c.reason)}</td></tr>`));
   const n = s.network || {};
   setTitle(s.node, n.chainId);
-  $('#network').innerHTML = dl([['Mode', s.mode], ['Gateway', n.gatewayUrl], ['Chain ID', n.chainId], ['RPC', n.rpcUrl],
+  const RPC_SOURCES = { Direct: '', Gateway: ' (via gateway)', Advertised: ' (advertised by gateway)' };
+  const rpc = n.rpcUrl ? n.rpcUrl + (RPC_SOURCES[n.rpcSource] || '') : (s.mode === 'Join' ? 'none — gateway advertises no RPC' : '');
+  $('#network').innerHTML = dl([['Mode', s.mode], ['Gateway', n.gatewayUrl], ['Chain ID', n.chainId], ['RPC', rpc],
+    ['Rewards contracts', (n.rewardsContracts || []).join(', ') || 'none known'],
     ['Latest block', s.chain?.latestBlock], ['NodeRegistry', n.nodeRegistryAddress], ['EpochRootRegistry', n.epochRootRegistryAddress], ['Data dir', s.dataDir]]);
   if (s.chain?.error) $('#network').innerHTML += dl([['Chain', s.chain.error]]);
   const r = s.registry || {};

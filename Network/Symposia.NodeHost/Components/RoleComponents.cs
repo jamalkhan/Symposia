@@ -68,6 +68,8 @@ public sealed class StorageRoleComponent : WebAppComponent
             config["StorageNode:Telemetry:Chain:RpcUrl"] = network.RpcUrl;
             config["StorageNode:Telemetry:Chain:TelemetryRegistryAddress"] = network.TelemetryRegistryAddress;
             config["StorageNode:Telemetry:Chain:EpochControllerAddress"] = network.EpochControllerAddress;
+            // Log scans start at the rewards deployment and page under capped RPCs (#172).
+            config["StorageNode:Telemetry:Chain:FromBlock"] = network.DeployBlock.ToString();
             config["StorageNode:Telemetry:Blobs:CacheDirectory"] = Path.Combine(dir, "telemetry-blobs");
         }
 

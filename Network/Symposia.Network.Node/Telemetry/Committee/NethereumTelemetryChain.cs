@@ -21,12 +21,15 @@ public sealed class TelemetryChainOptions
 
     /// <summary>First block searched for self-checkpoint events (the registry's deployment block).</summary>
     public ulong FromBlock { get; set; }
+
+    /// <summary>Widest block span per <c>eth_getLogs</c>, to fit capped RPCs like the gateway proxy (#172).</summary>
+    public ulong MaxLogBlockRange { get; set; } = LogPager.DefaultWindow;
 }
 
 /// <summary>Read-only <see cref="ITelemetryChain"/> over JSON-RPC; never signs or spends gas.</summary>
-public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long cadenceSeconds = 300) : ITelemetryChain
+public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long cadenceSeconds = 300, HttpClient? http = null) : ITelemetryChain
 {
-    private readonly Web3 _web3 = new(options.RpcUrl);
+    private readonly Web3 _web3 = http is null ? new(options.RpcUrl) : new(new Nethereum.JsonRpc.Client.RpcClient(new Uri(options.RpcUrl), http));
 
     public async Task<long> NowAsync(CancellationToken ct)
     {
@@ -73,8 +76,10 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
     public async Task<IReadOnlyList<SelfCheckpointRef>> SelfCheckpointsAsync(ulong epoch, CancellationToken ct)
     {
         var ev = _web3.Eth.GetEvent<SelfCheckpointCommittedEvent>(options.TelemetryRegistryAddress);
-        var filter = ev.CreateFilterInput<BigInteger>([epoch], new BlockParameter(options.FromBlock), BlockParameter.CreateLatest());
-        var logs = await ev.GetAllChangesAsync(filter);
+        var latest = (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+        var logs = await LogPager.ScanAsync(options.FromBlock, latest, options.MaxLogBlockRange, async (from, to) =>
+            (IEnumerable<EventLog<SelfCheckpointCommittedEvent>>)await ev.GetAllChangesAsync(
+                ev.CreateFilterInput<BigInteger>([epoch], new BlockParameter(from), new BlockParameter(to))));
         return [.. logs.Select(l => new SelfCheckpointRef((ulong)l.Event.Epoch, (ushort)l.Event.CheckpointIndex, l.Event.Node,
             l.Event.MerkleRoot, l.Event.BlobAddress))];
     }

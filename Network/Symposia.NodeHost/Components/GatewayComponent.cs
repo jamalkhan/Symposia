@@ -35,6 +35,9 @@ public sealed class GatewayComponent : WebAppComponent
             ["Gateway:EpochControllerAddress"] = network.EpochControllerAddress,
             // Telemetry relays (#158); relayed self-checkpoint batches are kept under the gateway's data dir.
             ["Gateway:TelemetryRegistryAddress"] = network.TelemetryRegistryAddress,
+            // Published to joining hosts with an RPC they can read through (#172).
+            ["Gateway:StakingRegistryAddress"] = network.StakingRegistryAddress,
+            ["Gateway:DeployBlock"] = network.DeployBlock.ToString(),
             ["Gateway:TelemetryBlobs:CacheDirectory"] = Path.Combine(context.Paths.DataDir, "telemetry-blobs"),
             ["Gateway:RelayerPrivateKey"] = context.Settings.Network.Mode == NetworkMode.LocalDev
                 ? ChainComponent.AnvilDevKey

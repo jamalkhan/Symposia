@@ -15,7 +15,22 @@ public sealed record NetworkInfo(
     string? RewardDistributorAddress = null,
     string? EpochControllerAddress = null,
     string? TelemetryRegistryAddress = null,
-    string? StakingRegistryAddress = null);
+    string? StakingRegistryAddress = null,
+    RpcSource RpcSource = RpcSource.Direct,
+    ulong DeployBlock = 0);
+
+/// <summary>Where <see cref="NetworkInfo.RpcUrl"/> came from (issue #172), shown on the Network card.</summary>
+public enum RpcSource
+{
+    /// <summary>This host's own chain or preset RPC.</summary>
+    Direct,
+
+    /// <summary>The joined gateway's read-only <c>/v1/rpc</c> proxy.</summary>
+    Gateway,
+
+    /// <summary>A public RPC the joined gateway's operator advertises.</summary>
+    Advertised,
+}
 
 /// <summary>Shared state components read while starting.</summary>
 public sealed class HostContext
