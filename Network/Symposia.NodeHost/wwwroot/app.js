@@ -22,7 +22,12 @@ async function api(method, path, body) {
   return data;
 }
 
+// Views that live behind the login get a #hash so refresh and back/forward keep the page.
+const NAV_VIEWS = ['diagnostics', 'network', 'services', 'ledger', 'settings'];
+const hashView = () => (NAV_VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : null);
+
 function show(view) {
+  if (NAV_VIEWS.includes(view) && location.hash !== `#${view}`) history[hashView() ? 'pushState' : 'replaceState'](null, '', `#${view}`);
   $$('main > section').forEach((s) => (s.hidden = s.id !== `view-${view}`));
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === view));
   clearInterval(pollTimer);
@@ -41,8 +46,9 @@ async function route() {
   $('#setup-token').hidden = !session.setupTokenRequired;
   if (session.setupRequired) return show('setup');
   if (!session.authenticated) return show('login');
-  show('diagnostics');
+  show(hashView() || 'diagnostics');
 }
+window.addEventListener('popstate', () => { if (!$('#nav').hidden) show(hashView() || 'diagnostics'); });
 
 // ---------- auth ----------
 $('#setup-form').addEventListener('submit', async (e) => {
