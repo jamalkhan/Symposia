@@ -68,6 +68,12 @@ public sealed class HostContext
     /// <summary>Set by the chain component once the network is known; null until then.</summary>
     public NetworkInfo? Network { get; set; }
 
+    /// <summary>Set when the LocalDev rewards stack was deployed with parameters it can't settle under (#181 FR4).</summary>
+    public RewardsStaleNotice? RewardsStale { get; set; }
+
+    /// <summary>Heartbeat acceptance, shared with the storage role (#181 FR5).</summary>
+    public Symposia.Network.Node.Telemetry.TelemetryDiagnostics Telemetry { get; } = new();
+
     /// <summary>Health summary served to peers by the role apps; set once the supervisor exists.</summary>
     public NodeHealth? Health { get; set; }
 

@@ -47,10 +47,15 @@
       <div id="unconfigured" class="card notice" hidden>
         This node isn't connected to a network yet. Open <a href="#" data-goto="settings">Settings</a> to choose one.
       </div>
+      <div id="rewards-stale" class="card notice" hidden>
+        <p>Rewards can't settle on this local chain: <span data-reason></span></p>
+        <button id="reset-rewards">Reset rewards contracts</button> <span class="hint" data-status></span>
+      </div>
       <div class="grid">
         <div class="card"><h2>Components</h2><table id="components"></table></div>
         <div class="card"><h2>Network</h2><dl id="network"></dl></div>
         <div class="card"><h2>On-chain registration</h2><dl id="registration"></dl></div>
+        <div class="card" id="rewards-card" hidden><h2>Rewards epoch</h2><dl id="rewards"></dl></div>
         <div class="card" id="blobgateway-card" hidden><h2>Blob gateway (S3)</h2><dl id="blobgateway"></dl></div>
       </div>
       <div class="card"><h2>Peers <small>(handshake results)</small></h2><table id="peers"></table></div>

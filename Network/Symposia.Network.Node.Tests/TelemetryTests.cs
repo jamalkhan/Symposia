@@ -324,6 +324,39 @@ public sealed class TelemetryPipelineTests : IDisposable
         Assert.Equal(2, gossip.Heartbeats.Count);
     }
 
+    // Issue #181 FR1 / AC7: with a chain configured, nothing is stamped until the chain's schedule
+    // arrives, and then epochs count from the chain's genesis, never the placeholder's.
+    [Fact]
+    public async Task Emitter_HoldsUntilTheChainScheduleSyncs_ThenUsesIt()
+    {
+        const long chainGenesis = 1_793_928_069;
+        var time = new ManualTime(DateTimeOffset.FromUnixTimeSeconds(chainGenesis + 3 * 3600 + 905));
+        var gossip = new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry);
+        var options = Microsoft.Extensions.Options.Options.Create(new TelemetryOptions { Enabled = true });
+        var schedules = new TelemetryScheduleSource(options.Value.Schedule, requiresSync: true); // genesis 0 placeholder
+        var diagnostics = new TelemetryDiagnostics();
+        var emitter = new HeartbeatEmitter(_node, gossip, new LivenessOnlyMetricsSource(), options, time,
+            NullLogger<HeartbeatEmitter>.Instance, schedules, diagnostics);
+
+        Assert.Null(await emitter.EmitOnceAsync(CancellationToken.None));
+        Assert.Empty(gossip.Heartbeats);
+
+        schedules.Publish(new TelemetrySchedule(chainGenesis, 3600, 300, 4));
+        var beat = await emitter.EmitOnceAsync(CancellationToken.None);
+
+        Assert.NotNull(beat);
+        Assert.Equal(3UL, beat.Payload.EpochIndex); // floor((t - G) / 3600)
+        Assert.Equal(3u, beat.Payload.SampleIndex); // 905 s into the epoch, 300 s slots
+        Assert.Equal(3UL, diagnostics.Current.LastAccepted!.Epoch);
+    }
+
+    [Fact]
+    public void ScheduleSource_WithoutAChain_IsSyncedFromTheStart()
+    {
+        Assert.True(new TelemetryScheduleSource(new TelemetrySchedule(0, 86_400)).IsSynced);
+        Assert.False(new TelemetryScheduleSource(new TelemetrySchedule(0, 86_400), requiresSync: true).IsSynced);
+    }
+
     [Fact]
     public async Task Emitter_IsSilentBeforeGenesis()
     {

@@ -34,6 +34,51 @@ contract DeployRewardsTest is DeployRewards, Test {
         vm.stopBroadcast();
     }
 
+    /// #181: production timing is the default; LocalDev's 1-hour profile deploys and wires through.
+    function test_DefaultTimingIsProduction() public view {
+        assertEq(d.epochs.epochLength(), 1 days);
+        assertEq(d.config.getUint(ConfigKeys.TELEMETRY_CHECKPOINTS_PER_EPOCH), 24);
+        assertEq(d.config.getUint(ConfigKeys.TELEMETRY_COMMIT_WINDOW), 30 minutes);
+        assertEq(d.config.getUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT), 24 hours);
+    }
+
+    function test_LocalDevTimingDeploys() public {
+        timing = Timing(1 hours, 5 minutes, 4, 300, 5 minutes, 5 minutes, 1 hours);
+        address[] memory committee = new address[](1);
+        committee[0] = node;
+        vm.startBroadcast(deployer);
+        Deployment memory dev = deploy(deployer, Roles(makeAddr("timelock"), deployer, deployer, deployer, deployer, committee, 1, 0));
+        vm.stopBroadcast();
+
+        assertEq(dev.epochs.epochLength(), 1 hours);
+        assertEq(dev.epochs.finalityWindow(), 5 minutes);
+        assertEq(dev.config.getUint(ConfigKeys.TELEMETRY_CHECKPOINTS_PER_EPOCH), 4);
+        assertEq(dev.config.getUint(ConfigKeys.TELEMETRY_COMMIT_WINDOW), 5 minutes);
+        assertEq(dev.config.getUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE), 5 minutes);
+        assertEq(dev.config.getUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT), 1 hours);
+        (address[] memory members, uint256 threshold) = dev.telemetry.committee();
+        assertEq(members.length, 1);
+        assertEq(members[0], node);
+        assertEq(threshold, 1);
+    }
+
+    function test_ValidateTiming_RejectsWindowsWithoutWholeHeartbeats() public {
+        // 1h / (7 windows * 300s) isn't whole.
+        vm.expectRevert(abi.encodeWithSelector(InvalidTiming.selector, "telemetry windows must each hold a whole number of heartbeats (>= 1)"));
+        this.validateTiming(Timing(1 hours, 5 minutes, 7, 300, 5 minutes, 5 minutes, 1 hours));
+    }
+
+    function test_ValidateTiming_RejectsWindowsShorterThanAHeartbeat() public {
+        // 24 windows in an hour are 150s each: a 300s heartbeat can't land in every one.
+        vm.expectRevert(abi.encodeWithSelector(InvalidTiming.selector, "telemetry windows must each hold a whole number of heartbeats (>= 1)"));
+        this.validateTiming(Timing(1 hours, 5 minutes, 24, 300, 5 minutes, 5 minutes, 1 hours));
+    }
+
+    function test_ValidateTiming_RejectsGracePastTheTelemetryDeadline() public {
+        vm.expectRevert(abi.encodeWithSelector(InvalidTiming.selector, "self-checkpoint grace must end before finality + commit window"));
+        this.validateTiming(Timing(1 hours, 5 minutes, 4, 300, 5 minutes, 10 minutes, 1 hours));
+    }
+
     function test_WiresEveryContractIntoConfig() public view {
         assertEq(d.config.getAddress(ConfigKeys.TOKEN_ADDRESS), address(d.token));
         assertEq(d.config.getAddress(ConfigKeys.REWARD_EMISSION_SOURCE), address(d.emission));

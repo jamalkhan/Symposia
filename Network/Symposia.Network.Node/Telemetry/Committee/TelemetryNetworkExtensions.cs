@@ -104,12 +104,21 @@ public sealed class TelemetryCommitteeService(
     private async Task SyncScheduleAsync(CancellationToken ct)
     {
         var onChain = await chain.ScheduleAsync(ct);
-        if (onChain != schedules.Current)
+        if (onChain.EpochSeconds % ((long)onChain.CheckpointsPerEpoch * onChain.CadenceSeconds) != 0)
+        {
+            // Mirrors DeployRewards' check: every window must hold whole heartbeats, or the chain under-counts them.
+            logger.LogError("The chain's telemetry schedule ({Epoch}s epochs, {Windows} windows) doesn't fit {Cadence}s heartbeats; holding heartbeats.",
+                onChain.EpochSeconds, onChain.CheckpointsPerEpoch, onChain.CadenceSeconds);
+            return;
+        }
+
+        if (onChain != schedules.Current || !schedules.IsSynced)
         {
             logger.LogInformation("Telemetry schedule synced from chain: genesis {Genesis}, epoch {Epoch}s, {Windows} windows.",
                 onChain.GenesisUnixSeconds, onChain.EpochSeconds, onChain.CheckpointsPerEpoch);
-            schedules.Current = onChain;
         }
+
+        schedules.Publish(onChain);
     }
 
     private async Task RunGuardedAsync(string name, Func<CancellationToken, Task> pass, CancellationToken ct)

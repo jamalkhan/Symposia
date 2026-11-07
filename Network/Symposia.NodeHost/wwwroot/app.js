@@ -105,6 +105,17 @@ async function refresh() {
     `<tr><td class="mono">${esc(p.endpoint)}</td><td class="mono">${esc(p.address || p.expectedAddress)}</td><td class="status ${esc(p.status)}">${esc(p.status)}</td><td>${p.reason === 'None' ? '' : esc(p.reason)}</td><td>${esc(new Date(p.lastAttempt).toLocaleTimeString())}</td></tr>`));
   $('#members').innerHTML = table(['Address', 'Endpoint'], (r.members || []).map((m) =>
     `<tr><td class="mono">${esc(m.node)}${m.self ? ' <b>(this node)</b>' : ''}</td><td class="mono">${esc(m.endpoint)}</td></tr>`));
+  // Rewards epoch and heartbeats (issue #181 FR5).
+  const rw = s.rewards, t = s.telemetry, when = (v) => (v ? new Date(v).toLocaleString() : '');
+  const beat = (b) => (b ? `epoch ${b.epoch} slot ${b.slot} at ${when(b.at)}${b.reason ? ` — ${b.reason}` : ''}` : 'none yet');
+  $('#rewards-card').hidden = !rw && !t;
+  $('#rewards').innerHTML = rw?.error ? `<p class="error">${esc(rw.error)}</p>` : dl([
+    ['Epoch', rw ? `${rw.epoch} (${Math.round(rw.epochSeconds / 60)} min)` : ''], ['Epoch ends', when(rw?.epochEndsAt)],
+    ['Sealable from', when(rw?.sealableFrom)], ['Telemetry committee', rw ? (rw.committeeMember ? `this node (${rw.threshold} of ${rw.committeeSize})` : `not a member (${rw.committeeSize} members)`) : ''],
+    ['Heartbeats', !t ? 'off' : !t.configured ? 'telemetry not configured' : !t.scheduleSynced ? 'holding until the chain schedule syncs' : 'sending'],
+    ['Last accepted', t?.configured ? beat(t.lastAccepted) : ''], ['Last rejected', t?.configured ? beat(t.lastRejected) : '']]);
+  $('#rewards-stale').hidden = !s.rewardsStale;
+  if (s.rewardsStale) $('[data-reason]', $('#rewards-stale')).textContent = s.rewardsStale.reason;
   const g = s.blobGateway;
   $('#blobgateway-card').hidden = !g || !g.configured;
   if (g && g.configured) {
@@ -117,6 +128,14 @@ async function refresh() {
   logs.textContent = s.logs.map((l) => `${new Date(l.time).toLocaleTimeString()} [${l.component}] ${l.level}: ${l.message}`).join('\n');
   if (atBottom) logs.scrollTop = logs.scrollHeight;
 }
+
+$('#reset-rewards').addEventListener('click', async () => {
+  const status = $('[data-status]', $('#rewards-stale'));
+  if (!confirm('Redeploy the rewards contracts on this local chain?\n\nThe earlier ledger and stakes on this chain are abandoned; node registrations are kept. Joined hosts must restart.')) return;
+  status.textContent = 'Redeploying…';
+  try { await api('POST', '/chain/reset-rewards'); status.textContent = 'Done.'; refresh(); }
+  catch (ex) { status.textContent = ex.message; }
+});
 
 // ---------- network ----------
 const fmtGb = (b) => `${(b / GB).toFixed(1)} GB`;

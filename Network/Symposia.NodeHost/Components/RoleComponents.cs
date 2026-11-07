@@ -36,7 +36,12 @@ public sealed class StorageRoleComponent : WebAppComponent
         !context.Settings.Storage.Enabled ? "Storage service is turned off" : base.SkipReason(context);
 
     protected override WebApplication Build(WebApplicationOptions options, Action<WebApplicationBuilder> configure, HostContext context) =>
-        StorageNodeApp.Create(options, configure);
+        StorageNodeApp.Create(options, builder =>
+        {
+            configure(builder);
+            // Heartbeat acceptance surfaces on the host's Diagnostics page (#181 FR5).
+            builder.Services.AddSingleton(context.Telemetry);
+        });
 
     protected override int Port(HostContext context) => context.Settings.Storage.Port;
 
@@ -59,7 +64,6 @@ public sealed class StorageRoleComponent : WebAppComponent
             ["StorageNode:MaxCapacityBytes"] = storage.MaxCapacityBytes.ToString(),
             // 5-minute signed heartbeats that feed reward scoring (issue #75).
             ["StorageNode:Telemetry:Enabled"] = storage.Heartbeats.ToString(),
-            ["StorageNode:Telemetry:GenesisUnixSeconds"] = storage.EpochGenesisUnixSeconds.ToString(),
         };
         var network = context.Network!;
         if (!string.IsNullOrEmpty(network.TelemetryRegistryAddress) && !string.IsNullOrEmpty(network.RpcUrl) && storage.Heartbeats)

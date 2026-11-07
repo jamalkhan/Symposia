@@ -73,14 +73,28 @@ public sealed class HeartbeatEmitter(
     IOptions<TelemetryOptions> options,
     TimeProvider time,
     ILogger<HeartbeatEmitter> logger,
-    TelemetryScheduleSource? schedules = null) : BackgroundService
+    TelemetryScheduleSource? schedules = null,
+    TelemetryDiagnostics? diagnostics = null) : BackgroundService
 {
     private uint? _lastSlot;
     private ulong? _lastEpoch;
+    private bool _heldLogged;
 
     /// <summary>Builds, signs and publishes the heartbeat for the slot containing now; null if already sent.</summary>
     public async Task<SignedTelemetry<HeartbeatSample>?> EmitOnceAsync(CancellationToken ct)
     {
+        if (schedules is { IsSynced: false })
+        {
+            // Never stamp a guessed epoch: gossip judges heartbeats by the chain's schedule (#181 FR1).
+            if (!_heldLogged)
+            {
+                logger.LogInformation("Holding heartbeats until the telemetry schedule syncs from chain.");
+                _heldLogged = true;
+            }
+
+            return null;
+        }
+
         var schedule = schedules?.Current ?? options.Value.Schedule;
         var now = time.GetUtcNow().ToUnixTimeSeconds();
         if (now < schedule.GenesisUnixSeconds)
@@ -99,9 +113,14 @@ public sealed class HeartbeatEmitter(
         var signed = identity.SignHeartbeat(new HeartbeatSample(identity.NodeId, epoch, slot, now,
             r.ReadThroughputKBps, r.WriteThroughputKBps, r.BandwidthInKbps, r.BandwidthOutKbps,
             r.LatencyMs, r.RetrievalMs, r.AvailableBytes, r.UsedBytes));
-        if (!await gossip.PublishAsync(signed, ct))
+        if (await gossip.PublishAsync(signed, ct))
+        {
+            diagnostics?.Accepted(epoch, slot, time.GetUtcNow());
+        }
+        else
         {
             logger.LogWarning("Heartbeat for epoch {Epoch} slot {Slot} was rejected by gossip.", epoch, slot);
+            diagnostics?.Rejected(epoch, slot, time.GetUtcNow(), "rejected by gossip admission (wrong epoch or slot, or a replay)");
         }
 
         (_lastEpoch, _lastSlot) = (epoch, slot);
@@ -111,6 +130,12 @@ public sealed class HeartbeatEmitter(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var cadence = options.Value.CadenceSeconds;
+        if (schedules is not null)
+        {
+            await schedules.WhenSyncedAsync(stoppingToken);
+            diagnostics?.ScheduleSynced();
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -147,9 +172,11 @@ public static class TelemetryServiceExtensions
         }
 
         services.TryAddSingleton(TimeProvider.System);
-        services.TryAddSingleton(sp => new TelemetryScheduleSource(sp.GetRequiredService<IOptions<TelemetryOptions>>().Value.Schedule));
+        // With a chain, the configured schedule is only a placeholder until the chain's is synced (#181 FR1).
+        var chainConfigured = section.GetSection("Chain").Get<Committee.TelemetryChainOptions>() is { TelemetryRegistryAddress.Length: > 0, RpcUrl.Length: > 0 };
+        services.TryAddSingleton(sp => new TelemetryScheduleSource(sp.GetRequiredService<IOptions<TelemetryOptions>>().Value.Schedule, requiresSync: chainConfigured));
         services.TryAddSingleton<IHeartbeatMetricsSource, LivenessOnlyMetricsSource>();
-        if (section.GetSection("Chain").Get<Committee.TelemetryChainOptions>() is { TelemetryRegistryAddress.Length: > 0, RpcUrl.Length: > 0 })
+        if (chainConfigured)
         {
             Committee.TelemetryNetworkExtensions.AddTelemetryNetwork(services, section);
         }

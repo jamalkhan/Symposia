@@ -13,6 +13,7 @@ namespace Symposia.Blockchain.Gateway.Sealing;
 public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> options, ILogger<EpochSealer> logger)
 {
     private readonly int _maxPerPass = Math.Max(1, options.Value.EpochSealer.MaxEpochsPerPass);
+    private ulong? _waitLoggedFor;
 
     /// <summary>Runs one pass and returns how many epochs this gateway settled.</summary>
     public async Task<int> RunOnceAsync(CancellationToken ct)
@@ -23,7 +24,16 @@ public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> 
             var epoch = await chain.NextSealableEpochAsync(ct);
             if (!await chain.CanSealAsync(epoch, ct))
             {
-                break; // finality not passed, or telemetry records still pending within the fallback wait
+                // Once per epoch, so a stalled pipeline is never silent (#181 FR5).
+                if (_waitLoggedFor != epoch)
+                {
+                    logger.LogInformation(
+                        "Epoch {Epoch} can't be sealed yet: its finality window hasn't passed, or its telemetry records are still pending within the fallback wait.",
+                        epoch);
+                    _waitLoggedFor = epoch;
+                }
+
+                break;
             }
 
             var reporters = await chain.ReportersAsync(epoch, ct);
