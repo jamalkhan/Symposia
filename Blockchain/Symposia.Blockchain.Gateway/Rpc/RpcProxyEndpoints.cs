@@ -62,19 +62,34 @@ public static class RpcProxyEndpoints
                 return Error(null, -32600, "Batch requests are not supported on the gateway's read-only RPC");
             }
 
-            if (request is not JsonObject call || call["method"] is not JsonValue methodNode || !methodNode.TryGetValue(out string? method))
+            string? method;
+            JsonNode? id, rawParams;
+            try
             {
-                return Error(null, -32600, "Invalid request");
+                if (request is not JsonObject call || call["method"] is not JsonValue methodNode || !methodNode.TryGetValue(out method))
+                {
+                    return Error(null, -32600, "Invalid request");
+                }
+
+                id = call["id"]?.DeepClone();
+                rawParams = call["params"]?.DeepClone();
+            }
+            catch (ArgumentException)
+            {
+                return Error(null, -32600, "Invalid request: duplicate keys"); // System.Text.Json refuses duplicate property names
             }
 
-            var id = call["id"]?.DeepClone();
             if (!AllowedMethods.Contains(method))
             {
                 logger.LogInformation("RPC proxy rejected method {Method} from {Remote}.", method, http.Connection.RemoteIpAddress);
                 return Error(id, -32601, $"Method '{method}' is not available on the gateway's read-only RPC");
             }
 
-            var parameters = call["params"] as JsonArray;
+            var parameters = rawParams as JsonArray;
+            if (rawParams is not null && parameters is null)
+            {
+                return Error(id, -32602, "params must be an array");
+            }
             if (method == "eth_call" && parameters is { Count: > 2 })
             {
                 return Error(id, -32602, "State overrides are not supported on the gateway's read-only RPC");
@@ -103,8 +118,11 @@ public static class RpcProxyEndpoints
 
             try
             {
+                // Forward only what was validated, rebuilt here: upstreams that match keys case-insensitively
+                // (Go's encoding/json, e.g. geth) would otherwise run a smuggled "METHOD" or "PARAMS" (#172 review).
+                var canonical = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id?.DeepClone(), ["method"] = method, ["params"] = parameters?.DeepClone() ?? new JsonArray() };
                 using var upstream = await clients.CreateClient(HttpClientName).PostAsync(gateway.RpcUrl,
-                    new ByteArrayContent(body) { Headers = { ContentType = new("application/json") } }, ct);
+                    new StringContent(canonical.ToJsonString(), Encoding.UTF8, "application/json"), ct);
                 var response = await ReadBoundedAsync(await upstream.Content.ReadAsStreamAsync(ct), options.MaxResponseBytes, ct);
                 if (response is null)
                 {

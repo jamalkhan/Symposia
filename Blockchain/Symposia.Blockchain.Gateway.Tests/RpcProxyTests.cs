@@ -84,6 +84,30 @@ public sealed class RpcProxyTests
         Assert.Equal(before, await BlockNumberAsync());
     }
 
+    // Review: geth matches JSON keys case-insensitively, so only the validated fields may be forwarded.
+    [Fact]
+    public async Task CaseVariantKeys_AreDroppedNotForwarded()
+    {
+        var before = await BlockNumberAsync();
+
+        var response = await RpcAsync("""{"jsonrpc":"2.0","id":3,"method":"eth_chainId","METHOD":"anvil_mine","PARAMS":["0x5"]}""");
+
+        Assert.Equal(ChainFixture.ChainId, Convert.ToUInt64(response.GetProperty("result").GetString(), 16));
+        Assert.Equal(before, await BlockNumberAsync());
+    }
+
+    [Fact]
+    public async Task DuplicateKeys_AreAnInvalidRequest()
+    {
+        Assert.Equal(-32600, ErrorCode(await RpcAsync("""{"jsonrpc":"2.0","id":1,"method":"eth_chainId","method":"anvil_mine"}""")));
+    }
+
+    [Fact]
+    public async Task NonArrayParams_AreRejected()
+    {
+        Assert.Equal(-32602, ErrorCode(await RpcAsync("""{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":{"fromBlock":"0x0"}}""")));
+    }
+
     [Fact]
     public async Task MalformedJson_IsAParseError()
     {

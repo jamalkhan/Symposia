@@ -34,6 +34,9 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
     private readonly Dictionary<ulong, (ulong Next, List<SelfCheckpointRef> Found)> _selfCheckpointScans = [];
     private readonly SemaphoreSlim _scanGate = new(1, 1);
 
+    /// <summary>Blocks behind the head that are cached as final; newer ones are re-read each pass.</summary>
+    private const ulong ReorgDepth = 64;
+
     private readonly Web3 _web3 = http is null ? new(options.RpcUrl) : new(new Nethereum.JsonRpc.Client.RpcClient(new Uri(options.RpcUrl), http));
 
     public async Task<long> NowAsync(CancellationToken ct)
@@ -92,14 +95,20 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
                 return (IEnumerable<EventLog<SelfCheckpointCommittedEvent>>)await ev.GetAllChangesAsync(
                     ev.CreateFilterInput<BigInteger>([epoch], new BlockParameter(from), new BlockParameter(to)));
             });
-            found = [.. found, .. logs.Select(l => new SelfCheckpointRef((ulong)l.Event.Epoch, (ushort)l.Event.CheckpointIndex, l.Event.Node,
-                l.Event.MerkleRoot, l.Event.BlobAddress))];
-            _selfCheckpointScans[epoch] = (Math.Max(next, latest + 1), found);
+
+            // Only blocks ReorgDepth behind the head are kept; the tail is re-read every pass, so a log
+            // reorged out (or re-mined in a later block) is never cached wrongly.
+            var confirmedBelow = latest + 1 > ReorgDepth ? Math.Max(next, latest + 1 - ReorgDepth) : next;
+            var fresh = logs.Select(l => ((ulong)l.Log.BlockNumber.Value, Ref: new SelfCheckpointRef((ulong)l.Event.Epoch,
+                (ushort)l.Event.CheckpointIndex, l.Event.Node, l.Event.MerkleRoot, l.Event.BlobAddress))).ToList();
+            var confirmed = found.Concat(fresh.Where(f => f.Item1 < confirmedBelow).Select(f => f.Ref)).ToList();
+            _selfCheckpointScans[epoch] = (confirmedBelow, confirmed);
             foreach (var old in _selfCheckpointScans.Keys.Where(e => e + 4 < epoch).ToList())
             {
                 _selfCheckpointScans.Remove(old); // finished epochs aren't asked for again
             }
 
+            found = [.. confirmed, .. fresh.Where(f => f.Item1 >= confirmedBelow).Select(f => f.Ref)];
             return found;
         }
         finally

@@ -230,7 +230,7 @@ public sealed partial class ChainComponent : HostComponent
         return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, rpcUrl,
             descriptor.ProtocolActivationsAddress, descriptor.RewardDistributorAddress, descriptor.EpochControllerAddress,
             descriptor.TelemetryRegistryAddress, descriptor.StakingRegistryAddress, source, descriptor.DeployBlock ?? 0,
-            source == RpcSource.Gateway ? descriptor.MaxLogBlockRange : null);
+            source == RpcSource.Gateway && descriptor.MaxLogBlockRange is > 0 ? descriptor.MaxLogBlockRange : null);
     }
 
     private static readonly HttpClient ProbeHttp = new() { Timeout = TimeSpan.FromSeconds(1) };
