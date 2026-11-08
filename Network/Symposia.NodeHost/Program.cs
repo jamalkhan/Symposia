@@ -8,11 +8,16 @@ using Symposia.NodeHost.Ui;
 // Symposia Node Host (issue #133): one process running the gateway, the
 // config/diagnostics UI, and the storage/compute roles.
 //
-//   dotnet run --project Network/Symposia.NodeHost [-- --data-dir DIR] [--port-offset N] [--ui-port P]
+//   dotnet run --project Network/Symposia.NodeHost [-- --data-dir DIR] [--port-offset N] [--ui-port P] [--reset-local-rewards]
 
 var cli = HostCommandLine.Parse(args);
 var paths = new HostPaths(cli.DataDir);
 Directory.CreateDirectory(paths.DataDir);
+if (cli.ResetLocalRewards)
+{
+    // Same one-shot flag the Diagnostics "Reset rewards contracts" action writes (#181 FR4); LocalDev consumes it on start.
+    File.WriteAllText(paths.ResetRewardsFlag, DateTimeOffset.UtcNow.ToString("O"));
+}
 
 // One identity for every role (FR-A2). Loading it first fails fast, before
 // anything starts, if an initialized node has lost its key (#129 FR-A3).
@@ -78,13 +83,14 @@ await supervisor.StopAllAsync();
 await ui.StopAsync();
 return 0;
 
-internal sealed record HostCommandLine(string DataDir, int PortOffset, int? UiPort)
+internal sealed record HostCommandLine(string DataDir, int PortOffset, int? UiPort, bool ResetLocalRewards = false)
 {
     public static HostCommandLine Parse(string[] args)
     {
         string dataDir = HostPaths.DefaultDataDir;
         int offset = 0;
         int? uiPort = null;
+        var resetRewards = false;
         for (var i = 0; i < args.Length; i++)
         {
             string Next() => i + 1 < args.Length ? args[++i] : throw new ArgumentException($"{args[i]} needs a value.");
@@ -93,10 +99,11 @@ internal sealed record HostCommandLine(string DataDir, int PortOffset, int? UiPo
                 case "--data-dir": dataDir = Path.GetFullPath(Next()); break;
                 case "--port-offset": offset = int.Parse(Next()); break;
                 case "--ui-port": uiPort = int.Parse(Next()); break;
-                default: throw new ArgumentException($"Unknown argument '{args[i]}'. Use --data-dir, --port-offset, --ui-port.");
+                case "--reset-local-rewards": resetRewards = true; break;
+                default: throw new ArgumentException($"Unknown argument '{args[i]}'. Use --data-dir, --port-offset, --ui-port, --reset-local-rewards.");
             }
         }
 
-        return new HostCommandLine(dataDir, offset, uiPort);
+        return new HostCommandLine(dataDir, offset, uiPort, resetRewards);
     }
 }

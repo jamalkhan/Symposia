@@ -15,7 +15,23 @@ public sealed record NetworkInfo(
     string? RewardDistributorAddress = null,
     string? EpochControllerAddress = null,
     string? TelemetryRegistryAddress = null,
-    string? StakingRegistryAddress = null);
+    string? StakingRegistryAddress = null,
+    RpcSource RpcSource = RpcSource.Direct,
+    ulong DeployBlock = 0,
+    ulong? MaxLogBlockRange = null);
+
+/// <summary>Where <see cref="NetworkInfo.RpcUrl"/> came from (issue #172), shown on the Network card.</summary>
+public enum RpcSource
+{
+    /// <summary>This host's own chain or preset RPC.</summary>
+    Direct,
+
+    /// <summary>The joined gateway's read-only <c>/v1/rpc</c> proxy.</summary>
+    Gateway,
+
+    /// <summary>A public RPC the joined gateway's operator advertises.</summary>
+    Advertised,
+}
 
 /// <summary>Shared state components read while starting.</summary>
 public sealed class HostContext
@@ -52,6 +68,12 @@ public sealed class HostContext
 
     /// <summary>Set by the chain component once the network is known; null until then.</summary>
     public NetworkInfo? Network { get; set; }
+
+    /// <summary>Set when the LocalDev rewards stack was deployed with parameters it can't settle under (#181 FR4).</summary>
+    public RewardsStaleNotice? RewardsStale { get; set; }
+
+    /// <summary>Heartbeat acceptance, shared with the storage role (#181 FR5).</summary>
+    public Symposia.Network.Node.Telemetry.TelemetryDiagnostics Telemetry { get; } = new();
 
     /// <summary>Health summary served to peers by the role apps; set once the supervisor exists.</summary>
     public NodeHealth? Health { get; set; }

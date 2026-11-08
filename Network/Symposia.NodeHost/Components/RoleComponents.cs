@@ -36,7 +36,13 @@ public sealed class StorageRoleComponent : WebAppComponent
         !context.Settings.Storage.Enabled ? "Storage service is turned off" : base.SkipReason(context);
 
     protected override WebApplication Build(WebApplicationOptions options, Action<WebApplicationBuilder> configure, HostContext context) =>
-        StorageNodeApp.Create(options, configure);
+        StorageNodeApp.Create(options, builder =>
+        {
+            configure(builder);
+            // Heartbeat acceptance surfaces on the host's Diagnostics page (#181 FR5); each start is a fresh run.
+            context.Telemetry.Reset();
+            builder.Services.AddSingleton(context.Telemetry);
+        });
 
     protected override int Port(HostContext context) => context.Settings.Storage.Port;
 
@@ -59,7 +65,6 @@ public sealed class StorageRoleComponent : WebAppComponent
             ["StorageNode:MaxCapacityBytes"] = storage.MaxCapacityBytes.ToString(),
             // 5-minute signed heartbeats that feed reward scoring (issue #75).
             ["StorageNode:Telemetry:Enabled"] = storage.Heartbeats.ToString(),
-            ["StorageNode:Telemetry:GenesisUnixSeconds"] = storage.EpochGenesisUnixSeconds.ToString(),
         };
         var network = context.Network!;
         if (!string.IsNullOrEmpty(network.TelemetryRegistryAddress) && !string.IsNullOrEmpty(network.RpcUrl) && storage.Heartbeats)
@@ -68,6 +73,12 @@ public sealed class StorageRoleComponent : WebAppComponent
             config["StorageNode:Telemetry:Chain:RpcUrl"] = network.RpcUrl;
             config["StorageNode:Telemetry:Chain:TelemetryRegistryAddress"] = network.TelemetryRegistryAddress;
             config["StorageNode:Telemetry:Chain:EpochControllerAddress"] = network.EpochControllerAddress;
+            // Log scans start at the rewards deployment and page under capped RPCs (#172).
+            config["StorageNode:Telemetry:Chain:FromBlock"] = network.DeployBlock.ToString();
+            if (network.MaxLogBlockRange is > 0 and var range)
+            {
+                config["StorageNode:Telemetry:Chain:MaxLogBlockRange"] = range.ToString();
+            }
             config["StorageNode:Telemetry:Blobs:CacheDirectory"] = Path.Combine(dir, "telemetry-blobs");
         }
 

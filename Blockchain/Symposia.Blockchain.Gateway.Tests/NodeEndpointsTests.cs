@@ -12,7 +12,7 @@ namespace Symposia.Blockchain.Gateway.Tests;
 /// exercising the acceptance criteria from issue #110.
 /// </summary>
 [Collection("ChainIntegration")]
-public sealed class NodeEndpointsTests : IClassFixture<ChainFixture>
+public sealed class NodeEndpointsTests
 {
     private readonly ChainFixture _fixture;
     private readonly HttpClient _client;

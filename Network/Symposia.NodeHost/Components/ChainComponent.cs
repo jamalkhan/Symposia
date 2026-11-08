@@ -32,6 +32,12 @@ public sealed partial class ChainComponent : HostComponent
 
     protected override async Task OnStartAsync(HostContext context, CancellationToken ct)
     {
+        if (context.Settings.Network.Mode != NetworkMode.LocalDev)
+        {
+            // A reset request only means something to a Local dev network; never let it fire after a later mode switch.
+            File.Delete(context.Paths.ResetRewardsFlag);
+        }
+
         var network = context.Settings.Network;
         context.Network = network.Mode switch
         {
@@ -116,25 +122,50 @@ public sealed partial class ChainComponent : HostComponent
             context.Logger.LogInformation("Deployed ProtocolActivations at {Address} on the existing local chain.", deployment.ProtocolActivationsAddress);
         }
 
-        if (string.IsNullOrEmpty(deployment.RewardDistributorAddress) || deployment.RewardsVersion < RewardsStackVersion
+        var profile = new LocalDevRewardsProfile(LocalNodeAddress(context));
+        var resetRequested = File.Exists(context.Paths.ResetRewardsFlag);
+        context.RewardsStale = null;
+        if (resetRequested || string.IsNullOrEmpty(deployment.RewardDistributorAddress) || deployment.RewardsVersion < RewardsStackVersion
             || !await HasCodeAsync(rpcUrl, deployment.RewardDistributorAddress, ct))
         {
             // Rewards stack (#70-#80) with its epoch controller (#72), so the hosted gateway's epoch sealer has something to settle.
             // A stack from an older build (lower RewardsVersion) lacks functions the gateway and host now call, so it redeploys.
-            var (distributor, epochs, telemetry, staking) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, ct);
+            var deployBlock = await BlockNumberAsync(rpcUrl, ct);
+            var (distributor, epochs, telemetry, staking) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, profile, ct);
+            // Consumed as soon as the new stack exists, so a crash before it's recorded can't wipe the ledger a second time.
+            File.Delete(context.Paths.ResetRewardsFlag);
             deployment = deployment with
             {
                 RewardDistributorAddress = distributor, EpochControllerAddress = epochs, TelemetryRegistryAddress = telemetry, StakingRegistryAddress = staking,
-                RewardsVersion = RewardsStackVersion,
+                RewardsVersion = RewardsStackVersion, RewardsDeployBlock = deployBlock,
             };
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
             context.Logger.LogInformation("Deployed the rewards contracts (RewardDistributor {Distributor}, EpochController {Epochs}).", distributor, epochs);
+            if (resetRequested)
+            {
+                context.Logger.LogWarning("Rewards contracts reset: hosts that joined this network must restart to pick up the new addresses.");
+            }
+        }
+        else
+        {
+            // A chain deployed with other timing or committee keeps working but can't settle with this host (#181 FR4):
+            // say so instead of silently redeploying over the developer's ledger.
+            context.RewardsStale = await CheckRewardsProfileAsync(rpcUrl, deployment, profile, ct);
+            if (context.RewardsStale is { } stale)
+            {
+                context.Logger.LogWarning("Rewards can't settle on this local chain: {Reason} Reset the rewards contracts from Diagnostics (or run with --reset-local-rewards).",
+                    stale.Reason);
+            }
         }
 
-        return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl,
-            deployment.ProtocolActivationsAddress, deployment.RewardDistributorAddress, deployment.EpochControllerAddress,
-            deployment.TelemetryRegistryAddress, deployment.StakingRegistryAddress);
+        return ToNetworkInfo(deployment, network.GatewayPort, rpcUrl);
     }
+
+    /// <summary>The one place a LocalDev deployment becomes the host's <see cref="NetworkInfo"/> (shared with a rewards reset).</summary>
+    private static NetworkInfo ToNetworkInfo(Deployment deployment, int gatewayPort, string rpcUrl) =>
+        new($"http://127.0.0.1:{gatewayPort}", AnvilChainId, deployment.NodeRegistryAddress, deployment.EpochRootRegistryAddress, rpcUrl,
+            deployment.ProtocolActivationsAddress, deployment.RewardDistributorAddress, deployment.EpochControllerAddress,
+            deployment.TelemetryRegistryAddress, deployment.StakingRegistryAddress, RpcSource.Direct, deployment.RewardsDeployBlock);
 
     private static NetworkInfo ResolveRemoteRpc(HostContext context)
     {
@@ -153,7 +184,7 @@ public sealed partial class ChainComponent : HostComponent
 
         return new NetworkInfo($"http://127.0.0.1:{network.GatewayPort}", preset.ChainId, preset.NodeRegistryAddress, preset.EpochRootRegistryAddress, preset.RpcUrl,
             preset.ProtocolActivationsAddress, preset.RewardDistributorAddress, preset.EpochControllerAddress,
-            preset.TelemetryRegistryAddress, NullIfEmpty(preset.StakingRegistryAddress));
+            preset.TelemetryRegistryAddress, NullIfEmpty(preset.StakingRegistryAddress), RpcSource.Direct, preset.DeployBlock);
     }
 
     internal static async Task<NetworkInfo> JoinAsync(string gatewayUrl, CancellationToken ct)
@@ -178,8 +209,28 @@ public sealed partial class ChainComponent : HostComponent
             throw new ComponentFaultException($"Gateway at {gatewayUrl} returned no network descriptor.");
         }
 
-        return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, null,
-            descriptor.ProtocolActivationsAddress);
+        return FromDescriptor(gateway, descriptor);
+    }
+
+    /// <summary>
+    /// Maps a gateway's descriptor to this host's network (issue #172). Chain reads go through the
+    /// RPC the gateway advertises; an older gateway advertises none, so reads stay unavailable.
+    /// </summary>
+    internal static NetworkInfo FromDescriptor(Uri gateway, GatewayNetwork descriptor)
+    {
+        string? rpcUrl = null;
+        var source = RpcSource.Direct;
+        if (!string.IsNullOrWhiteSpace(descriptor.RpcUrl) && Uri.TryCreate(gateway, descriptor.RpcUrl, out var rpc)
+            && rpc.Scheme is "http" or "https")
+        {
+            rpcUrl = rpc.ToString();
+            source = rpc.AbsolutePath.TrimEnd('/') == "/v1/rpc" && rpc.Authority == gateway.Authority ? RpcSource.Gateway : RpcSource.Advertised;
+        }
+
+        return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, rpcUrl,
+            descriptor.ProtocolActivationsAddress, descriptor.RewardDistributorAddress, descriptor.EpochControllerAddress,
+            descriptor.TelemetryRegistryAddress, descriptor.StakingRegistryAddress, source, descriptor.DeployBlock ?? 0,
+            source == RpcSource.Gateway && descriptor.MaxLogBlockRange is > 0 ? descriptor.MaxLogBlockRange : null);
     }
 
     private static readonly HttpClient ProbeHttp = new() { Timeout = TimeSpan.FromSeconds(1) };
@@ -227,11 +278,15 @@ public sealed partial class ChainComponent : HostComponent
         return new Deployment(Extract(output, "NodeRegistry"), Extract(output, "EpochRootRegistry"), rpcUrl, AnvilChainId, Extract(output, "ProtocolActivations"));
     }
 
-    /// <summary>Runs DeployRewards.s.sol (dev roles = the anvil dev key) and returns the addresses the host uses.</summary>
+    /// <summary>
+    /// Runs DeployRewards.s.sol (dev roles = the anvil dev key) with the LocalDev timing and this
+    /// node as the telemetry committee (#181), and returns the addresses the host uses.
+    /// </summary>
     private static async Task<(string Distributor, string Epochs, string Telemetry, string Staking)> DeployRewardsAsync(
-        string foundryBin, string rpcUrl, CancellationToken ct)
+        string foundryBin, string rpcUrl, LocalDevRewardsProfile profile, CancellationToken ct)
     {
-        var output = await ForgeAsync(foundryBin, ct, "script", "script/DeployRewards.s.sol:DeployRewards", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast");
+        var output = await ForgeAsync(foundryBin, profile.ToEnvironment(), ct,
+            "script", "script/DeployRewards.s.sol:DeployRewards", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast");
         return (Extract(output, "RewardDistributor"), Extract(output, "EpochController"), Extract(output, "TelemetryCheckpointRegistry"),
             Extract(output, "StakingNodeRegistry"));
     }
@@ -247,7 +302,9 @@ public sealed partial class ChainComponent : HostComponent
         return Extract(output, "Deployed to");
     }
 
-    private static async Task<string> ForgeAsync(string foundryBin, CancellationToken ct, params string[] args)
+    private static Task<string> ForgeAsync(string foundryBin, CancellationToken ct, params string[] args) => ForgeAsync(foundryBin, null, ct, args);
+
+    private static async Task<string> ForgeAsync(string foundryBin, IReadOnlyDictionary<string, string>? env, CancellationToken ct, params string[] args)
     {
         var contractsDir = FindContractsDir()
             ?? throw new ComponentFaultException(
@@ -264,6 +321,11 @@ public sealed partial class ChainComponent : HostComponent
         foreach (var arg in args)
         {
             start.ArgumentList.Add(arg);
+        }
+
+        foreach (var (name, value) in env ?? new Dictionary<string, string>())
+        {
+            start.Environment[name] = value;
         }
 
         var forge = Process.Start(start) ?? throw new ComponentFaultException("Failed to start forge.");
@@ -361,6 +423,61 @@ public sealed partial class ChainComponent : HostComponent
         }
     }
 
+    /// <summary>This host's node address, the LocalDev telemetry committee (#181 FR2).</summary>
+    private static string LocalNodeAddress(HostContext context)
+    {
+        if (!File.Exists(context.Paths.NodeKey))
+        {
+            throw new ComponentFaultException("LocalDev needs this host's node key to make it the telemetry committee, and none was found.");
+        }
+
+        return new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
+            new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = context.Paths.NodeKey })).NodeId;
+    }
+
+    /// <summary>Compares the deployed epoch length and committee with the LocalDev profile; null when they match.</summary>
+    internal static async Task<RewardsStaleNotice?> CheckRewardsProfileAsync(string rpcUrl, Deployment deployment, LocalDevRewardsProfile profile, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(deployment.EpochControllerAddress) || string.IsNullOrEmpty(deployment.TelemetryRegistryAddress))
+        {
+            return null;
+        }
+
+        var chain = new Symposia.Network.Node.Telemetry.Committee.NethereumTelemetryChain(new()
+        {
+            RpcUrl = rpcUrl,
+            EpochControllerAddress = deployment.EpochControllerAddress,
+            TelemetryRegistryAddress = deployment.TelemetryRegistryAddress,
+        }, profile.HeartbeatCadenceSeconds);
+        var schedule = await chain.ScheduleAsync(ct);
+        var (members, _) = await chain.CommitteeAsync(ct);
+        var epochSeconds = (ulong)schedule.EpochSeconds;
+
+        var reasons = new List<string>();
+        if (epochSeconds != profile.EpochLengthSeconds)
+        {
+            reasons.Add($"it was deployed with {epochSeconds}s epochs (LocalDev uses {profile.EpochLengthSeconds}s)");
+        }
+        else if (schedule.CheckpointsPerEpoch != profile.CheckpointsPerEpoch)
+        {
+            reasons.Add($"it has {schedule.CheckpointsPerEpoch} telemetry windows per epoch (LocalDev uses {profile.CheckpointsPerEpoch})");
+        }
+
+        if (!members.Any(m => string.Equals(m, profile.CommitteeAddress, StringComparison.OrdinalIgnoreCase)))
+        {
+            reasons.Add($"its telemetry committee is {string.Join(", ", members)}, not this node ({profile.CommitteeAddress})");
+        }
+
+        return reasons.Count == 0
+            ? null
+            : new RewardsStaleNotice(string.Join("; ", reasons) + ".", epochSeconds, members, profile.EpochLengthSeconds, profile.CommitteeAddress);
+    }
+
+    private static async Task<ulong> BlockNumberAsync(string rpcUrl, CancellationToken ct) =>
+        await RpcAsync(rpcUrl, "eth_blockNumber", [], ct) is { ValueKind: JsonValueKind.String } hex
+            ? Convert.ToUInt64(hex.GetString(), 16)
+            : 0;
+
     private static Task<JsonElement?> TryChainIdAsync(string rpcUrl, CancellationToken ct) => RpcAsync(rpcUrl, "eth_chainId", [], ct);
 
     private static async Task<bool> HasCodeAsync(string rpcUrl, string address, CancellationToken ct)
@@ -370,9 +487,9 @@ public sealed partial class ChainComponent : HostComponent
     }
 
     /// <summary>Deployed addresses, tagged with the chain they were deployed to (checked on load).</summary>
-    private sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId,
+    internal sealed record Deployment(string NodeRegistryAddress, string EpochRootRegistryAddress, string RpcUrl, ulong ChainId,
         string? ProtocolActivationsAddress = null, string? RewardDistributorAddress = null, string? EpochControllerAddress = null,
-        string? TelemetryRegistryAddress = null, string? StakingRegistryAddress = null, int RewardsVersion = 0);
+        string? TelemetryRegistryAddress = null, string? StakingRegistryAddress = null, int RewardsVersion = 0, ulong RewardsDeployBlock = 0);
 
     /// <summary>
     /// Bump whenever the rewards contracts gain a function the gateway or host calls, so existing local
@@ -381,5 +498,8 @@ public sealed partial class ChainComponent : HostComponent
     /// </summary>
     internal const int RewardsStackVersion = 2;
 
-    private sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null);
+    /// <summary>A gateway's <c>/v1/network</c> descriptor; fields after the registries are absent on older gateways.</summary>
+    internal sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null,
+        string? RewardDistributorAddress = null, string? EpochControllerAddress = null, string? TelemetryRegistryAddress = null,
+        string? StakingRegistryAddress = null, string? RpcUrl = null, ulong? DeployBlock = null, ulong? MaxLogBlockRange = null);
 }

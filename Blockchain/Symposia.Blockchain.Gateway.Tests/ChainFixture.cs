@@ -155,3 +155,10 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
         await base.DisposeAsync();
     }
 }
+
+/// <summary>
+/// One chain (one anvil and one forge deploy) shared by every class in the collection. Each extra
+/// fixture is another concurrent forge run, which is what made these tests hang (#174/#176).
+/// </summary>
+[CollectionDefinition("ChainIntegration")]
+public sealed class ChainIntegrationCollection : ICollectionFixture<ChainFixture>;
