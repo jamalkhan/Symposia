@@ -4,7 +4,7 @@ name: Mixed-version cluster
 
 on:
   pull_request:
-    branches: [dev, qa, stage, master, production]
+    branches: [dev, qa, stage, master]
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:

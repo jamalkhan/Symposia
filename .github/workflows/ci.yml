@@ -4,7 +4,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [dev, qa, stage, master, production]
+    branches: [dev, qa, stage, master]
 
 concurrency:
   group: ci-${{ github.ref }}
