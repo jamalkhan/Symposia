@@ -75,6 +75,21 @@ public sealed class ContractAbiTests
     private static List<JsonElement> LoadAbi()
     {
         var dir = BootstrapChain();
+        RewardsChainFixture.ForgeGate.Wait();
+        try
+        {
+            BuildIfMissing(dir);
+        }
+        finally
+        {
+            RewardsChainFixture.ForgeGate.Release();
+        }
+
+        return Contracts.SelectMany(c => JsonDocument.Parse(File.ReadAllText(ArtifactPath(dir, c))).RootElement.GetProperty("abi").EnumerateArray().Select(e => e.Clone())).ToList();
+    }
+
+    private static void BuildIfMissing(string dir)
+    {
         if (!Contracts.All(c => File.Exists(ArtifactPath(dir, c))))
         {
             var forge = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin", "forge");
@@ -94,7 +109,6 @@ public sealed class ContractAbiTests
             }
         }
 
-        return Contracts.SelectMany(c => JsonDocument.Parse(File.ReadAllText(ArtifactPath(dir, c))).RootElement.GetProperty("abi").EnumerateArray().Select(e => e.Clone())).ToList();
     }
 
     private static string ArtifactPath(string dir, string contract) => Path.Combine(dir, "out", $"{contract}.sol", $"{contract}.json");

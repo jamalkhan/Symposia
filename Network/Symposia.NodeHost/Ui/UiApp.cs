@@ -228,6 +228,20 @@ public static class UiApp
         // Public earnings breakdown of every Node Service (issue #159).
         api.MapGet("/node-services", () => Results.Ok(ServiceCatalog.NodeServiceCatalog.All));
 
+        // Issue #181 FR4: redeploy only the LocalDev rewards contracts (anvil state, registrations and
+        // ProtocolActivations stay), then restart the chain and everything downstream of it.
+        api.MapPost("/chain/reset-rewards", async () =>
+        {
+            if (supervisor.Context.Settings.Network.Mode != NetworkMode.LocalDev)
+            {
+                return Results.NotFound(new { error = "Only a Local dev network's rewards contracts can be reset." });
+            }
+
+            File.WriteAllText(supervisor.Context.Paths.ResetRewardsFlag, DateTimeOffset.UtcNow.ToString("O"));
+            await supervisor.RestartAsync(supervisor.Chain.Name, hostLifetime);
+            return Results.Ok();
+        });
+
         api.MapPost("/components/{name}/restart", async (string name) =>
         {
             try

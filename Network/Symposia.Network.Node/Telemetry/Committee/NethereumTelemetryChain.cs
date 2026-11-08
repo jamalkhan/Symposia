@@ -21,12 +21,23 @@ public sealed class TelemetryChainOptions
 
     /// <summary>First block searched for self-checkpoint events (the registry's deployment block).</summary>
     public ulong FromBlock { get; set; }
+
+    /// <summary>Widest block span per <c>eth_getLogs</c>, to fit capped RPCs like the gateway proxy (#172).</summary>
+    public ulong MaxLogBlockRange { get; set; } = LogPager.DefaultWindow;
 }
 
 /// <summary>Read-only <see cref="ITelemetryChain"/> over JSON-RPC; never signs or spends gas.</summary>
-public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long cadenceSeconds = 300) : ITelemetryChain
+public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long cadenceSeconds = 300, HttpClient? http = null) : ITelemetryChain
 {
-    private readonly Web3 _web3 = new(options.RpcUrl);
+    // Per-epoch scan progress (#172 review): mined logs don't change, so each pass only reads blocks
+    // past the last one scanned instead of rescanning from FromBlock every 15s.
+    private readonly Dictionary<ulong, (ulong Next, List<SelfCheckpointRef> Found)> _selfCheckpointScans = [];
+    private readonly SemaphoreSlim _scanGate = new(1, 1);
+
+    /// <summary>Blocks behind the head that are cached as final; newer ones are re-read each pass.</summary>
+    private const ulong ReorgDepth = 64;
+
+    private readonly Web3 _web3 = http is null ? new(options.RpcUrl) : new(new Nethereum.JsonRpc.Client.RpcClient(new Uri(options.RpcUrl), http));
 
     public async Task<long> NowAsync(CancellationToken ct)
     {
@@ -73,10 +84,37 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
     public async Task<IReadOnlyList<SelfCheckpointRef>> SelfCheckpointsAsync(ulong epoch, CancellationToken ct)
     {
         var ev = _web3.Eth.GetEvent<SelfCheckpointCommittedEvent>(options.TelemetryRegistryAddress);
-        var filter = ev.CreateFilterInput<BigInteger>([epoch], new BlockParameter(options.FromBlock), BlockParameter.CreateLatest());
-        var logs = await ev.GetAllChangesAsync(filter);
-        return [.. logs.Select(l => new SelfCheckpointRef((ulong)l.Event.Epoch, (ushort)l.Event.CheckpointIndex, l.Event.Node,
-            l.Event.MerkleRoot, l.Event.BlobAddress))];
+        await _scanGate.WaitAsync(ct);
+        try
+        {
+            var latest = (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+            var (next, found) = _selfCheckpointScans.GetValueOrDefault(epoch, (options.FromBlock, []));
+            var logs = await LogPager.ScanAsync(next, latest, options.MaxLogBlockRange, async (from, to) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                return (IEnumerable<EventLog<SelfCheckpointCommittedEvent>>)await ev.GetAllChangesAsync(
+                    ev.CreateFilterInput<BigInteger>([epoch], new BlockParameter(from), new BlockParameter(to)));
+            });
+
+            // Only blocks ReorgDepth behind the head are kept; the tail is re-read every pass, so a log
+            // reorged out (or re-mined in a later block) is never cached wrongly.
+            var confirmedBelow = latest + 1 > ReorgDepth ? Math.Max(next, latest + 1 - ReorgDepth) : next;
+            var fresh = logs.Select(l => ((ulong)l.Log.BlockNumber.Value, Ref: new SelfCheckpointRef((ulong)l.Event.Epoch,
+                (ushort)l.Event.CheckpointIndex, l.Event.Node, l.Event.MerkleRoot, l.Event.BlobAddress))).ToList();
+            var confirmed = found.Concat(fresh.Where(f => f.Item1 < confirmedBelow).Select(f => f.Ref)).ToList();
+            _selfCheckpointScans[epoch] = (confirmedBelow, confirmed);
+            foreach (var old in _selfCheckpointScans.Keys.Where(e => e + 4 < epoch).ToList())
+            {
+                _selfCheckpointScans.Remove(old); // finished epochs aren't asked for again
+            }
+
+            found = [.. confirmed, .. fresh.Where(f => f.Item1 >= confirmedBelow).Select(f => f.Ref)];
+            return found;
+        }
+        finally
+        {
+            _scanGate.Release();
+        }
     }
 
     public async Task<int> RecordsPerTxAsync(CancellationToken ct) =>

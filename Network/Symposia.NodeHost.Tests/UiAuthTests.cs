@@ -45,6 +45,18 @@ public sealed class UiAuthTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
     }
 
+    // Issue #181 FR4: only an admin, only on a Local dev network, and nothing is written otherwise.
+    [Fact]
+    public async Task ResetRewards_NeedsSignIn_AndALocalDevNetwork()
+    {
+        var client = Client();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/chain/reset-rewards", null)).StatusCode);
+
+        await client.PostAsJsonAsync("/api/setup", new { password = "correct horse", setupToken = SetupToken });
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync("/api/chain/reset-rewards", null)).StatusCode);
+        Assert.False(File.Exists(new HostPaths(_dir.Path).ResetRewardsFlag));
+    }
+
     [Fact]
     public async Task NodeServices_ListsTheEarningsBreakdown_AfterSignIn()
     {
