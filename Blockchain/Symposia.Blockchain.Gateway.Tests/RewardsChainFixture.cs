@@ -15,6 +15,13 @@ public sealed class RewardsChainFixture : IAsyncLifetime
     private static readonly string FoundryBin =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
 
+    /// <summary>
+    /// One forge invocation at a time across the test process: on a fresh checkout, several fixtures
+    /// (and ContractAbiTests) compiling the same project at once contend over out/ and the cache, and
+    /// one can stall indefinitely (#176, after #174 turned the hang into a timeout).
+    /// </summary>
+    public static readonly SemaphoreSlim ForgeGate = new(1, 1);
+
     private Process? _anvil;
     private readonly int _port = FreePort();
     // Foundry's fs_permissions only allow the script to write under bootstrap-chain/deployments.
@@ -65,6 +72,24 @@ public sealed class RewardsChainFixture : IAsyncLifetime
             RedirectStandardError = true,
             Environment = { ["DEPLOYMENT_OUT"] = _out },
         };
+        await ForgeGate.WaitAsync();
+        try
+        {
+            await RunDeployAsync(deploy);
+        }
+        finally
+        {
+            ForgeGate.Release();
+        }
+
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(_out));
+        Addresses = json.RootElement.EnumerateObject()
+            .Where(p => p.Value.ValueKind == JsonValueKind.String)
+            .ToDictionary(p => p.Name, p => p.Value.GetString()!);
+    }
+
+    private static async Task RunDeployAsync(ProcessStartInfo deploy)
+    {
         using var forge = Process.Start(deploy) ?? throw new InvalidOperationException("Failed to start forge.");
         var stdout = forge.StandardOutput.ReadToEndAsync();
         var stderrTask = forge.StandardError.ReadToEndAsync();
@@ -87,10 +112,6 @@ public sealed class RewardsChainFixture : IAsyncLifetime
             throw new InvalidOperationException($"DeployRewards failed:\n{await stdout}\n{stderr}");
         }
 
-        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(_out));
-        Addresses = json.RootElement.EnumerateObject()
-            .Where(p => p.Value.ValueKind == JsonValueKind.String)
-            .ToDictionary(p => p.Name, p => p.Value.GetString()!);
     }
 
     public async Task DisposeAsync()

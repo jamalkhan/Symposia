@@ -70,21 +70,34 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
 
         await WaitForRpcAsync();
 
-        var deploy = Process.Start(new ProcessStartInfo
+        // Same process-wide gate as RewardsChainFixture: concurrent forge runs over one project can stall (#176).
+        await RewardsChainFixture.ForgeGate.WaitAsync();
+        string stdout, stderr;
+        int exitCode;
+        try
         {
-            FileName = Path.Combine(foundryBin, "forge"),
-            Arguments = $"script script/Deploy.s.sol:Deploy --rpc-url {RpcUrl} --private-key {DeployerPrivateKey} --broadcast",
-            WorkingDirectory = BootstrapChainDir(),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        }) ?? throw new InvalidOperationException("Failed to start forge script.");
+            using var deploy = Process.Start(new ProcessStartInfo
+            {
+                FileName = Path.Combine(foundryBin, "forge"),
+                Arguments = $"script script/Deploy.s.sol:Deploy --rpc-url {RpcUrl} --private-key {DeployerPrivateKey} --broadcast",
+                WorkingDirectory = BootstrapChainDir(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            }) ?? throw new InvalidOperationException("Failed to start forge script.");
 
-        var stdout = await deploy.StandardOutput.ReadToEndAsync();
-        var stderr = await deploy.StandardError.ReadToEndAsync();
-        await deploy.WaitForExitAsync();
+            // Drain both pipes at once: reading one to the end first can deadlock on a full other pipe (#174).
+            var stdoutTask = deploy.StandardOutput.ReadToEndAsync();
+            var stderrTask = deploy.StandardError.ReadToEndAsync();
+            await deploy.WaitForExitAsync();
+            (stdout, stderr, exitCode) = (await stdoutTask, await stderrTask, deploy.ExitCode);
+        }
+        finally
+        {
+            RewardsChainFixture.ForgeGate.Release();
+        }
 
-        if (deploy.ExitCode != 0)
+        if (exitCode != 0)
         {
             throw new InvalidOperationException($"forge script deploy failed:\n{stdout}\n{stderr}");
         }
