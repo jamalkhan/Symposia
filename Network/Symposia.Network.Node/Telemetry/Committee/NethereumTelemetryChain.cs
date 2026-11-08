@@ -29,6 +29,11 @@ public sealed class TelemetryChainOptions
 /// <summary>Read-only <see cref="ITelemetryChain"/> over JSON-RPC; never signs or spends gas.</summary>
 public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long cadenceSeconds = 300, HttpClient? http = null) : ITelemetryChain
 {
+    // Per-epoch scan progress (#172 review): mined logs don't change, so each pass only reads blocks
+    // past the last one scanned instead of rescanning from FromBlock every 15s.
+    private readonly Dictionary<ulong, (ulong Next, List<SelfCheckpointRef> Found)> _selfCheckpointScans = [];
+    private readonly SemaphoreSlim _scanGate = new(1, 1);
+
     private readonly Web3 _web3 = http is null ? new(options.RpcUrl) : new(new Nethereum.JsonRpc.Client.RpcClient(new Uri(options.RpcUrl), http));
 
     public async Task<long> NowAsync(CancellationToken ct)
@@ -76,12 +81,31 @@ public sealed class NethereumTelemetryChain(TelemetryChainOptions options, long 
     public async Task<IReadOnlyList<SelfCheckpointRef>> SelfCheckpointsAsync(ulong epoch, CancellationToken ct)
     {
         var ev = _web3.Eth.GetEvent<SelfCheckpointCommittedEvent>(options.TelemetryRegistryAddress);
-        var latest = (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
-        var logs = await LogPager.ScanAsync(options.FromBlock, latest, options.MaxLogBlockRange, async (from, to) =>
-            (IEnumerable<EventLog<SelfCheckpointCommittedEvent>>)await ev.GetAllChangesAsync(
-                ev.CreateFilterInput<BigInteger>([epoch], new BlockParameter(from), new BlockParameter(to))));
-        return [.. logs.Select(l => new SelfCheckpointRef((ulong)l.Event.Epoch, (ushort)l.Event.CheckpointIndex, l.Event.Node,
-            l.Event.MerkleRoot, l.Event.BlobAddress))];
+        await _scanGate.WaitAsync(ct);
+        try
+        {
+            var latest = (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+            var (next, found) = _selfCheckpointScans.GetValueOrDefault(epoch, (options.FromBlock, []));
+            var logs = await LogPager.ScanAsync(next, latest, options.MaxLogBlockRange, async (from, to) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                return (IEnumerable<EventLog<SelfCheckpointCommittedEvent>>)await ev.GetAllChangesAsync(
+                    ev.CreateFilterInput<BigInteger>([epoch], new BlockParameter(from), new BlockParameter(to)));
+            });
+            found = [.. found, .. logs.Select(l => new SelfCheckpointRef((ulong)l.Event.Epoch, (ushort)l.Event.CheckpointIndex, l.Event.Node,
+                l.Event.MerkleRoot, l.Event.BlobAddress))];
+            _selfCheckpointScans[epoch] = (Math.Max(next, latest + 1), found);
+            foreach (var old in _selfCheckpointScans.Keys.Where(e => e + 4 < epoch).ToList())
+            {
+                _selfCheckpointScans.Remove(old); // finished epochs aren't asked for again
+            }
+
+            return found;
+        }
+        finally
+        {
+            _scanGate.Release();
+        }
     }
 
     public async Task<int> RecordsPerTxAsync(CancellationToken ct) =>

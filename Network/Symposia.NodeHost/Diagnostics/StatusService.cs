@@ -56,6 +56,7 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
             {
                 configured = !string.IsNullOrEmpty(network?.TelemetryRegistryAddress) && network?.RpcUrl is not null,
                 scheduleSynced = telemetry.ScheduleSynced,
+                scheduleProblem = telemetry.ScheduleProblem,
                 lastAccepted = telemetry.LastAccepted,
                 lastRejected = telemetry.LastRejected,
             } : null,

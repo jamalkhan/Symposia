@@ -84,7 +84,8 @@ public sealed class TelemetryCommitteeService(
     ITelemetryChain chain,
     TelemetryScheduleSource schedules,
     IOptions<TelemetryCommitteeOptions> options,
-    ILogger<TelemetryCommitteeService> logger) : BackgroundService
+    ILogger<TelemetryCommitteeService> logger,
+    TelemetryDiagnostics? diagnostics = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -101,14 +102,24 @@ public sealed class TelemetryCommitteeService(
         while (await timer.WaitForNextTickAsync(stoppingToken));
     }
 
+    private TelemetrySchedule? _invalidLogged;
+
     private async Task SyncScheduleAsync(CancellationToken ct)
     {
         var onChain = await chain.ScheduleAsync(ct);
-        if (onChain.EpochSeconds % ((long)onChain.CheckpointsPerEpoch * onChain.CadenceSeconds) != 0)
+        var step = (long)onChain.CheckpointsPerEpoch * onChain.CadenceSeconds;
+        if (step <= 0 || onChain.EpochSeconds % step != 0)
         {
             // Mirrors DeployRewards' check: every window must hold whole heartbeats, or the chain under-counts them.
-            logger.LogError("The chain's telemetry schedule ({Epoch}s epochs, {Windows} windows) doesn't fit {Cadence}s heartbeats; holding heartbeats.",
-                onChain.EpochSeconds, onChain.CheckpointsPerEpoch, onChain.CadenceSeconds);
+            if (_invalidLogged != onChain)
+            {
+                logger.LogError("The chain's telemetry schedule ({Epoch}s epochs, {Windows} windows) doesn't fit {Cadence}s heartbeats; {Action}.",
+                    onChain.EpochSeconds, onChain.CheckpointsPerEpoch, onChain.CadenceSeconds,
+                    schedules.IsSynced ? "keeping the previous schedule" : "holding heartbeats");
+                _invalidLogged = onChain;
+            }
+
+            diagnostics?.ScheduleInvalid($"{onChain.EpochSeconds}s epochs with {onChain.CheckpointsPerEpoch} windows don't fit {onChain.CadenceSeconds}s heartbeats");
             return;
         }
 

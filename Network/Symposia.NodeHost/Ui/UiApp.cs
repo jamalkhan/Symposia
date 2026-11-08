@@ -234,7 +234,7 @@ public static class UiApp
         {
             if (supervisor.Context.Settings.Network.Mode != NetworkMode.LocalDev)
             {
-                return Results.Conflict(new { error = "Only a Local dev network's rewards contracts can be reset." });
+                return Results.NotFound(new { error = "Only a Local dev network's rewards contracts can be reset." });
             }
 
             File.WriteAllText(supervisor.Context.Paths.ResetRewardsFlag, DateTimeOffset.UtcNow.ToString("O"));

@@ -112,7 +112,7 @@ async function refresh() {
   $('#rewards').innerHTML = rw?.error ? `<p class="error">${esc(rw.error)}</p>` : dl([
     ['Epoch', rw ? `${rw.epoch} (${Math.round(rw.epochSeconds / 60)} min)` : ''], ['Epoch ends', when(rw?.epochEndsAt)],
     ['Sealable from', when(rw?.sealableFrom)], ['Telemetry committee', rw ? (rw.committeeMember ? `this node (${rw.threshold} of ${rw.committeeSize})` : `not a member (${rw.committeeSize} members)`) : ''],
-    ['Heartbeats', !t ? 'off' : !t.configured ? 'telemetry not configured' : !t.scheduleSynced ? 'holding until the chain schedule syncs' : 'sending'],
+    ['Heartbeats', !t ? 'off' : !t.configured ? 'telemetry not configured' : t.scheduleProblem ? `held: ${t.scheduleProblem}` : !t.scheduleSynced ? 'holding until the chain schedule syncs' : 'sending'],
     ['Last accepted', t?.configured ? beat(t.lastAccepted) : ''], ['Last rejected', t?.configured ? beat(t.lastRejected) : '']]);
   $('#rewards-stale').hidden = !s.rewardsStale;
   if (s.rewardsStale) $('[data-reason]', $('#rewards-stale')).textContent = s.rewardsStale.reason;
@@ -133,7 +133,7 @@ $('#reset-rewards').addEventListener('click', async () => {
   const status = $('[data-status]', $('#rewards-stale'));
   if (!confirm('Redeploy the rewards contracts on this local chain?\n\nThe earlier ledger and stakes on this chain are abandoned; node registrations are kept. Joined hosts must restart.')) return;
   status.textContent = 'Redeploying…';
-  try { await api('POST', '/chain/reset-rewards'); status.textContent = 'Done.'; refresh(); }
+  try { await api('POST', '/chain/reset-rewards'); status.textContent = 'Done. Restart any hosts that joined this network so they pick up the new contracts.'; refresh(); }
   catch (ex) { status.textContent = ex.message; }
 });
 

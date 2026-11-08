@@ -49,7 +49,7 @@ public sealed class LocalDevRewardsTests(RewardsChainFixture chain) : IClassFixt
     public async Task ChainMatchingTheProfile_IsNotStale()
     {
         var deployer = new EthECKey(RewardsChainFixture.DeployerKey).GetPublicAddress();
-        var profile = new LocalDevRewardsProfile(deployer) { EpochLengthSeconds = 86_400 };
+        var profile = new LocalDevRewardsProfile(deployer) { EpochLengthSeconds = 86_400, CheckpointsPerEpoch = 24 };
 
         Assert.Null(await ChainComponent.CheckRewardsProfileAsync(chain.RpcUrl, Deployment(), profile, default));
     }

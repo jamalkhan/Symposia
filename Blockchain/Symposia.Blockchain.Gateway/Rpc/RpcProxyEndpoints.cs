@@ -213,8 +213,14 @@ public sealed class LatestBlockCache
             using var response = await client.PostAsync(rpcUrl, new StringContent(
                 """{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}""", Encoding.UTF8, "application/json"), ct);
             var json = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
-            var hex = json?["result"]?.GetValue<string>() ?? throw new HttpRequestException("eth_blockNumber returned no result");
-            _cached = (DateTimeOffset.UtcNow, ulong.Parse(hex.AsSpan(2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture));
+            // Anything but a hex result (an upstream error object, say) is an upstream failure, answered as -32603.
+            if (json?["result"] is not JsonValue result || !result.TryGetValue(out string? hex) || !hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                || !ulong.TryParse(hex.AsSpan(2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var block))
+            {
+                throw new HttpRequestException("eth_blockNumber returned no usable result");
+            }
+
+            _cached = (DateTimeOffset.UtcNow, block);
             return _cached.Block;
         }
         finally

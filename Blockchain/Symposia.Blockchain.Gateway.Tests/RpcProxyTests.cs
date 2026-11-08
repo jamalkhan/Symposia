@@ -6,7 +6,7 @@ namespace Symposia.Blockchain.Gateway.Tests;
 
 /// <summary>Issue #172: the read-only <c>/v1/rpc</c> proxy joined hosts read the chain through.</summary>
 [Collection("ChainIntegration")]
-public sealed class RpcProxyTests : IClassFixture<ChainFixture>
+public sealed class RpcProxyTests
 {
     private readonly ChainFixture _fixture;
     private readonly HttpClient _client;
@@ -139,5 +139,6 @@ public sealed class RpcProxyTests : IClassFixture<ChainFixture>
         var network = await _client.GetFromJsonAsync<JsonElement>("/v1/network");
 
         Assert.EndsWith("/v1/rpc", network.GetProperty("rpcUrl").GetString());
+        Assert.Equal(5_000UL, network.GetProperty("maxLogBlockRange").GetUInt64());
     }
 }

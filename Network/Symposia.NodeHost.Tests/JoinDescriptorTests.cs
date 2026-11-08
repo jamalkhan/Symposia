@@ -8,7 +8,7 @@ public sealed class JoinDescriptorTests
     private static readonly Uri Gateway = new("http://10.0.0.213:5180");
 
     private static ChainComponent.GatewayNetwork Descriptor(string? rpcUrl = "http://10.0.0.213:5180/v1/rpc") =>
-        new(31337, "0xnodes", "0xroots", "0xactivations", "0xrewards", "0xepochs", "0xtelemetry", "0xstaking", rpcUrl, 42);
+        new(31337, "0xnodes", "0xroots", "0xactivations", "0xrewards", "0xepochs", "0xtelemetry", "0xstaking", rpcUrl, 42, 2_000);
 
     [Fact]
     public void FullDescriptor_MapsEveryContract_AndReadsThroughTheGateway()
@@ -22,6 +22,7 @@ public sealed class JoinDescriptorTests
         Assert.Equal("0xtelemetry", network.TelemetryRegistryAddress);
         Assert.Equal("0xstaking", network.StakingRegistryAddress);
         Assert.Equal(42UL, network.DeployBlock);
+        Assert.Equal(2_000UL, network.MaxLogBlockRange); // the proxy's cap, so log scans page under it
     }
 
     [Fact]
@@ -36,6 +37,7 @@ public sealed class JoinDescriptorTests
         var network = ChainComponent.FromDescriptor(Gateway, Descriptor("https://rpc.example.org"));
 
         Assert.Equal(RpcSource.Advertised, network.RpcSource);
+        Assert.Null(network.MaxLogBlockRange); // the gateway's cap says nothing about someone else's RPC
     }
 
     [Theory]

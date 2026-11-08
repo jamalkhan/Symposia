@@ -17,7 +17,8 @@ public sealed record NetworkInfo(
     string? TelemetryRegistryAddress = null,
     string? StakingRegistryAddress = null,
     RpcSource RpcSource = RpcSource.Direct,
-    ulong DeployBlock = 0);
+    ulong DeployBlock = 0,
+    ulong? MaxLogBlockRange = null);
 
 /// <summary>Where <see cref="NetworkInfo.RpcUrl"/> came from (issue #172), shown on the Network card.</summary>
 public enum RpcSource

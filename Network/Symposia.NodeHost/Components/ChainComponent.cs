@@ -32,6 +32,12 @@ public sealed partial class ChainComponent : HostComponent
 
     protected override async Task OnStartAsync(HostContext context, CancellationToken ct)
     {
+        if (context.Settings.Network.Mode != NetworkMode.LocalDev)
+        {
+            // A reset request only means something to a Local dev network; never let it fire after a later mode switch.
+            File.Delete(context.Paths.ResetRewardsFlag);
+        }
+
         var network = context.Settings.Network;
         context.Network = network.Mode switch
         {
@@ -126,6 +132,8 @@ public sealed partial class ChainComponent : HostComponent
             // A stack from an older build (lower RewardsVersion) lacks functions the gateway and host now call, so it redeploys.
             var deployBlock = await BlockNumberAsync(rpcUrl, ct);
             var (distributor, epochs, telemetry, staking) = await DeployRewardsAsync(network.FoundryBin, rpcUrl, profile, ct);
+            // Consumed as soon as the new stack exists, so a crash before it's recorded can't wipe the ledger a second time.
+            File.Delete(context.Paths.ResetRewardsFlag);
             deployment = deployment with
             {
                 RewardDistributorAddress = distributor, EpochControllerAddress = epochs, TelemetryRegistryAddress = telemetry, StakingRegistryAddress = staking,
@@ -133,7 +141,10 @@ public sealed partial class ChainComponent : HostComponent
             };
             SecureFile.Write(context.Paths.Deployment, deployment, ownerOnly: false);
             context.Logger.LogInformation("Deployed the rewards contracts (RewardDistributor {Distributor}, EpochController {Epochs}).", distributor, epochs);
-            File.Delete(context.Paths.ResetRewardsFlag);
+            if (resetRequested)
+            {
+                context.Logger.LogWarning("Rewards contracts reset: hosts that joined this network must restart to pick up the new addresses.");
+            }
         }
         else
         {
@@ -218,7 +229,8 @@ public sealed partial class ChainComponent : HostComponent
 
         return new NetworkInfo(gateway.GetLeftPart(UriPartial.Authority), descriptor.ChainId, descriptor.NodeRegistryAddress, descriptor.EpochRootRegistryAddress, rpcUrl,
             descriptor.ProtocolActivationsAddress, descriptor.RewardDistributorAddress, descriptor.EpochControllerAddress,
-            descriptor.TelemetryRegistryAddress, descriptor.StakingRegistryAddress, source, descriptor.DeployBlock ?? 0);
+            descriptor.TelemetryRegistryAddress, descriptor.StakingRegistryAddress, source, descriptor.DeployBlock ?? 0,
+            source == RpcSource.Gateway ? descriptor.MaxLogBlockRange : null);
     }
 
     private static readonly HttpClient ProbeHttp = new() { Timeout = TimeSpan.FromSeconds(1) };
@@ -431,17 +443,24 @@ public sealed partial class ChainComponent : HostComponent
             return null;
         }
 
-        var web3 = new Nethereum.Web3.Web3(rpcUrl);
-        var epochSeconds = (ulong)await web3.Eth.GetContractQueryHandler<EpochLengthFunction>()
-            .QueryAsync<System.Numerics.BigInteger>(deployment.EpochControllerAddress, new EpochLengthFunction());
-        var committee = await web3.Eth.GetContractQueryHandler<CommitteeFunction>()
-            .QueryDeserializingToObjectAsync<CommitteeOutput>(new CommitteeFunction(), deployment.TelemetryRegistryAddress);
-        var members = committee.Members ?? [];
+        var chain = new Symposia.Network.Node.Telemetry.Committee.NethereumTelemetryChain(new()
+        {
+            RpcUrl = rpcUrl,
+            EpochControllerAddress = deployment.EpochControllerAddress,
+            TelemetryRegistryAddress = deployment.TelemetryRegistryAddress,
+        }, profile.HeartbeatCadenceSeconds);
+        var schedule = await chain.ScheduleAsync(ct);
+        var (members, _) = await chain.CommitteeAsync(ct);
+        var epochSeconds = (ulong)schedule.EpochSeconds;
 
         var reasons = new List<string>();
         if (epochSeconds != profile.EpochLengthSeconds)
         {
             reasons.Add($"it was deployed with {epochSeconds}s epochs (LocalDev uses {profile.EpochLengthSeconds}s)");
+        }
+        else if (schedule.CheckpointsPerEpoch != profile.CheckpointsPerEpoch)
+        {
+            reasons.Add($"it has {schedule.CheckpointsPerEpoch} telemetry windows per epoch (LocalDev uses {profile.CheckpointsPerEpoch})");
         }
 
         if (!members.Any(m => string.Equals(m, profile.CommitteeAddress, StringComparison.OrdinalIgnoreCase)))
@@ -452,22 +471,6 @@ public sealed partial class ChainComponent : HostComponent
         return reasons.Count == 0
             ? null
             : new RewardsStaleNotice(string.Join("; ", reasons) + ".", epochSeconds, members, profile.EpochLengthSeconds, profile.CommitteeAddress);
-    }
-
-    [Nethereum.ABI.FunctionEncoding.Attributes.Function("epochLength", "uint256")]
-    private sealed class EpochLengthFunction : Nethereum.Contracts.FunctionMessage;
-
-    [Nethereum.ABI.FunctionEncoding.Attributes.Function("committee")]
-    private sealed class CommitteeFunction : Nethereum.Contracts.FunctionMessage;
-
-    [Nethereum.ABI.FunctionEncoding.Attributes.FunctionOutput]
-    private sealed class CommitteeOutput : Nethereum.ABI.FunctionEncoding.Attributes.IFunctionOutputDTO
-    {
-        [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("address[]", "members", 1)]
-        public List<string>? Members { get; set; }
-
-        [Nethereum.ABI.FunctionEncoding.Attributes.Parameter("uint256", "threshold", 2)]
-        public System.Numerics.BigInteger Threshold { get; set; }
     }
 
     private static async Task<ulong> BlockNumberAsync(string rpcUrl, CancellationToken ct) =>
@@ -498,5 +501,5 @@ public sealed partial class ChainComponent : HostComponent
     /// <summary>A gateway's <c>/v1/network</c> descriptor; fields after the registries are absent on older gateways.</summary>
     internal sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null,
         string? RewardDistributorAddress = null, string? EpochControllerAddress = null, string? TelemetryRegistryAddress = null,
-        string? StakingRegistryAddress = null, string? RpcUrl = null, ulong? DeployBlock = null);
+        string? StakingRegistryAddress = null, string? RpcUrl = null, ulong? DeployBlock = null, ulong? MaxLogBlockRange = null);
 }

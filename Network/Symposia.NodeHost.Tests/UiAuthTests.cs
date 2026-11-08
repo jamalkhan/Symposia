@@ -53,7 +53,7 @@ public sealed class UiAuthTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/chain/reset-rewards", null)).StatusCode);
 
         await client.PostAsJsonAsync("/api/setup", new { password = "correct horse", setupToken = SetupToken });
-        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync("/api/chain/reset-rewards", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync("/api/chain/reset-rewards", null)).StatusCode);
         Assert.False(File.Exists(new HostPaths(_dir.Path).ResetRewardsFlag));
     }
 

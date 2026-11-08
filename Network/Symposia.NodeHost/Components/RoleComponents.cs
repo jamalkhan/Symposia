@@ -39,7 +39,8 @@ public sealed class StorageRoleComponent : WebAppComponent
         StorageNodeApp.Create(options, builder =>
         {
             configure(builder);
-            // Heartbeat acceptance surfaces on the host's Diagnostics page (#181 FR5).
+            // Heartbeat acceptance surfaces on the host's Diagnostics page (#181 FR5); each start is a fresh run.
+            context.Telemetry.Reset();
             builder.Services.AddSingleton(context.Telemetry);
         });
 
@@ -74,6 +75,10 @@ public sealed class StorageRoleComponent : WebAppComponent
             config["StorageNode:Telemetry:Chain:EpochControllerAddress"] = network.EpochControllerAddress;
             // Log scans start at the rewards deployment and page under capped RPCs (#172).
             config["StorageNode:Telemetry:Chain:FromBlock"] = network.DeployBlock.ToString();
+            if (network.MaxLogBlockRange is > 0 and var range)
+            {
+                config["StorageNode:Telemetry:Chain:MaxLogBlockRange"] = range.ToString();
+            }
             config["StorageNode:Telemetry:Blobs:CacheDirectory"] = Path.Combine(dir, "telemetry-blobs");
         }
 

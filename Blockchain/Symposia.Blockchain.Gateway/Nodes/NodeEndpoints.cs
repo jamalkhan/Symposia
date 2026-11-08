@@ -66,6 +66,8 @@ public static class NodeEndpoints
                     stakingRegistryAddress = NullIfEmpty(o.StakingRegistryAddress),
                     rpcUrl = AdvertisedRpcUrl(o, http.Request),
                     deployBlock = o.DeployBlock == 0 ? (ulong?)null : o.DeployBlock,
+                    // Joiners page eth_getLogs under this; only meaningful for the gateway's own proxy.
+                    maxLogBlockRange = string.IsNullOrEmpty(o.PublicRpcUrl) && o.RpcProxy.Enabled ? o.RpcProxy.MaxLogBlockRange : (ulong?)null,
                 });
             }
             catch (Exception ex) when (ex is HttpRequestException or RpcClientUnknownException or RpcResponseException)
