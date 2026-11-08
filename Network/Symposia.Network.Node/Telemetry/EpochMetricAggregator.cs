@@ -59,16 +59,38 @@ public sealed record TelemetrySchedule(long GenesisUnixSeconds, long EpochSecond
 /// <summary>
 /// The schedule heartbeats are stamped with. Starts from configuration; when the telemetry
 /// network is on (#158), the committee service replaces it with the EpochController's values,
-/// so a node's samples always land in the slots the chain counts.
+/// so a node's samples always land in the slots the chain counts. With <c>requiresSync</c>, the
+/// configured value is only a placeholder: nothing may be stamped until <see cref="Publish"/> has
+/// delivered the chain's schedule (issue #181 FR1).
 /// </summary>
-public sealed class TelemetryScheduleSource(TelemetrySchedule initial)
+public sealed class TelemetryScheduleSource(TelemetrySchedule initial, bool requiresSync = false)
 {
+    private readonly TaskCompletionSource _synced = NewSyncedSource(requiresSync);
     private volatile TelemetrySchedule _current = initial;
 
-    public TelemetrySchedule Current
+    public TelemetrySchedule Current => _current;
+
+    /// <summary>Whether <see cref="Current"/> is safe to stamp heartbeats with.</summary>
+    public bool IsSynced => _synced.Task.IsCompleted;
+
+    public Task WhenSyncedAsync(CancellationToken ct) => _synced.Task.WaitAsync(ct);
+
+    /// <summary>Sets the authoritative (chain) schedule and releases anything waiting for it.</summary>
+    public void Publish(TelemetrySchedule schedule)
     {
-        get => _current;
-        set => _current = value;
+        _current = schedule;
+        _synced.TrySetResult();
+    }
+
+    private static TaskCompletionSource NewSyncedSource(bool requiresSync)
+    {
+        var source = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!requiresSync)
+        {
+            source.SetResult();
+        }
+
+        return source;
     }
 }
 

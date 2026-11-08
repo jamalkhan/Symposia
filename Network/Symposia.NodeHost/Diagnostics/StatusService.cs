@@ -23,6 +23,8 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
         var scope = network is null ? "none" : $"{network.GatewayUrl}|{network.ChainId}|{network.NodeRegistryAddress}";
         var chain = await CachedAsync($"chain|{scope}", load => ChainAsync(network, load));
         var registry = await CachedAsync($"registry|{scope}", RegistryAsync);
+        var rewards = await CachedAsync($"rewards|{scope}", load => RewardsAsync(network, load));
+        var telemetry = context.Telemetry.Current;
         var peers = supervisor.Network.Services?.GetService<PeerTable>()?.Snapshot() ?? [];
 
         return new
@@ -39,9 +41,25 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
                 nodeRegistryAddress = network.NodeRegistryAddress,
                 epochRootRegistryAddress = network.EpochRootRegistryAddress,
                 rpcUrl = network.RpcUrl,
+                rpcSource = network.RpcSource.ToString(),
+                rewardsContracts = new[]
+                {
+                    ("RewardDistributor", network.RewardDistributorAddress), ("EpochController", network.EpochControllerAddress),
+                    ("TelemetryRegistry", network.TelemetryRegistryAddress), ("StakingRegistry", network.StakingRegistryAddress),
+                }.Where(c => !string.IsNullOrEmpty(c.Item2)).Select(c => c.Item1),
             },
             chain,
             registry,
+            rewards,
+            rewardsStale = context.RewardsStale,
+            telemetry = context.Settings.Storage.Enabled && context.Settings.Storage.Heartbeats ? new
+            {
+                configured = !string.IsNullOrEmpty(network?.TelemetryRegistryAddress) && network?.RpcUrl is not null,
+                scheduleSynced = telemetry.ScheduleSynced,
+                scheduleProblem = telemetry.ScheduleProblem,
+                lastAccepted = telemetry.LastAccepted,
+                lastRejected = telemetry.LastRejected,
+            } : null,
             peers = peers.Select(p => new
             {
                 endpoint = p.Endpoint,
@@ -97,6 +115,47 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             return new { error = $"Gateway unavailable: {ex.Message}" };
+        }
+    }
+
+    /// <summary>
+    /// Where this host's rewards epoch stands (issue #181 FR5): the current epoch, when it ends, when
+    /// it can first be sealed (the telemetry deadline, which already includes finality) and whether
+    /// this node is on the telemetry committee. Cached like every chain read.
+    /// </summary>
+    private async Task<object?> RewardsAsync(NetworkInfo? network, CancellationToken ct)
+    {
+        if (network?.RpcUrl is null || string.IsNullOrEmpty(network.TelemetryRegistryAddress) || string.IsNullOrEmpty(network.EpochControllerAddress))
+        {
+            return null;
+        }
+
+        try
+        {
+            var chain = new Symposia.Network.Node.Telemetry.Committee.NethereumTelemetryChain(new()
+            {
+                RpcUrl = network.RpcUrl,
+                TelemetryRegistryAddress = network.TelemetryRegistryAddress,
+                EpochControllerAddress = network.EpochControllerAddress,
+            });
+            var now = await chain.NowAsync(ct);
+            var schedule = await chain.ScheduleAsync(ct);
+            var (members, threshold) = await chain.CommitteeAsync(ct);
+            var epoch = now < schedule.GenesisUnixSeconds ? 0 : schedule.EpochAt(now);
+            return new
+            {
+                epoch,
+                epochSeconds = schedule.EpochSeconds,
+                epochEndsAt = DateTimeOffset.FromUnixTimeSeconds(schedule.EpochStart(epoch) + schedule.EpochSeconds),
+                sealableFrom = DateTimeOffset.FromUnixTimeSeconds(await chain.TelemetryDeadlineAsync(epoch, ct)),
+                committeeMember = members.Any(m => string.Equals(m, nodeAddress, StringComparison.OrdinalIgnoreCase)),
+                committeeSize = members.Count,
+                threshold,
+            };
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            return new { error = $"Rewards contracts unavailable: {ex.Message}" };
         }
     }
 

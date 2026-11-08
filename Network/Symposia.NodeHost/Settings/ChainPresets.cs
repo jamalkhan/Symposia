@@ -7,9 +7,10 @@ namespace Symposia.NodeHost.Settings;
 /// <param name="EpochControllerAddress">EpochController (#72), required with <paramref name="RewardDistributorAddress"/>.</param>
 /// <param name="TelemetryRegistryAddress">TelemetryCheckpointRegistry (#75/#158); empty = nodes don't gossip or checkpoint telemetry.</param>
 /// <param name="StakingRegistryAddress">StakingNodeRegistry (#159): per-service stake; empty = the Ledger tab is unavailable.</param>
+/// <param name="DeployBlock">Block the rewards stack was deployed at, where log scans start (#172); 0 = scan from genesis.</param>
 public sealed record ChainPreset(string Description, string RpcUrl, ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress,
     string ProtocolActivationsAddress = "", string RewardDistributorAddress = "", string EpochControllerAddress = "",
-    string TelemetryRegistryAddress = "", string StakingRegistryAddress = "")
+    string TelemetryRegistryAddress = "", string StakingRegistryAddress = "", ulong DeployBlock = 0)
 {
     public bool IsDeployed =>
         !string.IsNullOrWhiteSpace(RpcUrl) && ChainId != 0 &&
@@ -35,7 +36,8 @@ public static class ChainPresets
             preset.RewardDistributorAddress,
             preset.EpochControllerAddress,
             preset.TelemetryRegistryAddress,
-            preset.StakingRegistryAddress);
+            preset.StakingRegistryAddress,
+            preset.DeployBlock);
     }
 
     private static string Pick(string over, string preset) => string.IsNullOrWhiteSpace(over) ? preset : over;

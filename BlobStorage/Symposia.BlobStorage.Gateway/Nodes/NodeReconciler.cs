@@ -16,6 +16,8 @@ namespace Symposia.BlobStorage.Gateway.Nodes;
 ///   • CID on node AND in metadata pointing to this node → healthy, no action.
 ///
 ///  Reverse pass — gateway checks every object that claims this node as a replica.
+///   • Object doesn't list this node but the node holds its CID (e.g. listed under an old
+///     address): challenge it and, if intact, add this node to node_ids.
 ///   • Node responded (has the CID): verify integrity via challenge.
 ///     - Passes → healthy.
 ///     - Fails  → mark corrupt; enqueue repair (remove bad replica, add replacement).
@@ -86,7 +88,7 @@ public sealed class NodeReconciler
 
         // ── Reverse pass ─────────────────────────────────────────────────────
         // Every object the metadata claims lives on this node — verify the node still has it.
-        int repaired = 0;
+        int repaired = 0, adopted = 0;
         (string Bucket, string Key)? cursor = null;
         while (true)
         {
@@ -98,7 +100,21 @@ public sealed class NodeReconciler
                 ct.ThrowIfCancellationRequested();
 
                 if (!record.NodeIds.Any(u => u.Equals(node.Id, StringComparison.OrdinalIgnoreCase)))
-                    continue; // This node isn't a listed replica of this object — skip.
+                {
+                    // The node holds this object's blob but the metadata doesn't list it — typically a
+                    // replica recorded under an address the node no longer uses (issue #180). Adopt it
+                    // once it passes a challenge so the copy counts again.
+                    if (nodeCids.Contains(record.Cid) && await ChallengeAsync(node, record.Cid, ct))
+                    {
+                        _store.UpdateNodeIds(record.Bucket, record.Key, record.Cid, [.. record.NodeIds, node.Id]);
+                        _logger.LogInformation(
+                            "NodeReconciler: {Url} holds CID {Cid} for {Bucket}/{Key}; recorded it as a replica.",
+                            node.Url, record.Cid, record.Bucket, record.Key);
+                        adopted++;
+                    }
+
+                    continue;
+                }
 
                 if (!nodeCids.Contains(record.Cid))
                 {
@@ -131,8 +147,8 @@ public sealed class NodeReconciler
         node.JustReconnected = false;
 
         _logger.LogInformation(
-            "NodeReconciler: {Url} done. Orphans queued: {Orphans}, repairs enqueued: {Repairs}.",
-            node.Url, orphanQueued, repaired);
+            "NodeReconciler: {Url} done. Orphans queued: {Orphans}, repairs enqueued: {Repairs}, replicas adopted: {Adopted}.",
+            node.Url, orphanQueued, repaired, adopted);
     }
 
     /// <summary>Polls the node's JustReconnected flag and runs reconciliation as needed.</summary>

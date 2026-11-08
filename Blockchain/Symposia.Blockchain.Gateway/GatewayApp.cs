@@ -1,5 +1,6 @@
 using Symposia.Blockchain.Gateway.Chain;
 using Symposia.Blockchain.Gateway.Nodes;
+using Symposia.Blockchain.Gateway.Rpc;
 using Symposia.Blockchain.Gateway.Sealing;
 using Symposia.Blockchain.Gateway.Telemetry;
 using Symposia.Network.Node.Telemetry.Committee;
@@ -30,6 +31,16 @@ public static class GatewayApp
             builder.Services.AddHostedService<EpochSealerService>();
         }
 
+        if (gateway.RpcProxy.Enabled)
+        {
+            if (gateway.RpcProxy.MaxLogBlockRange == 0)
+            {
+                throw new InvalidOperationException("Gateway:RpcProxy:MaxLogBlockRange must be at least 1.");
+            }
+
+            builder.Services.AddRpcProxy(gateway.RpcProxy);
+        }
+
         builder.Services.AddSingleton<ITelemetryBlobStore>(sp =>
         {
             var blobs = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.TelemetryBlobs;
@@ -42,6 +53,10 @@ public static class GatewayApp
         app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
         app.MapNodeEndpoints();
         app.MapTelemetryRelay();
+        if (gateway.RpcProxy.Enabled)
+        {
+            app.MapRpcProxy();
+        }
 
         return app;
     }

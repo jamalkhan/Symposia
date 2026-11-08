@@ -13,6 +13,9 @@ public sealed record HostPaths(string DataDir)
 
     public string AnvilState => Path.Combine(DataDir, "anvil-state.json");
 
+    /// <summary>One-shot request to redeploy the LocalDev rewards contracts on the next chain start (#181).</summary>
+    public string ResetRewardsFlag => Path.Combine(DataDir, "reset-rewards.flag");
+
     public string NeonStub => Path.Combine(DataDir, "neon-stub");
 
     public string Component(string name) => Path.Combine(DataDir, name);

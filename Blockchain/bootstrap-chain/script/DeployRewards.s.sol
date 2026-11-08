@@ -33,6 +33,9 @@ import {ISYMMinter} from "../src/interfaces/ISYMMinter.sol";
 /// RELIABILITY_CHALLENGER, TELEMETRY_COMMITTEE (comma-separated addresses),
 /// TELEMETRY_THRESHOLD, DEV_MINT_ALLOWANCE (wei the deployer may mint for staking;
 /// default 10M SYM on chain 31337, 0 elsewhere), DEPLOYMENT_OUT (addresses JSON path).
+/// Timing (#181; defaults are the production values, the Node Host's LocalDev overrides them):
+/// EPOCH_LENGTH, EPOCH_FINALITY_WINDOW, TELEMETRY_CHECKPOINTS_PER_EPOCH, HEARTBEAT_CADENCE,
+/// TELEMETRY_COMMIT_WINDOW, TELEMETRY_SELF_CHECKPOINT_GRACE, REWARD_RECORDS_MAX_WAIT (seconds).
 contract DeployRewards is Script {
     string internal constant ECONOMICS_PATH = "../../protocol/economics.json";
 
@@ -46,6 +49,20 @@ contract DeployRewards is Script {
         uint256 committeeThreshold;
         uint256 devMintAllowance;
     }
+
+    /// @notice Epoch and telemetry timing. Kept apart from Roles so callers building Roles are unaffected.
+    struct Timing {
+        uint32 epochLength;
+        uint32 finalityWindow;
+        uint256 checkpointsPerEpoch;
+        uint256 heartbeatCadence;
+        uint256 commitWindow;
+        uint256 selfCheckpointGrace;
+        uint256 recordsMaxWait;
+    }
+
+    /// @notice Production timing: 24h epochs (NetworkRewardsEmission assumes 365/year) with the spec's 15-minute finality window.
+    Timing public timing = Timing(1 days, 15 minutes, 24, 300, 30 minutes, 20 minutes, 24 hours);
 
     struct Deployment {
         MockProtocolConfig config;
@@ -61,8 +78,11 @@ contract DeployRewards is Script {
     }
 
     error PredictedAddressMismatch(address predicted, address actual);
+    error InvalidTiming(string reason);
 
     function run() external returns (Deployment memory d) {
+        timing = _timingFromEnv();
+        validateTiming(timing); // before anything is broadcast
         vm.startBroadcast();
         (, address deployer,) = vm.readCallers();
         Roles memory roles = _rolesFromEnv(deployer);
@@ -79,8 +99,9 @@ contract DeployRewards is Script {
     function deploy(address deployer, Roles memory roles) public returns (Deployment memory d) {
         d.config = new MockProtocolConfig(deployer);
         IProtocolConfig cfg = d.config;
-        // 24h epochs (NetworkRewardsEmission assumes 365/year) with the spec's 15-minute finality window.
-        d.epochs = new EpochController(cfg, uint64(block.timestamp), 1 days, 15 minutes);
+        Timing memory t = timing;
+        validateTiming(t);
+        d.epochs = new EpochController(cfg, uint64(block.timestamp), t.epochLength, t.finalityWindow);
 
         d.registry = StakingNodeRegistry(_proxy(address(new StakingNodeRegistry()), abi.encodeCall(StakingNodeRegistry.initialize, (cfg))));
         d.slashing = SlashingController(_proxy(address(new SlashingController()), abi.encodeCall(SlashingController.initialize, (cfg))));
@@ -148,7 +169,7 @@ contract DeployRewards is Script {
         // #76: score storage nodes from finalized telemetry; fall back to signed reports after 24h.
         cfg.setAddress(ConfigKeys.REWARD_SCORING_WEIGHTS, address(d.weights));
         cfg.setAddress(ConfigKeys.REWARD_TELEMETRY_REGISTRY, address(d.telemetry));
-        cfg.setUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT, 24 hours);
+        cfg.setUint(ConfigKeys.REWARD_RECORDS_MAX_WAIT, timing.recordsMaxWait);
         cfg.setAddress(ConfigKeys.REWARD_METRIC_SIGNER, roles.metricSigner);
         cfg.setUint(ConfigKeys.REWARD_CAPACITY_SHARE_BPS, vm.parseJsonUint(economics, ".emission.capacityShareBps"));
         cfg.setUint(ConfigKeys.REWARD_VERIFIER_SHARE_BPS, vm.parseJsonUint(economics, ".emission.verifierShareBps"));
@@ -179,9 +200,9 @@ contract DeployRewards is Script {
         cfg.setUint(ConfigKeys.RELIABILITY_BONUS_WINDOW, 30);
 
         // Telemetry checkpoints (#75).
-        cfg.setUint(ConfigKeys.TELEMETRY_CHECKPOINTS_PER_EPOCH, 24);
-        cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, 20 minutes);
-        cfg.setUint(ConfigKeys.TELEMETRY_COMMIT_WINDOW, 30 minutes); // checkpoints until finality + 30 min (#158)
+        cfg.setUint(ConfigKeys.TELEMETRY_CHECKPOINTS_PER_EPOCH, timing.checkpointsPerEpoch);
+        cfg.setUint(ConfigKeys.TELEMETRY_SELF_CHECKPOINT_GRACE, timing.selfCheckpointGrace);
+        cfg.setUint(ConfigKeys.TELEMETRY_COMMIT_WINDOW, timing.commitWindow); // checkpoints until finality + commit window (#158)
         cfg.setUint(ConfigKeys.TELEMETRY_RECORDS_PER_TX, 200);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_UPTIME_BPS, 1_000);
         cfg.setUint(ConfigKeys.TELEMETRY_DIVERGENCE_LATENCY_BPS, 5_000);
@@ -199,6 +220,30 @@ contract DeployRewards is Script {
         cfg.setUint(ConfigKeys.slashingViolationPctBps(0), 1_500);
         cfg.setUint(ConfigKeys.slashingViolationPctBps(1), 3_000);
         cfg.setUint(ConfigKeys.slashingViolationPctBps(2), 3_000);
+    }
+
+    /// @notice Rejects timing the telemetry pipeline can't settle (#181): every checkpoint window must
+    /// hold a whole number of heartbeats (at least one), and the self-checkpoint fallback must fit
+    /// before the telemetry deadline.
+    function validateTiming(Timing memory t) public pure {
+        if (t.checkpointsPerEpoch == 0 || t.heartbeatCadence == 0) revert InvalidTiming("windows and cadence must be non-zero");
+        if (t.epochLength % (t.checkpointsPerEpoch * t.heartbeatCadence) != 0) {
+            revert InvalidTiming("telemetry windows must each hold a whole number of heartbeats (>= 1)");
+        }
+        if (t.selfCheckpointGrace >= uint256(t.finalityWindow) + t.commitWindow) {
+            revert InvalidTiming("self-checkpoint grace must end before finality + commit window");
+        }
+    }
+
+    function _timingFromEnv() internal view returns (Timing memory t) {
+        Timing memory d = timing;
+        t.epochLength = uint32(vm.envOr("EPOCH_LENGTH", uint256(d.epochLength)));
+        t.finalityWindow = uint32(vm.envOr("EPOCH_FINALITY_WINDOW", uint256(d.finalityWindow)));
+        t.checkpointsPerEpoch = vm.envOr("TELEMETRY_CHECKPOINTS_PER_EPOCH", d.checkpointsPerEpoch);
+        t.heartbeatCadence = vm.envOr("HEARTBEAT_CADENCE", d.heartbeatCadence);
+        t.commitWindow = vm.envOr("TELEMETRY_COMMIT_WINDOW", d.commitWindow);
+        t.selfCheckpointGrace = vm.envOr("TELEMETRY_SELF_CHECKPOINT_GRACE", d.selfCheckpointGrace);
+        t.recordsMaxWait = vm.envOr("REWARD_RECORDS_MAX_WAIT", d.recordsMaxWait);
     }
 
     function _rolesFromEnv(address deployer) internal view returns (Roles memory r) {

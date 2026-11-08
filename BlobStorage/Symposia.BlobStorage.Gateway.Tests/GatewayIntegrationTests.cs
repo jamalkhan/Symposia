@@ -344,6 +344,22 @@ public sealed class GatewayIntegrationTests : IClassFixture<GatewayFixture>
     // ── Auth ──────────────────────────────────────────────────────────────────
 
     [Fact]
+    public async Task Reconcile_AdoptsAReplicaListedUnderTheNodesOldAddress()
+    {
+        // Issue #180: the object was recorded under an address the node no longer answers at.
+        const string key = "reconcile/stale-address.txt";
+        await _f.S3.PutObjectAsync(new PutObjectRequest { BucketName = Bucket, Key = key, ContentBody = "stale address" });
+        var store = _f.GatewayServices.GetRequiredService<Metadata.GatewayMetadataStore>();
+        var node = _f.GatewayServices.GetRequiredService<INodeRegistry>().All.Single();
+        var record = store.GetObject(Bucket, key)!;
+        store.UpdateNodeIds(Bucket, key, record.Cid, ["http://10.0.0.213:6180"]);
+
+        await _f.GatewayServices.GetRequiredService<NodeReconciler>().ReconcileAsync(node, CancellationToken.None);
+
+        Assert.Equal(["http://10.0.0.213:6180", node.Id], store.GetObject(Bucket, key)!.NodeIds);
+    }
+
+    [Fact]
     public async Task UnauthenticatedRequest_Returns403()
     {
         var resp = await _f.GatewayHttpClient.GetAsync($"/{Bucket}");
@@ -401,6 +417,8 @@ public sealed class GatewayFixture : IAsyncLifetime
 
     public AmazonS3Client S3 { get; private set; } = null!;
     public HttpClient GatewayHttpClient { get; private set; } = null!;
+
+    public IServiceProvider GatewayServices => _gatewayFactory!.Services;
 
     public async Task InitializeAsync()
     {

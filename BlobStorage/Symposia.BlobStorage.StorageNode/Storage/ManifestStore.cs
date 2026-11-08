@@ -168,7 +168,7 @@ public sealed class ManifestStore
         while (reader.Read())
         {
             if (Cid.TryParse(reader.GetString(0), out var cid))
-                results.Add(MapRecord(cid, reader));
+                results.Add(MapRecord(cid, reader, offset: 1));
         }
         return results;
     }
@@ -193,23 +193,26 @@ public sealed class ManifestStore
         command.ExecuteNonQuery();
     }
 
-    private static BlobRecord MapRecord(Cid cid, SqliteDataReader reader)
+    private static BlobRecord MapRecord(Cid cid, SqliteDataReader reader, int offset = 0)
     {
-        var regionTagsRaw = reader.GetString(4);
+        // offset: columns before size_bytes (ListByStatus selects cid first).
+        int Col(int i) => i + offset;
+
+        var regionTagsRaw = reader.GetString(Col(4));
         var regionTags = regionTagsRaw.Length == 0
             ? Array.Empty<string>()
             : regionTagsRaw.Split(',');
 
         return new BlobRecord(
             cid,
-            reader.GetInt64(0),
-            reader.GetString(1),
-            reader.GetString(2),
-            reader.GetString(3),
+            reader.GetInt64(Col(0)),
+            reader.GetString(Col(1)),
+            reader.GetString(Col(2)),
+            reader.GetString(Col(3)),
             regionTags,
-            DateTimeOffset.Parse(reader.GetString(5)),
-            reader.IsDBNull(6) ? null : DateTimeOffset.Parse(reader.GetString(6)),
-            Enum.Parse<BlobStatus>(reader.GetString(7)));
+            DateTimeOffset.Parse(reader.GetString(Col(5))),
+            reader.IsDBNull(Col(6)) ? null : DateTimeOffset.Parse(reader.GetString(Col(6))),
+            Enum.Parse<BlobStatus>(reader.GetString(Col(7))));
     }
 
     private SqliteConnection OpenConnection()

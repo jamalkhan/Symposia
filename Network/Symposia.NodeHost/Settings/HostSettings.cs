@@ -121,9 +121,6 @@ public sealed class StorageSettings
 
     /// <summary>Emit a signed heartbeat every 5 minutes for reward scoring (issue #75).</summary>
     public bool Heartbeats { get; set; } = true;
-
-    /// <summary>The network's epoch genesis (Unix seconds), matching the chain's <c>epoch.genesisTimestamp</c>.</summary>
-    public long EpochGenesisUnixSeconds { get; set; }
 }
 
 /// <summary>
