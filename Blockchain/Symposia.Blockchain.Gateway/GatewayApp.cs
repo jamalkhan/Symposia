@@ -33,9 +33,9 @@ public static class GatewayApp
 
         if (gateway.RpcProxy.Enabled)
         {
-            if (gateway.RpcProxy.MaxLogBlockRange == 0)
+            if (gateway.RpcProxy.Validate() is { } invalid)
             {
-                throw new InvalidOperationException("Gateway:RpcProxy:MaxLogBlockRange must be at least 1.");
+                throw new InvalidOperationException(invalid);
             }
 
             builder.Services.AddRpcProxy(gateway.RpcProxy);

@@ -113,14 +113,16 @@ public sealed class HeartbeatEmitter(
         var signed = identity.SignHeartbeat(new HeartbeatSample(identity.NodeId, epoch, slot, now,
             r.ReadThroughputKBps, r.WriteThroughputKBps, r.BandwidthInKbps, r.BandwidthOutKbps,
             r.LatencyMs, r.RetrievalMs, r.AvailableBytes, r.UsedBytes));
-        if (await gossip.PublishAsync(signed, ct))
+        var published = await gossip.PublishAsync(signed, ct);
+        if (published.Accepted)
         {
             diagnostics?.Accepted(epoch, slot, time.GetUtcNow());
         }
         else
         {
-            logger.LogWarning("Heartbeat for epoch {Epoch} slot {Slot} was rejected by gossip.", epoch, slot);
-            diagnostics?.Rejected(epoch, slot, time.GetUtcNow(), "rejected by gossip admission (wrong epoch or slot, or a replay)");
+            logger.LogWarning("Heartbeat for epoch {Epoch} slot {Slot} was rejected by gossip ({Reason}): {Detail}.",
+                epoch, slot, published.Rejection, published.Describe());
+            diagnostics?.Rejected(epoch, slot, time.GetUtcNow(), published.Describe());
         }
 
         (_lastEpoch, _lastSlot) = (epoch, slot);
@@ -185,7 +187,11 @@ public static class TelemetryServiceExtensions
         {
             var network = sp.GetRequiredService<IOptions<NodeNetworkOptions>>().Value;
             var telemetry = sp.GetRequiredService<IOptions<TelemetryOptions>>().Value;
-            var admission = new TelemetryAdmission(telemetry.Schedule, sp.GetRequiredService<TimeProvider>());
+            // Follow the same chain-synced schedule the emitter stamps heartbeats with (#183).
+            var admission = new TelemetryAdmission(telemetry.Schedule, sp.GetRequiredService<TimeProvider>())
+            {
+                Source = sp.GetService<TelemetryScheduleSource>(),
+            };
             return new InMemoryTelemetryGossip(network.ChainId, network.NodeRegistryAddress, admission);
         });
         services.AddSingleton<HeartbeatEmitter>();

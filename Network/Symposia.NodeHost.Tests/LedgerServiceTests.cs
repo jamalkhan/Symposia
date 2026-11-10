@@ -32,7 +32,11 @@ public sealed class LedgerServiceTests
 
         public string HashSalt { get; set; } = "a";
 
-        public Task<string> BlockHashAsync(ulong block, CancellationToken ct) => Task.FromResult($"0x{HashSalt}{block}");
+        public int FailHashes { get; set; }
+
+        public Task<string> BlockHashAsync(ulong block, CancellationToken ct) => FailHashes-- > 0
+            ? throw new HttpRequestException("429 Too Many Requests")
+            : Task.FromResult(block > Latest ? "" : $"0x{HashSalt}{block}"); // "" = the chain has no such block
 
         public Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct) => Task.FromResult(service == 0 ? 3 * Sym : BigInteger.Zero);
     }
@@ -182,6 +186,25 @@ public sealed class LedgerServiceTests
         Assert.Equal(8, snap.Entries.Count);
     }
 
+    // Issue #182: a rate-limited read while resuming is not a reorg, so the persisted ledger is kept.
+    [Fact]
+    public async Task Restart_WhenTheCursorReadFails_KeepsThePersistedLedger()
+    {
+        using var dir = new TempDir();
+        var source = new FakeSource { Latest = 10 };
+        SeedLifecycle(source);
+        await new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path)).SnapshotAsync(default);
+
+        source.FailHashes = 1;
+        source.Calls.Clear();
+        var restarted = new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path));
+        await Assert.ThrowsAsync<HttpRequestException>(() => restarted.SnapshotAsync(default));
+        var snap = await restarted.SnapshotAsync(default);
+
+        Assert.Empty(source.Calls); // resumed at block 10: nothing rescanned
+        Assert.Equal(8, snap.Entries.Count);
+    }
+
     [Fact]
     public async Task Restart_AfterAReorg_RewindsAndRescans()
     {
@@ -198,6 +221,24 @@ public sealed class LedgerServiceTests
         Assert.Equal(1_001UL, source.Calls[0].From);
         Assert.Equal(2, snap.Entries.Count);
         Assert.Single(snap.Entries, e => e.Block == 1_500);
+    }
+
+    // #182 review: a chain reset to one shorter than the rewind point starts over instead of
+    // persisting the old chain's rows under a hashless cursor.
+    [Fact]
+    public async Task Restart_OnAShorterResetChain_StartsOver()
+    {
+        using var dir = new TempDir();
+        var source = new FakeSource { Latest = 2_000 };
+        source.Logs.Add(new ServiceRegisteredLog(1_500, 0, "0xb", 8, Sym));
+        await new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path)).SnapshotAsync(default);
+
+        source.Logs.Clear();
+        source.Latest = 50; // a fresh local chain: neither the cursor nor the rewind point exists
+        var snap = await new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path)).SnapshotAsync(default);
+
+        Assert.Empty(snap.Entries);
+        Assert.Equal(50UL, snap.ScannedToBlock);
     }
 
     [Fact]

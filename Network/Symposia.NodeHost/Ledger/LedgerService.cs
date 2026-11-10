@@ -88,7 +88,15 @@ public sealed class LedgerService(
                 _cursor = null;
                 _reserves = null;
                 _store = storeFor?.Invoke();
-                await LoadAsync(source, ct);
+                try
+                {
+                    await LoadAsync(source, ct);
+                }
+                catch
+                {
+                    _source = null; // retry the resume next refresh instead of rescanning on top of the persisted rows
+                    throw;
+                }
             }
 
             await ScanAsync(source, ct);
@@ -114,15 +122,9 @@ public sealed class LedgerService(
             return;
         }
 
-        string? hash = null;
-        try
-        {
-            hash = await source.BlockHashAsync(cursor.ScannedTo, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Unknown block (e.g. a reset local chain): treat as a mismatch.
-        }
+        // An unknown block (e.g. a reset local chain) hashes to "" and counts as a mismatch. A failed read
+        // (a 429 from the gateway, say) propagates instead: it says nothing about a reorg (#182).
+        var hash = await source.BlockHashAsync(cursor.ScannedTo, ct);
 
         if (string.Equals(hash, cursor.BlockHash, StringComparison.OrdinalIgnoreCase))
         {
@@ -132,10 +134,16 @@ public sealed class LedgerService(
         }
 
         var keepTo = cursor.ScannedTo > ReorgRewind ? cursor.ScannedTo - ReorgRewind : 0;
+        var keepHash = keepTo == 0 ? "" : await source.BlockHashAsync(keepTo, ct);
+        if (keepHash.Length == 0)
+        {
+            keepTo = 0; // the chain doesn't reach keepTo either (e.g. reset to a shorter one): start over
+        }
+
         var kept = keepTo == 0 ? [] : entries.Where(e => e.Block <= keepTo).ToList();
         _entries.AddRange(kept);
         _cursor = keepTo == 0 ? null : keepTo;
-        _store.Replace(kept, new LedgerStore.Cursor(keepTo, keepTo == 0 ? "" : await source.BlockHashAsync(keepTo, ct)));
+        _store.Replace(kept, new LedgerStore.Cursor(keepTo, keepHash));
     }
 
     private async Task ScanAsync(ILedgerLogSource source, CancellationToken ct)
@@ -170,7 +178,14 @@ public sealed class LedgerService(
                 }
             }
 
-            _store?.Append(chunk, new LedgerStore.Cursor(to, await source.BlockHashAsync(to, ct)));
+            // A lagging upstream may not have `to` yet; never persist a cursor without its hash.
+            var hash = await source.BlockHashAsync(to, ct);
+            if (hash.Length == 0)
+            {
+                throw new InvalidOperationException($"The chain returned no block {to}; the ledger scan will retry.");
+            }
+
+            _store?.Append(chunk, new LedgerStore.Cursor(to, hash));
             _entries.AddRange(chunk);
             _cursor = to;
             from = to + 1;
