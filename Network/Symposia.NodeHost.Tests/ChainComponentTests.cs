@@ -16,6 +16,19 @@ public sealed class ChainComponentTests : IDisposable
     private HostContext Context(HostSettings settings) =>
         new(new HostPaths(_dir.Path), new SecretStore(new HostPaths(_dir.Path)), new LogBuffer()) { Settings = settings };
 
+    // #191: LocalDev reads the committee address from the key Program.cs already wrote, without a loaded identity.
+    [Fact]
+    public void LocalNodeAddress_LoadsTheExistingNodeKey()
+    {
+        var paths = new HostPaths(_dir.Path);
+        Directory.CreateDirectory(paths.DataDir);
+        var identity = new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
+            new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = paths.NodeKey }));
+        identity.EnsureLoadedOrGenerated();
+
+        Assert.Equal(identity.NodeId, ChainComponent.LocalNodeAddress(Context(HostSettings.Defaults(0))));
+    }
+
     [Fact]
     public async Task RemoteRpc_UndeployedPreset_FaultsWithoutNetwork()
     {

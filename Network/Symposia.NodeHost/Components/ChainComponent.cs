@@ -424,15 +424,17 @@ public sealed partial class ChainComponent : HostComponent
     }
 
     /// <summary>This host's node address, the LocalDev telemetry committee (#181 FR2).</summary>
-    private static string LocalNodeAddress(HostContext context)
+    internal static string LocalNodeAddress(HostContext context)
     {
         if (!File.Exists(context.Paths.NodeKey))
         {
             throw new ComponentFaultException("LocalDev needs this host's node key to make it the telemetry committee, and none was found.");
         }
 
-        return new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
-            new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = context.Paths.NodeKey })).NodeId;
+        var identity = new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
+            new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = context.Paths.NodeKey }));
+        identity.EnsureLoadedOrGenerated(); // the key exists (checked above), so this only loads it
+        return identity.NodeId;
     }
 
     /// <summary>Compares the deployed epoch length and committee with the LocalDev profile; null when they match.</summary>
