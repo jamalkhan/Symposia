@@ -27,6 +27,7 @@ public static class RpcProxyEndpoints
     public static void AddRpcProxy(this IServiceCollection services, RpcProxyOptions options)
     {
         services.AddSingleton<LatestBlockCache>();
+        services.AddSingleton(new RpcProxyLimiter(options.RateLimit));
         services.AddHttpClient(HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds))
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { MaxConnectionsPerServer = options.MaxConnections });
     }
@@ -34,11 +35,24 @@ public static class RpcProxyEndpoints
     public static void MapRpcProxy(this WebApplication app)
     {
         app.MapPost("/v1/rpc", async (HttpContext http, IOptions<GatewayOptions> gatewayOptions, IHttpClientFactory clients,
-            LatestBlockCache latest, ILoggerFactory loggers, CancellationToken ct) =>
+            LatestBlockCache latest, RpcProxyLimiter limiter, ILoggerFactory loggers, CancellationToken ct) =>
         {
             var gateway = gatewayOptions.Value;
             var options = gateway.RpcProxy;
             var logger = loggers.CreateLogger(typeof(RpcProxyEndpoints));
+
+            // Limits come first (#182): an abusive client is refused before its body is read or parsed.
+            var client = limiter.ClientOf(http);
+            if (limiter.TryTake(client, 1) is { } wait)
+            {
+                return Limited(http, null, wait, "rate limit exceeded", "rate_limited", client, limiter, logger);
+            }
+
+            using var slot = limiter.TryEnter();
+            if (slot is null)
+            {
+                return Limited(http, null, 1, "too many concurrent requests on the gateway", "concurrency", client, limiter, logger);
+            }
 
             var body = await ReadBoundedAsync(http.Request.Body, options.MaxRequestBytes, ct);
             if (body is null)
@@ -81,8 +95,12 @@ public static class RpcProxyEndpoints
 
             if (!AllowedMethods.Contains(method))
             {
-                logger.LogInformation("RPC proxy rejected method {Method} from {Remote}.", method, http.Connection.RemoteIpAddress);
-                return Error(id, -32601, $"Method '{method}' is not available on the gateway's read-only RPC");
+                if (limiter.ShouldLog(client))
+                {
+                    logger.LogInformation("RPC proxy rejected method {Method} from {Client}.", method, client);
+                }
+
+                return Error(id, -32601, $"Method '{method}' is not available on the gateway's read-only RPC", "method");
             }
 
             var parameters = rawParams as JsonArray;
@@ -97,6 +115,13 @@ public static class RpcProxyEndpoints
 
             if (method == "eth_getLogs")
             {
+                // Before the range check, which can itself read the upstream's latest block.
+                if (limiter.TryTake(client, limiter.GetLogsCost - 1) is { } logsWait)
+                {
+                    return Limited(http, id, Math.Max(logsWait, (int)Math.Ceiling((double)limiter.GetLogsCost / options.RateLimit.TokensPerSecond)),
+                        "rate limit exceeded", "rate_limited", client, limiter, logger);
+                }
+
                 string? rangeError;
                 try
                 {
@@ -106,12 +131,16 @@ public static class RpcProxyEndpoints
                 catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException && !ct.IsCancellationRequested)
                 {
                     logger.LogWarning("RPC proxy could not read the latest block: {Message}", ex.Message);
-                    return Error(id, -32603, "Internal error");
+                    return Error(id, -32603, "Internal error", "upstream");
                 }
 
                 if (rangeError is not null)
                 {
-                    logger.LogInformation("RPC proxy rejected eth_getLogs from {Remote}: {Reason}.", http.Connection.RemoteIpAddress, rangeError);
+                    if (limiter.ShouldLog(client))
+                    {
+                        logger.LogInformation("RPC proxy rejected eth_getLogs from {Client}: {Reason}.", client, rangeError);
+                    }
+
                     return Error(id, -32005, rangeError);
                 }
             }
@@ -126,15 +155,16 @@ public static class RpcProxyEndpoints
                 var response = await ReadBoundedAsync(await upstream.Content.ReadAsStreamAsync(ct), options.MaxResponseBytes, ct);
                 if (response is null)
                 {
-                    return Error(id, -32005, $"Response exceeds {options.MaxResponseBytes} bytes");
+                    return Error(id, -32005, $"Response exceeds {options.MaxResponseBytes} bytes", "upstream");
                 }
 
+                RpcProxyLimiter.CountForwarded();
                 return Results.Bytes(response, "application/json");
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
             {
                 logger.LogWarning("RPC proxy could not reach the upstream RPC: {Message}", ex.Message);
-                return Error(id, -32603, "Internal error");
+                return Error(id, -32603, "Internal error", "upstream");
             }
         });
     }
@@ -207,9 +237,26 @@ public static class RpcProxyEndpoints
         return buffer.ToArray();
     }
 
-    private static IResult Error(JsonNode? id, int code, string message) => Results.Text(
-        new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["error"] = new JsonObject { ["code"] = code, ["message"] = message } }.ToJsonString(),
-        "application/json", Encoding.UTF8);
+    private static IResult Error(JsonNode? id, int code, string message, string reason = "invalid", int? statusCode = null)
+    {
+        RpcProxyLimiter.CountRejected(reason);
+        return Results.Text(
+            new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["error"] = new JsonObject { ["code"] = code, ["message"] = message } }.ToJsonString(),
+            "application/json", Encoding.UTF8, statusCode);
+    }
+
+    /// <summary>HTTP 429 with Retry-After and a <c>-32005</c> body; the call never reaches the upstream (#182).</summary>
+    private static IResult Limited(HttpContext http, JsonNode? id, int retryAfterSeconds, string message, string reason, string client,
+        RpcProxyLimiter limiter, ILogger logger)
+    {
+        if (limiter.ShouldLog(client))
+        {
+            logger.LogInformation("RPC proxy limited {Client}: {Reason}.", client, message);
+        }
+
+        http.Response.Headers.RetryAfter = retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+        return Error(id, -32005, $"Limit exceeded: {message} on the gateway's read-only RPC", reason, StatusCodes.Status429TooManyRequests);
+    }
 }
 
 /// <summary>The upstream's latest block, cached for a second so range checks don't double upstream load.</summary>

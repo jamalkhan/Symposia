@@ -88,7 +88,15 @@ public sealed class LedgerService(
                 _cursor = null;
                 _reserves = null;
                 _store = storeFor?.Invoke();
-                await LoadAsync(source, ct);
+                try
+                {
+                    await LoadAsync(source, ct);
+                }
+                catch
+                {
+                    _source = null; // retry the resume next refresh instead of rescanning on top of the persisted rows
+                    throw;
+                }
             }
 
             await ScanAsync(source, ct);
@@ -114,15 +122,9 @@ public sealed class LedgerService(
             return;
         }
 
-        string? hash = null;
-        try
-        {
-            hash = await source.BlockHashAsync(cursor.ScannedTo, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Unknown block (e.g. a reset local chain): treat as a mismatch.
-        }
+        // An unknown block (e.g. a reset local chain) hashes to "" and counts as a mismatch. A failed read
+        // (a 429 from the gateway, say) propagates instead: it says nothing about a reorg (#182).
+        var hash = await source.BlockHashAsync(cursor.ScannedTo, ct);
 
         if (string.Equals(hash, cursor.BlockHash, StringComparison.OrdinalIgnoreCase))
         {

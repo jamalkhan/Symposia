@@ -38,6 +38,11 @@ public static class GatewayApp
                 throw new InvalidOperationException("Gateway:RpcProxy:MaxLogBlockRange must be at least 1.");
             }
 
+            if (gateway.RpcProxy.RateLimit.Validate() is { } invalid)
+            {
+                throw new InvalidOperationException(invalid);
+            }
+
             builder.Services.AddRpcProxy(gateway.RpcProxy);
         }
 

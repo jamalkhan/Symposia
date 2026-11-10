@@ -32,7 +32,11 @@ public sealed class LedgerServiceTests
 
         public string HashSalt { get; set; } = "a";
 
-        public Task<string> BlockHashAsync(ulong block, CancellationToken ct) => Task.FromResult($"0x{HashSalt}{block}");
+        public int FailHashes { get; set; }
+
+        public Task<string> BlockHashAsync(ulong block, CancellationToken ct) => FailHashes-- > 0
+            ? throw new HttpRequestException("429 Too Many Requests")
+            : Task.FromResult($"0x{HashSalt}{block}");
 
         public Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct) => Task.FromResult(service == 0 ? 3 * Sym : BigInteger.Zero);
     }
@@ -179,6 +183,25 @@ public sealed class LedgerServiceTests
         var snap = await restarted.SnapshotAsync(default);
 
         Assert.Equal([(11UL, 12UL)], source.Calls);
+        Assert.Equal(8, snap.Entries.Count);
+    }
+
+    // Issue #182: a rate-limited read while resuming is not a reorg, so the persisted ledger is kept.
+    [Fact]
+    public async Task Restart_WhenTheCursorReadFails_KeepsThePersistedLedger()
+    {
+        using var dir = new TempDir();
+        var source = new FakeSource { Latest = 10 };
+        SeedLifecycle(source);
+        await new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path)).SnapshotAsync(default);
+
+        source.FailHashes = 1;
+        source.Calls.Clear();
+        var restarted = new LedgerService(() => source, Node, () => null, 0, () => new LedgerStore(dir.Path));
+        await Assert.ThrowsAsync<HttpRequestException>(() => restarted.SnapshotAsync(default));
+        var snap = await restarted.SnapshotAsync(default);
+
+        Assert.Empty(source.Calls); // resumed at block 10: nothing rescanned
         Assert.Equal(8, snap.Entries.Count);
     }
 
