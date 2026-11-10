@@ -57,7 +57,7 @@ public sealed class TelemetryGossipTests : IDisposable
     public async Task SamplesFloodToEveryPeerOnce()
     {
         var beat = _h.Beat(_h.Node, 3);
-        Assert.True(await _h.Gossip[0].PublishAsync(beat));
+        Assert.True((await _h.Gossip[0].PublishAsync(beat)).Accepted);
         await _h.FlushAllAsync();
 
         Assert.All(_h.Gossip, g => Assert.Contains(beat, g.Store.Heartbeats));

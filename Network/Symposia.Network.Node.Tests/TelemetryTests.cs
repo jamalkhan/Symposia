@@ -89,8 +89,8 @@ public sealed class TelemetryPipelineTests : IDisposable
         return signer.SignHeartbeat(new HeartbeatSample(signer.NodeId, epoch, slot, ts, 1_000, 800, 50_000, 40_000, latency, 120, 5_000, 1_000));
     }
 
-    private SignedTelemetry<Attestation> Attest(uint slot, bool reachable = true, uint latency = 55, NodeIdentity? by = null) =>
-        (by ?? _verifier).SignAttestation(new Attestation((by ?? _verifier).NodeId, _node.NodeId, 0, slot, Genesis + slot * 300, reachable, latency, 130));
+    private SignedTelemetry<Attestation> Attest(uint slot, bool reachable = true, uint latency = 55, NodeIdentity? by = null, ulong epoch = 0, long? at = null) =>
+        (by ?? _verifier).SignAttestation(new Attestation((by ?? _verifier).NodeId, _node.NodeId, epoch, slot, at ?? Genesis + slot * 300, reachable, latency, 130));
 
     private AggregatedMetricRecord Aggregate(IEnumerable<SignedTelemetry<HeartbeatSample>> beats, IEnumerable<SignedTelemetry<Attestation>>? atts = null) =>
         _aggregator.Aggregate(_node.NodeId, 0, beats, atts ?? []);
@@ -258,10 +258,10 @@ public sealed class TelemetryPipelineTests : IDisposable
         var received = 0;
         gossip.HeartbeatReceived += _ => received++;
         var beat = Beat(0);
-        Assert.True(await gossip.PublishAsync(beat));
-        Assert.False(await gossip.PublishAsync(beat));
-        Assert.False(await gossip.PublishAsync(Beat(1) with { Signature = beat.Signature }));
-        Assert.True(await gossip.PublishAsync(Attest(0)));
+        Assert.True((await gossip.PublishAsync(beat)).Accepted);
+        Assert.Equal(TelemetryRejection.Duplicate, (await gossip.PublishAsync(beat)).Rejection);
+        Assert.Equal(TelemetryRejection.InvalidSignature, (await gossip.PublishAsync(Beat(1) with { Signature = beat.Signature })).Rejection);
+        Assert.True((await gossip.PublishAsync(Attest(0))).Accepted);
         Assert.Equal(1, received);
         gossip.PruneBefore(1);
         Assert.Empty(gossip.Heartbeats);
@@ -273,9 +273,10 @@ public sealed class TelemetryPipelineTests : IDisposable
         var gossip = new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry);
         var received = 0;
         gossip.HeartbeatReceived += _ => received++;
-        Assert.True(await gossip.PublishAsync(Beat(3, latency: 50)));
-        Assert.True(await gossip.PublishAsync(Beat(3, latency: 9))); // equivocation: forwarded as evidence
-        Assert.False(await gossip.PublishAsync(Beat(3, latency: 7))); // capped at two copies per key
+        Assert.True((await gossip.PublishAsync(Beat(3, latency: 50))).Accepted);
+        Assert.True((await gossip.PublishAsync(Beat(3, latency: 9))).Accepted); // equivocation: forwarded as evidence
+        Assert.Equal(TelemetryRejection.ReplayLimit, (await gossip.PublishAsync(Beat(3, latency: 7))).Rejection); // capped at two copies per key
+        Assert.Equal(TelemetryRejection.Duplicate, (await gossip.PublishAsync(Beat(3, latency: 9))).Rejection); // exact copy: Duplicate wins
         Assert.Equal(2, received);
         Assert.Equal(2, gossip.Heartbeats.Count);
     }
@@ -286,10 +287,39 @@ public sealed class TelemetryPipelineTests : IDisposable
         var now = Schedule.EpochStart(1) + 10 * 300 + 5;
         var admission = new TelemetryAdmission(Schedule, new ManualTime(DateTimeOffset.FromUnixTimeSeconds(now)));
         var gossip = new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry, admission);
-        Assert.True(await gossip.PublishAsync(Beat(10, epoch: 1)));      // live
-        Assert.False(await gossip.PublishAsync(Beat(2, epoch: 1)));      // signed 40 minutes ago: backfill
-        Assert.False(await gossip.PublishAsync(Beat(10, epoch: 3, at: now))); // epoch too far ahead
+        Assert.True((await gossip.PublishAsync(Beat(10, epoch: 1))).Accepted);      // live
+        Assert.Equal(TelemetryRejection.ClockSkew, (await gossip.PublishAsync(Beat(2, epoch: 1))).Rejection); // signed 40 minutes ago: backfill
+        Assert.Equal(TelemetryRejection.EpochOutOfRange, (await gossip.PublishAsync(Beat(10, epoch: 3, at: now))).Rejection); // epoch too far ahead
         Assert.Single(gossip.Heartbeats);
+    }
+
+    [Fact]
+    public async Task Gossip_ReportsWhyAnAttestationWasRejected()
+    {
+        var now = Schedule.EpochStart(1) + 10 * 300 + 5;
+        var admission = new TelemetryAdmission(Schedule, new ManualTime(DateTimeOffset.FromUnixTimeSeconds(now)));
+        var gossip = new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry, admission);
+        var live = Attest(10, epoch: 1, at: now);
+        Assert.True((await gossip.PublishAsync(live)).Accepted);
+        Assert.Equal(TelemetryRejection.Duplicate, (await gossip.PublishAsync(live)).Rejection);
+        Assert.Equal(TelemetryRejection.InvalidSignature, (await gossip.PublishAsync(Attest(11, epoch: 1, at: now) with { Signature = live.Signature })).Rejection);
+        Assert.Equal(TelemetryRejection.ClockSkew, (await gossip.PublishAsync(Attest(12, epoch: 1, at: now + 3_600))).Rejection);
+        Assert.Equal(TelemetryRejection.EpochOutOfRange, (await gossip.PublishAsync(Attest(10, epoch: 3, at: now))).Rejection);
+    }
+
+    [Theory]
+    [InlineData(-400, "400 s behind")]
+    [InlineData(400, "400 s ahead of")]
+    public void Admission_DescribesClockSkewDirection(long offset, string expected)
+    {
+        var now = Schedule.EpochStart(1) + 10 * 300;
+        var admission = new TelemetryAdmission(Schedule, new ManualTime(DateTimeOffset.FromUnixTimeSeconds(now)));
+
+        var result = admission.Check(1, now + offset);
+
+        Assert.Equal(TelemetryRejection.ClockSkew, result.Rejection);
+        Assert.Contains(expected, result.Describe());
+        Assert.Contains($"±{Schedule.CadenceSeconds + admission.ClockSkewSeconds} s", result.Describe());
     }
 
     [Fact]
@@ -348,6 +378,25 @@ public sealed class TelemetryPipelineTests : IDisposable
         Assert.Equal(3UL, beat.Payload.EpochIndex); // floor((t - G) / 3600)
         Assert.Equal(3u, beat.Payload.SampleIndex); // 905 s into the epoch, 300 s slots
         Assert.Equal(3UL, diagnostics.Current.LastAccepted!.Epoch);
+    }
+
+    // Issue #183: Diagnostics shows the specific admission rule, not a generic "wrong epoch or slot, or a replay".
+    [Fact]
+    public async Task Emitter_ReportsTheSpecificRejectionReason()
+    {
+        var time = new ManualTime(DateTimeOffset.FromUnixTimeSeconds(Genesis + 86_400 + 301));
+        var stale = new TelemetryAdmission(new TelemetrySchedule(Genesis - 10 * 86_400, 86_400), time); // disagrees with the emitter's epoch
+        var gossip = new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry, stale);
+        var options = Microsoft.Extensions.Options.Options.Create(new TelemetryOptions { Enabled = true, GenesisUnixSeconds = Genesis });
+        var diagnostics = new TelemetryDiagnostics();
+        var emitter = new HeartbeatEmitter(_node, gossip, new LivenessOnlyMetricsSource(), options, time,
+            NullLogger<HeartbeatEmitter>.Instance, diagnostics: diagnostics);
+
+        await emitter.EmitOnceAsync(CancellationToken.None);
+
+        var rejected = diagnostics.Current.LastRejected!;
+        Assert.Contains("epoch 1 is not within one of the current epoch 11", rejected.Reason);
+        Assert.DoesNotContain("or a replay", rejected.Reason);
     }
 
     [Fact]

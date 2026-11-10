@@ -123,15 +123,20 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
         remove => _store.AttestationReceived -= value;
     }
 
-    public async ValueTask<bool> PublishAsync(SignedTelemetry<HeartbeatSample> sample, CancellationToken ct = default)
+    public async ValueTask<TelemetryPublishResult> PublishAsync(SignedTelemetry<HeartbeatSample> sample, CancellationToken ct = default)
     {
         var stored = await _store.PublishAsync(sample, ct);
-        Count(stored, Metrics.Emitted);
+        Count(stored, Metrics.Emitted, Metrics.EmittedRejected);
         return stored;
     }
 
-    public ValueTask<bool> PublishAsync(SignedTelemetry<Attestation> attestation, CancellationToken ct = default) =>
-        _store.PublishAsync(attestation, ct);
+    public async ValueTask<TelemetryPublishResult> PublishAsync(SignedTelemetry<Attestation> attestation, CancellationToken ct = default)
+    {
+        // Emitted has only ever counted heartbeats; attestations feed the per-reason rejections only.
+        var stored = await _store.PublishAsync(attestation, ct);
+        Count(stored, null, Metrics.EmittedRejected);
+        return stored;
+    }
 
     public bool Publish(CheckpointEndorsement endorsement)
     {
@@ -160,12 +165,12 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
     {
         foreach (var h in envelope.Heartbeats ?? [])
         {
-            Count(await _store.PublishAsync(h, ct), Metrics.Received);
+            Count(await _store.PublishAsync(h, ct), Metrics.Received, Metrics.ReceivedRejected);
         }
 
         foreach (var a in envelope.Attestations ?? [])
         {
-            Count(await _store.PublishAsync(a, ct), Metrics.Received);
+            Count(await _store.PublishAsync(a, ct), Metrics.Received, Metrics.ReceivedRejected);
         }
 
         foreach (var e in envelope.Endorsements ?? [])
@@ -283,11 +288,15 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
 
     internal int MaxItemsPerRequest => _options.MaxItemsPerRequest;
 
-    private static void Count(bool stored, TelemetryCounter counter)
+    private static void Count(TelemetryPublishResult result, TelemetryCounter? accepted, TelemetryRejectionCounters rejected)
     {
-        if (stored)
+        if (result.Accepted)
         {
-            counter.Increment();
+            accepted?.Increment();
+        }
+        else
+        {
+            rejected[result.Rejection].Increment();
         }
     }
 }
@@ -301,6 +310,14 @@ public sealed class TelemetryCounter
     public void Increment() => Interlocked.Increment(ref _value);
 }
 
+/// <summary>One <see cref="TelemetryCounter"/> per <see cref="TelemetryRejection"/> (#183).</summary>
+public sealed class TelemetryRejectionCounters
+{
+    private readonly TelemetryCounter[] _counters = [.. Enum.GetValues<TelemetryRejection>().Select(_ => new TelemetryCounter())];
+
+    public TelemetryCounter this[TelemetryRejection rejection] => _counters[(int)rejection];
+}
+
 /// <summary>Gossip counters (#158 FR6).</summary>
 public sealed class TelemetryGossipMetrics
 {
@@ -310,6 +327,12 @@ public sealed class TelemetryGossipMetrics
     public TelemetryCounter Emitted { get; } = new();
 
     public TelemetryCounter Received { get; } = new();
+
+    /// <summary>Locally published items refused, by reason (#183).</summary>
+    public TelemetryRejectionCounters EmittedRejected { get; } = new();
+
+    /// <summary>Items received from peers and refused, by reason (#183); e.g. a peer with a skewed clock.</summary>
+    public TelemetryRejectionCounters ReceivedRejected { get; } = new();
 
     public long Pushed => Interlocked.Read(ref PushedField);
 
