@@ -12,11 +12,11 @@ namespace Symposia.Network.Node.Telemetry;
 /// </summary>
 public interface ITelemetryGossip
 {
-    /// <summary>Publishes a signed heartbeat; returns false if it was invalid, stale or a replay.</summary>
-    ValueTask<bool> PublishAsync(SignedTelemetry<HeartbeatSample> sample, CancellationToken ct = default);
+    /// <summary>Publishes a signed heartbeat; the result says why it was refused if it was invalid, stale or a replay.</summary>
+    ValueTask<TelemetryPublishResult> PublishAsync(SignedTelemetry<HeartbeatSample> sample, CancellationToken ct = default);
 
-    /// <summary>Publishes a signed attestation; returns false if it was invalid, stale or a replay.</summary>
-    ValueTask<bool> PublishAsync(SignedTelemetry<Attestation> attestation, CancellationToken ct = default);
+    /// <summary>Publishes a signed attestation; the result says why it was refused if it was invalid, stale or a replay.</summary>
+    ValueTask<TelemetryPublishResult> PublishAsync(SignedTelemetry<Attestation> attestation, CancellationToken ct = default);
 
     event Action<SignedTelemetry<HeartbeatSample>>? HeartbeatReceived;
 
@@ -34,17 +34,23 @@ public sealed record TelemetryAdmission(TelemetrySchedule Schedule, TimeProvider
     /// <summary>When set (#158), admission follows the chain-synced schedule instead of <see cref="Schedule"/>.</summary>
     public TelemetryScheduleSource? Source { get; init; }
 
-    public bool Admits(ulong epoch, long claimedUnixSeconds)
+    /// <summary>Admits the item, or says which rule refused it (#183).</summary>
+    public TelemetryPublishResult Check(ulong epoch, long claimedUnixSeconds)
     {
         var schedule = Source?.Current ?? Schedule;
         var now = Clock.GetUtcNow().ToUnixTimeSeconds();
-        if (Math.Abs(now - claimedUnixSeconds) > schedule.CadenceSeconds + ClockSkewSeconds)
+        var window = schedule.CadenceSeconds + ClockSkewSeconds;
+        var behind = now - claimedUnixSeconds;
+        if (Math.Abs(behind) > window)
         {
-            return false;
+            return TelemetryPublishResult.Reject(TelemetryRejection.ClockSkew,
+                $"claimed time is {Math.Abs(behind)} s {(behind > 0 ? "behind" : "ahead of")} this node's clock (allowed ±{window} s)");
         }
 
         var current = schedule.EpochAt(now);
-        return epoch + 1 >= current && epoch <= current + 1;
+        return epoch + 1 >= current && epoch <= current + 1
+            ? TelemetryPublishResult.Ok
+            : TelemetryPublishResult.Reject(TelemetryRejection.EpochOutOfRange, $"epoch {epoch} is not within one of the current epoch {current}");
     }
 }
 
@@ -72,30 +78,48 @@ public sealed class InMemoryTelemetryGossip(ulong chainId, string registry, Tele
 
     public IReadOnlyCollection<SignedTelemetry<Attestation>> Attestations => Snapshot(_attestations);
 
-    public ValueTask<bool> PublishAsync(SignedTelemetry<HeartbeatSample> sample, CancellationToken ct = default)
+    public ValueTask<TelemetryPublishResult> PublishAsync(SignedTelemetry<HeartbeatSample> sample, CancellationToken ct = default)
     {
-        if ((admission is not null && !admission.Admits(sample.Payload.EpochIndex, sample.Payload.UnixSeconds))
-            || !TelemetrySigning.Verify(sample, chainId, registry)
-            || !TryStore(_heartbeats, sample.Payload.ReplayKey, sample))
+        // Same rules, same order as before #183; the first one that fails is the reason.
+        var result = admission?.Check(sample.Payload.EpochIndex, sample.Payload.UnixSeconds) ?? TelemetryPublishResult.Ok;
+        if (result.Accepted && !TelemetrySigning.Verify(sample, chainId, registry))
         {
-            return ValueTask.FromResult(false);
+            result = TelemetryPublishResult.Reject(TelemetryRejection.InvalidSignature);
         }
 
-        HeartbeatReceived?.Invoke(sample);
-        return ValueTask.FromResult(true);
+        if (result.Accepted)
+        {
+            result = TryStore(_heartbeats, sample.Payload.ReplayKey, sample);
+        }
+
+        if (result.Accepted)
+        {
+            HeartbeatReceived?.Invoke(sample);
+        }
+
+        return ValueTask.FromResult(result);
     }
 
-    public ValueTask<bool> PublishAsync(SignedTelemetry<Attestation> attestation, CancellationToken ct = default)
+    public ValueTask<TelemetryPublishResult> PublishAsync(SignedTelemetry<Attestation> attestation, CancellationToken ct = default)
     {
-        if ((admission is not null && !admission.Admits(attestation.Payload.EpochIndex, attestation.Payload.UnixSeconds))
-            || !TelemetrySigning.Verify(attestation, chainId, registry)
-            || !TryStore(_attestations, attestation.Payload.ReplayKey, attestation))
+        // Same rules, same order as before #183; the first one that fails is the reason.
+        var result = admission?.Check(attestation.Payload.EpochIndex, attestation.Payload.UnixSeconds) ?? TelemetryPublishResult.Ok;
+        if (result.Accepted && !TelemetrySigning.Verify(attestation, chainId, registry))
         {
-            return ValueTask.FromResult(false);
+            result = TelemetryPublishResult.Reject(TelemetryRejection.InvalidSignature);
         }
 
-        AttestationReceived?.Invoke(attestation);
-        return ValueTask.FromResult(true);
+        if (result.Accepted)
+        {
+            result = TryStore(_attestations, attestation.Payload.ReplayKey, attestation);
+        }
+
+        if (result.Accepted)
+        {
+            AttestationReceived?.Invoke(attestation);
+        }
+
+        return ValueTask.FromResult(result);
     }
 
     /// <summary>Drops everything before <paramref name="epoch"/> once its aggregate is final.</summary>
@@ -114,22 +138,27 @@ public sealed class InMemoryTelemetryGossip(ulong chainId, string registry, Tele
 
     /// <summary>
     /// Stores the first copy for a key, plus one conflicting copy (a different payload, which is
-    /// equivocation). Returns false for exact duplicates (same payload) and anything beyond that.
+    /// equivocation). Refuses exact duplicates (same payload) first, then anything beyond that.
     /// </summary>
-    private static bool TryStore<TKey, T>(ConcurrentDictionary<TKey, List<SignedTelemetry<T>>> store, TKey key, SignedTelemetry<T> item)
+    private static TelemetryPublishResult TryStore<TKey, T>(ConcurrentDictionary<TKey, List<SignedTelemetry<T>>> store, TKey key, SignedTelemetry<T> item)
         where TKey : notnull
         where T : class
     {
         var copies = store.GetOrAdd(key, _ => []);
         lock (copies)
         {
-            if (copies.Count >= MaxCopiesPerKey || copies.Any(c => Equals(c.Payload, item.Payload)))
+            if (copies.Any(c => Equals(c.Payload, item.Payload)))
             {
-                return false;
+                return TelemetryPublishResult.Reject(TelemetryRejection.Duplicate);
+            }
+
+            if (copies.Count >= MaxCopiesPerKey)
+            {
+                return TelemetryPublishResult.Reject(TelemetryRejection.ReplayLimit);
             }
 
             copies.Add(item);
-            return true;
+            return TelemetryPublishResult.Ok;
         }
     }
 

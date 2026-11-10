@@ -3,6 +3,7 @@ using System.Numerics;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Contracts;
 using Nethereum.Hex.HexTypes;
+using Nethereum.JsonRpc.Client;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
 
@@ -55,9 +56,11 @@ public sealed class NethereumLedgerLogSource(string rpcUrl, string registry, str
             var code = await _web3.Eth.GetCode.SendRequestAsync(registry, new BlockParameter(new HexBigInteger(block)));
             return code is { Length: > 2 };
         }
-        catch (Exception)
+        catch (RpcResponseException)
         {
-            return true; // a node without archive state can't answer for old blocks: scan from there
+            // A node without archive state can't answer for old blocks: scan from there. Transport
+            // failures (a 429 from the gateway, say) propagate, so they never pin a start block (#182).
+            return true;
         }
     }
 
@@ -93,8 +96,9 @@ public sealed class NethereumLedgerLogSource(string rpcUrl, string registry, str
     private static bool TopicIsNode(string? topic, string node) =>
         topic is not null && topic.EndsWith(node[2..], StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The block's hash, or "" when the chain doesn't have it.</summary>
     public async Task<string> BlockHashAsync(ulong block, CancellationToken ct) =>
-        (await _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new HexBigInteger(block))).BlockHash;
+        (await _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(new HexBigInteger(block)))?.BlockHash ?? "";
 
     public async Task<long> BlockTimestampAsync(ulong block, CancellationToken ct)
     {

@@ -5,7 +5,7 @@ Thanks for helping build Symposia. This page covers how to get a change merged. 
 ## Workflow
 
 - **Issues** are titled `Feature: …` or `Bug: …`. Larger work goes through spec → QA plan → architecture plan on the issue before implementation.
-- **Branches** follow GitFlow: `master` → `dev` → `qa` → `stage` → `production`. Branch from `dev` as `feature_<issue>_<shortName>` or `bug_<issue>_<shortName>`, and open your PR into `dev`.
+- **Branches** follow GitFlow: `master` → `dev` → `qa` → `stage`. `master` is production; there is no `production` branch. Work is promoted `dev` → `qa` → `stage` → `master`. Branch from `dev` as `feature_<issue>_<shortName>` or `bug_<issue>_<shortName>`, and open your PR into `dev`.
 - **Pull requests** fill in the template, including the compatibility checklist when it applies.
 - **Merging:** a maintainer approves, and every required check must pass. Changes to protocol areas need a code owner's review (`.github/CODEOWNERS`).
 
