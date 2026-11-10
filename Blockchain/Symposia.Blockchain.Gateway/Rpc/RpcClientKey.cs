@@ -29,29 +29,44 @@ internal static class RpcClientKey
         return Bucket(client);
     }
 
-    /// <summary>The right-most entry that isn't a trusted proxy; the left-most if all are; null if any entry is malformed.</summary>
+    /// <summary>
+    /// Walks from the right, stopping at the first hop that isn't a trusted proxy: everything left of
+    /// it was written by the client and is never parsed. If every hop is trusted, the left-most.
+    /// Null when the hop it stops at won't parse, so the caller falls back to the peer.
+    /// </summary>
     private static IPAddress? FromForwardedFor(string header, IReadOnlyList<IPNetwork> trusted)
     {
-        var hops = new List<IPAddress>();
-        foreach (var entry in header.Split(',', StringSplitOptions.TrimEntries))
+        var hops = header.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        IPAddress? last = null;
+        for (var i = hops.Length - 1; i >= 0; i--)
         {
-            if (!IPAddress.TryParse(entry, out var hop))
+            if (!TryParseHop(hops[i], out var hop))
             {
                 return null;
             }
 
-            hops.Add(Normalize(hop));
-        }
-
-        for (var i = hops.Count - 1; i >= 0; i--)
-        {
-            if (!IsTrusted(hops[i], trusted))
+            if (!IsTrusted(hop, trusted))
             {
-                return hops[i];
+                return hop;
             }
+
+            last = hop;
         }
 
-        return hops.Count > 0 ? hops[0] : null;
+        return last;
+    }
+
+    /// <summary>Accepts <c>1.2.3.4</c>, <c>1.2.3.4:5678</c>, <c>2001:db8::1</c> and <c>[2001:db8::1]:5678</c>.</summary>
+    private static bool TryParseHop(string text, out IPAddress address)
+    {
+        if (IPEndPoint.TryParse(text, out var endpoint))
+        {
+            address = Normalize(endpoint.Address);
+            return true;
+        }
+
+        address = IPAddress.None;
+        return false;
     }
 
     public static bool TryParseNetwork(string text, out IPNetwork network)

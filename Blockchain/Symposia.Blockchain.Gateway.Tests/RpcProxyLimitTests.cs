@@ -97,6 +97,28 @@ public sealed class RpcProxyLimitTests
         Assert.True(limited.Headers.RetryAfter!.Delta >= TimeSpan.FromSeconds(1));
     }
 
+    // #182 review: buckets refill at the configured rate, not up to half of it (a timer tick that
+    // lands just short of the refill period must not skip a second).
+    [Fact]
+    public async Task Bucket_RefillsAtTheConfiguredRate()
+    {
+        await using var gateway = Gateway(RefusedUpstream());
+        var client = gateway.CreateClient();
+        for (var i = 0; i < 5; i++)
+        {
+            await CallAsync(client);
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(3.5)); // 1 token/s: three back
+        var allowed = 0;
+        for (var i = 0; i < 5; i++)
+        {
+            allowed += (await CallAsync(client)).Response.StatusCode == HttpStatusCode.OK ? 1 : 0;
+        }
+
+        Assert.Equal(3, allowed);
+    }
+
     [Fact]
     public async Task DifferentClients_HaveIndependentBudgets()
     {
@@ -224,7 +246,10 @@ public sealed class RpcProxyLimitTests
     [InlineData("10.0.0.1", "192.0.2.1", "192.0.2.1")]
     [InlineData("10.0.0.1", "192.0.2.1, 10.0.0.5", "192.0.2.1")] // right-most untrusted hop
     [InlineData("10.0.0.1", "10.0.0.7, 10.0.0.5", "10.0.0.7")] // all trusted: left-most
-    [InlineData("10.0.0.1", "garbage", "10.0.0.1")] // malformed: the peer
+    [InlineData("10.0.0.1", "garbage", "10.0.0.1")] // the hop it stops at is malformed: the peer
+    [InlineData("10.0.0.1", "garbage, 192.0.2.1", "192.0.2.1")] // client-written junk left of the real hop is never parsed
+    [InlineData("10.0.0.1", "192.0.2.1:5678", "192.0.2.1")]
+    [InlineData("10.0.0.1", "[2001:db8:1:2::9]:443", "2001:db8:1:2::/64")]
     [InlineData("::ffff:203.0.113.7", null, "203.0.113.7")]
     [InlineData("2001:db8:1:2:aaaa::1", null, "2001:db8:1:2::/64")]
     public void ClientKey_ResolvesTheBucket(string? peer, string? forwardedFor, string expected)
@@ -235,23 +260,80 @@ public sealed class RpcProxyLimitTests
     }
 
     [Fact]
-    public void IdleBuckets_AreEvicted_AfterAnIpSweep()
+    public void IdleBuckets_AreEvicted_OnceFull_AfterAnIpSweep()
     {
-        using var limiter = new RpcProxyLimiter(new RpcRateLimitOptions { TokensPerSecond = 100, BurstTokens = 100 });
-        for (var i = 0; i < 20_000; i++)
+        using var limiter = new RpcProxyLimiter(new RpcRateLimitOptions { TokensPerSecond = 2, BurstTokens = 4 });
+        for (var i = 0; i < 100_000; i++)
         {
-            limiter.TryTake($"198.51.{i / 256}.{i % 256}", 1);
+            limiter.TryTake($"198.51.{i / 256 % 256}.{i % 256}/{i / 65_536}", 3);
         }
 
-        // Each bucket is full again after a second and idle; the partitioned limiter disposes it.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
-        var before = GC.GetTotalMemory(forceFullCollection: true);
-        while (DateTime.UtcNow < deadline && GC.GetTotalMemory(forceFullCollection: true) > before / 2)
-        {
-            Thread.Sleep(500);
-        }
+        Assert.Equal(100_000, limiter.BucketCount);
 
-        Assert.True(GC.GetTotalMemory(forceFullCollection: true) <= before / 2 + 4 * 1024 * 1024, "idle buckets were not evicted");
+        // A bucket only refills once a whole period has passed, so each tick here waits for one.
+        Thread.Sleep(1_100);
+        limiter.Replenish(); // 1 + 2 = 3 of 4: not full yet, so nothing is evicted (no free refill)
+        Assert.Equal(100_000, limiter.BucketCount);
+
+        Thread.Sleep(1_100);
+        limiter.Replenish(); // full and idle
+        Assert.Equal(0, limiter.BucketCount);
+    }
+
+    // Real Kestrel, not TestServer: TestServer doesn't honour cancellation while a body is being read.
+    // It listens on a Unix socket so it can never take a TCP port a chain fixture is about to bind.
+    [Fact]
+    public async Task SlowBody_DoesNotHoldAConcurrencySlot_AndTimesOut()
+    {
+        var socketPath = Path.Combine(Path.GetTempPath(), $"rpc-{Guid.NewGuid():N}.sock");
+        await using var app = GatewayApp.Create(new WebApplicationOptions
+        {
+            Args =
+            [
+                $"--Gateway:RpcUrl={RefusedUpstream()}",
+                "--Gateway:RpcProxy:TimeoutSeconds=2",
+                "--Gateway:RpcProxy:RateLimit:MaxConcurrentRequests=1",
+            ],
+        }, b => b.WebHost.ConfigureKestrel(k => k.ListenUnixSocket(socketPath)));
+        await app.StartAsync();
+        try
+        {
+            // The trickling call: headers promise 100 bytes, a few arrive, the rest never do.
+            using var slow = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            await slow.ConnectAsync(new UnixDomainSocketEndPoint(socketPath));
+            await slow.SendAsync(Encoding.ASCII.GetBytes(
+                "POST /v1/rpc HTTP/1.1\r\nHost: gateway\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"jsonrpc\":"));
+            await Task.Delay(300);
+
+            using var client = new HttpClient(new SocketsHttpHandler
+            {
+                ConnectCallback = async (_, ct) =>
+                {
+                    var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                    await socket.ConnectAsync(new UnixDomainSocketEndPoint(socketPath), ct);
+                    return new NetworkStream(socket, ownsSocket: true);
+                },
+            }) { BaseAddress = new Uri("http://gateway") };
+            var (other, _) = await CallAsync(client, peer: null);
+            Assert.Equal(HttpStatusCode.OK, other.StatusCode); // the trickling call holds no concurrency slot
+
+            var response = new StringBuilder();
+            var buffer = new byte[4096];
+            using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while (!response.ToString().Contains("not received", StringComparison.Ordinal))
+            {
+                var read = await slow.ReceiveAsync(buffer, SocketFlags.None, wait.Token);
+                Assert.True(read > 0, $"connection closed without the timeout error: {response}");
+                response.Append(Encoding.UTF8.GetString(buffer, 0, read));
+            }
+
+            Assert.Contains("not received within 2 s", response.ToString());
+        }
+        finally
+        {
+            await app.StopAsync();
+            File.Delete(socketPath);
+        }
     }
 
     private sealed class PeerFromHeader : IStartupFilter

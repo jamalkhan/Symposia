@@ -134,10 +134,16 @@ public sealed class LedgerService(
         }
 
         var keepTo = cursor.ScannedTo > ReorgRewind ? cursor.ScannedTo - ReorgRewind : 0;
+        var keepHash = keepTo == 0 ? "" : await source.BlockHashAsync(keepTo, ct);
+        if (keepHash.Length == 0)
+        {
+            keepTo = 0; // the chain doesn't reach keepTo either (e.g. reset to a shorter one): start over
+        }
+
         var kept = keepTo == 0 ? [] : entries.Where(e => e.Block <= keepTo).ToList();
         _entries.AddRange(kept);
         _cursor = keepTo == 0 ? null : keepTo;
-        _store.Replace(kept, new LedgerStore.Cursor(keepTo, keepTo == 0 ? "" : await source.BlockHashAsync(keepTo, ct)));
+        _store.Replace(kept, new LedgerStore.Cursor(keepTo, keepHash));
     }
 
     private async Task ScanAsync(ILedgerLogSource source, CancellationToken ct)
@@ -172,7 +178,14 @@ public sealed class LedgerService(
                 }
             }
 
-            _store?.Append(chunk, new LedgerStore.Cursor(to, await source.BlockHashAsync(to, ct)));
+            // A lagging upstream may not have `to` yet; never persist a cursor without its hash.
+            var hash = await source.BlockHashAsync(to, ct);
+            if (hash.Length == 0)
+            {
+                throw new InvalidOperationException($"The chain returned no block {to}; the ledger scan will retry.");
+            }
+
+            _store?.Append(chunk, new LedgerStore.Cursor(to, hash));
             _entries.AddRange(chunk);
             _cursor = to;
             from = to + 1;

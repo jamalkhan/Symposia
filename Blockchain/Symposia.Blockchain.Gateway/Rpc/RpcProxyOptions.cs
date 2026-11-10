@@ -18,6 +18,10 @@ public sealed class RpcProxyOptions
     public int MaxConnections { get; set; } = 16;
 
     public RpcRateLimitOptions RateLimit { get; set; } = new();
+
+    /// <summary>The first invalid setting, named by its configuration key, or null when all are valid.</summary>
+    internal string? Validate() =>
+        MaxLogBlockRange == 0 ? "Gateway:RpcProxy:MaxLogBlockRange must be at least 1." : RateLimit.Validate();
 }
 
 /// <summary>

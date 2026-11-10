@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nethereum.Hex.HexConvertors.Extensions;
 using Nethereum.Util;
@@ -397,6 +399,30 @@ public sealed class TelemetryPipelineTests : IDisposable
         var rejected = diagnostics.Current.LastRejected!;
         Assert.Contains("epoch 1 is not within one of the current epoch 11", rejected.Reason);
         Assert.DoesNotContain("or a replay", rejected.Reason);
+    }
+
+    // #183 review: outside committee mode, admission follows the chain-synced schedule too, so a
+    // heartbeat stamped under it isn't refused as EpochOutOfRange by the static placeholder.
+    [Fact]
+    public async Task RegisteredGossip_AdmitsUnderTheChainSyncedSchedule()
+    {
+        var chain = new TelemetrySchedule(Genesis - 10 * 86_400, 86_400);
+        var now = chain.EpochStart(15) + 3 * 300 + 7;
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Node:Telemetry:Enabled"] = "true",
+            ["Node:Telemetry:GenesisUnixSeconds"] = Genesis.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        }).Build();
+        var services = new ServiceCollection();
+        services.AddSingleton<TimeProvider>(new ManualTime(DateTimeOffset.FromUnixTimeSeconds(now)));
+        services.Configure<NodeNetworkOptions>(o => (o.ChainId, o.NodeRegistryAddress) = (TestSupport.ChainId, TestSupport.Registry));
+        services.AddTelemetryHeartbeats(config.GetSection("Node"));
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<TelemetryScheduleSource>().Publish(chain);
+
+        var beat = _node.SignHeartbeat(new HeartbeatSample(_node.NodeId, 15, 3, now, 1, 1, 1, 1, 50, 120, 5_000, 1_000));
+
+        Assert.True((await sp.GetRequiredService<ITelemetryGossip>().PublishAsync(beat)).Accepted);
     }
 
     [Fact]
