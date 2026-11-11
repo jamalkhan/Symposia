@@ -215,6 +215,40 @@ public sealed class OperationHistoryTests(GatewayFixture f) : IClassFixture<Gate
         Assert.Equal(2, dir.Store.Query("b", "k", null, null, null, 0, 10).Count);
     }
 
+    // Review (Lenny #10): /v1 operations land in history too, and since/until filter by time.
+    [Fact]
+    public async Task V1Operations_AreRecorded_AndFilterByTime()
+    {
+        var bucket = await BucketAsync();
+        var content = new ByteArrayContent(Encoding.UTF8.GetBytes("hello"));
+        content.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        (await _api.PutAsync($"/v1/buckets/{bucket}/objects/v", content)).EnsureSuccessStatusCode();
+        (await _api.GetAsync($"/v1/buckets/{bucket}/objects/v")).EnsureSuccessStatusCode();
+        (await _api.DeleteAsync($"/v1/buckets/{bucket}/objects/v")).EnsureSuccessStatusCode();
+
+        var entries = await HistoryAsync(bucket, "v", 3);
+        Assert.Equal(["insert", "view", "delete"], entries.Select(e => e.GetProperty("operation").GetString()));
+        Assert.All(entries, e => Assert.Equal("v1", e.GetProperty("api").GetString()));
+        Assert.Equal(5, entries[1].GetProperty("size").GetInt64()); // bytes actually served
+
+        var future = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddHours(1).ToString("O"));
+        Assert.Empty(await HistoryAsync(bucket, "v", 1, $"&since={future}"));
+        Assert.Equal(3, (await HistoryAsync(bucket, "v", 3, $"&until={future}")).Length);
+        Assert.Equal(HttpStatusCode.BadRequest, (await _api.GetAsync($"/v1/buckets/{bucket}/objects/v?history&since=yesterday")).StatusCode);
+    }
+
+    // Review (Frank #2): incremental auto-vacuum must be set before WAL initialises the file, or sweeps never shrink it.
+    [Fact]
+    public void HistoryDb_UsesIncrementalAutoVacuum()
+    {
+        using var dir = new TempHistory();
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dir.Store.DatabasePath}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA auto_vacuum;";
+        Assert.Equal(2L, (long)cmd.ExecuteScalar()!); // 2 = INCREMENTAL
+    }
+
     private static HistoryEntry Entry(DateTimeOffset at, string requestId) =>
         new(0, at, HistoryOperation.View, "b", "k", "s3", 1, null, null, "127.0.0.1", "AK", "t", null, requestId, "Success", 200);
 

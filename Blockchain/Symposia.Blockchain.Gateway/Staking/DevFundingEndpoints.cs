@@ -25,9 +25,9 @@ public static class DevFundingEndpoints
     public static IEndpointRouteBuilder MapDevFunding(this IEndpointRouteBuilder app)
     {
         var state = new State();
-        app.MapPost(DevFunding.FundPath, async (DevFundRequest req, RelayerAccount relayer, IOptions<GatewayOptions> options, CancellationToken ct) =>
+        app.MapPost(DevFunding.FundPath, async (DevFundRequest req, RelayerAccount relayer, LocalDevChain chain, IOptions<GatewayOptions> options, CancellationToken ct) =>
         {
-            if (!await state.IsLocalDevAsync(relayer, options.Value) || options.Value.StakingRegistryAddress.Length == 0)
+            if (!await chain.IsLocalDevAsync() || options.Value.StakingRegistryAddress.Length == 0)
             {
                 return Results.NotFound();
             }
@@ -39,7 +39,7 @@ public static class DevFundingEndpoints
 
             if (DevFunding.Validate(req.Node, req.UnixSeconds, req.Signature, DevFunding.FundDigest(DevFunding.LocalDevChainId, req.Node, req.Services, req.UnixSeconds), DateTimeOffset.UtcNow) is { } invalid)
             {
-                return Results.Json(new { error = invalid }, statusCode: StatusCodes.Status401Unauthorized);
+                return Refused(invalid);
             }
 
             if (!state.Admit("fund:" + req.Node))
@@ -80,17 +80,17 @@ public static class DevFundingEndpoints
             return Results.Ok(new { mintedWei = minted.ToString(CultureInfo.InvariantCulture), gasSentEther = sent });
         });
 
-        app.MapPost(DevFunding.VerifyPath, async (DevVerifyRequest req, RelayerAccount relayer, IOptions<GatewayOptions> options, CancellationToken ct) =>
+        app.MapPost(DevFunding.VerifyPath, async (DevVerifyRequest req, RelayerAccount relayer, LocalDevChain chain, IOptions<GatewayOptions> options, CancellationToken ct) =>
         {
             var o = options.Value;
-            if (!await state.IsLocalDevAsync(relayer, o) || o.StakingRegistryAddress.Length == 0 || o.EpochControllerAddress.Length == 0)
+            if (!await chain.IsLocalDevAsync() || o.StakingRegistryAddress.Length == 0 || o.EpochControllerAddress.Length == 0)
             {
                 return Results.NotFound();
             }
 
             if (DevFunding.Validate(req.Node, req.UnixSeconds, req.Signature, DevFunding.VerifyDigest(DevFunding.LocalDevChainId, req.Node, req.Service, req.UnixSeconds), DateTimeOffset.UtcNow) is { } invalid)
             {
-                return Results.Json(new { error = invalid }, statusCode: StatusCodes.Status401Unauthorized);
+                return Refused(invalid);
             }
 
             var status = (ServiceStatus)await relayer.Web3.Eth.GetContractQueryHandler<ServiceStatusOfFunction>()
@@ -121,6 +121,10 @@ public static class DevFundingEndpoints
         return app;
     }
 
+    /// <summary>401 for a missing, stale or malformed signature; 403 for a valid one by someone other than the node.</summary>
+    private static IResult Refused(string reason) =>
+        Results.Json(new { error = reason }, statusCode: reason == DevFunding.WrongSigner ? StatusCodes.Status403Forbidden : StatusCodes.Status401Unauthorized);
+
     private static async Task<string> TokenAsync(RelayerAccount relayer, string registry)
     {
         var config = await relayer.Web3.Eth.GetContractQueryHandler<ConfigFunction>().QueryAsync<string>(registry, new ConfigFunction());
@@ -130,20 +134,6 @@ public static class DevFundingEndpoints
     private sealed class State
     {
         private readonly ConcurrentDictionary<string, DateTimeOffset> _last = new();
-        private bool? _localDev;
-
-        /// <summary>The chain id is read once from the RPC, not trusted from config.</summary>
-        public async Task<bool> IsLocalDevAsync(RelayerAccount relayer, GatewayOptions options)
-        {
-            if (!options.DevFunding.Enabled)
-            {
-                return false;
-            }
-
-            _localDev ??= (ulong)(await relayer.Web3.Eth.ChainId.SendRequestAsync()).Value == DevFunding.LocalDevChainId;
-            return _localDev.Value;
-        }
-
         public bool Admit(string key)
         {
             var now = DateTimeOffset.UtcNow;

@@ -27,6 +27,9 @@ public static class DevFunding
     public const ulong LocalDevChainId = 31337;
     public static readonly TimeSpan MaxSkew = TimeSpan.FromSeconds(60);
 
+    /// <summary>The <see cref="Validate"/> reason when a well-formed signature is someone else's (403, not 401).</summary>
+    public const string WrongSigner = "signature does not match node";
+
     private static readonly EthereumMessageSigner MessageSigner = new();
 
     public static byte[] FundDigest(ulong chainId, string node, IEnumerable<DevFundService> services, long unixSeconds) =>
@@ -54,7 +57,7 @@ public static class DevFunding
         {
             return string.Equals(MessageSigner.EcRecover(digest, signature), node, StringComparison.OrdinalIgnoreCase)
                 ? null
-                : "signature does not match node";
+                : WrongSigner;
         }
         catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException or InvalidOperationException)
         {

@@ -198,8 +198,8 @@ internal static class MultipartEndpoints
 
         var parts = requested.Select(p => stored[p.PartNumber]).ToList();
         var finalEtag = MultipartEtag(parts.Select(p => p.Cid));
-        var written = History.HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? History.HistoryOperation.Insert : History.HistoryOperation.Update,
-            bucket, key, "s3");
+        // History (#204): labelled insert until the commit says whether it replaced an object.
+        var written = History.HistoryCapture.Mark(ctx, History.HistoryOperation.Insert, bucket, key, "s3");
         (written.Size, written.Etag) = (parts.Sum(p => p.SizeBytes), finalEtag);
 
         // Assembly runs detached from the request (#5 review): its own service scope, cancelled only by
@@ -213,7 +213,8 @@ internal static class MultipartEndpoints
         // Small uploads finish quickly: answer normally, with the right status code.
         if (await Task.WhenAny(assembly, Task.Delay(QuickCompleteWindow)) == assembly)
         {
-            var (ok, status, code, message) = await assembly;
+            var (ok, status, code, message, replaced) = await assembly;
+            written.Operation = replaced ? History.HistoryOperation.Update : History.HistoryOperation.Insert;
             return ok ? CompleteResult(ctx, bucket, key, finalEtag) : S3Xml.Error(status, code, message);
         }
 
@@ -230,6 +231,7 @@ internal static class MultipartEndpoints
             var heartbeat = KeepAliveAsync(ctx, keepAlive.Token);
             var result = await assembly;
             written.Outcome = result.Ok ? null : "Error"; // the status is already 200 on this path
+            written.Operation = result.Replaced ? History.HistoryOperation.Update : History.HistoryOperation.Insert;
             await keepAlive.CancelAsync();
             await heartbeat;
             await ctx.Response.WriteAsync(result.Ok ? document : ErrorDocument(result.Code, result.Message), ctx.RequestAborted);
@@ -249,7 +251,7 @@ internal static class MultipartEndpoints
     /// Assembles and commits. Every failure returns the upload to InProgress (so the client can retry
     /// or abort) and queues the assembled blob for deletion if it was written but not committed.
     /// </summary>
-    private static async Task<(bool Ok, int Status, string Code, string Message)> RunAssemblyAsync(
+    private static async Task<(bool Ok, int Status, string Code, string Message, bool Replaced)> RunAssemblyAsync(
         IServiceScopeFactory scopes, ILogger logger, MultipartUpload upload, List<MultipartPart> parts, string finalEtag,
         List<ChecksumExpectation> fullObject, bool ifNoneMatch, CancellationToken ct)
     {
@@ -266,35 +268,35 @@ internal static class MultipartEndpoints
             blob = await services.GetRequiredService<QuorumWriter>().WriteBlobAsync(upload.TenantId, upload.Bucket, upload.Key, assembled, ct);
             if (blob is null)
             {
-                return (false, 503, "ServiceUnavailable", "Write quorum was not reached while assembling the object.");
+                return (false, 503, "ServiceUnavailable", "Write quorum was not reached while assembling the object.", false);
             }
 
             // Quota (quota-management.md) would be enforced here once a quota engine exists; descoped (#5 addendum).
             var record = new ObjectRecord(upload.Bucket, upload.Key, blob.Cid, blob.SizeBytes, upload.ContentType,
                 DateTimeOffset.UtcNow, blob.NodeIds, finalEtag);
-            switch (store.CompleteUpload(upload.UploadId, record, finalEtag, CommittedJson(parts.Select(p => (p.PartNumber, p.Cid))), ifNoneMatch))
+            switch (store.CompleteUpload(upload.UploadId, record, finalEtag, CommittedJson(parts.Select(p => (p.PartNumber, p.Cid))), ifNoneMatch, out var replaced))
             {
                 case CompleteOutcome.PreconditionFailed:
-                    return (false, 412, "PreconditionFailed", "An object already exists at this key (If-None-Match: *).");
+                    return (false, 412, "PreconditionFailed", "An object already exists at this key (If-None-Match: *).", false);
                 case CompleteOutcome.LostLease:
-                    return (false, 409, "OperationAborted", "The upload changed state while it was being assembled; check it and retry.");
+                    return (false, 409, "OperationAborted", "The upload changed state while it was being assembled; check it and retry.", false);
             }
 
             committed = true;
             services.GetRequiredService<QuorumWriter>().RepairIfShort(blob);
             logger.LogInformation("Multipart upload {UploadId} completed: {Parts} parts, {Size} bytes, CID {Cid}, in {ElapsedMs} ms.",
                 upload.UploadId, parts.Count, blob.SizeBytes, blob.Cid, started.ElapsedMilliseconds);
-            return (true, 200, "", "");
+            return (true, 200, "", "", replaced);
         }
         catch (S3RequestRejectedException ex)
         {
             logger.LogWarning("Assembling upload {UploadId} rejected: {Code} {Message}", upload.UploadId, ex.Code, ex.Message);
-            return (false, ex.Status, ex.Code, ex.Message);
+            return (false, ex.Status, ex.Code, ex.Message, false);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Assembling upload {UploadId} failed.", upload.UploadId);
-            return (false, 500, "InternalError", "Assembling the object failed; retry the Complete request.");
+            return (false, 500, "InternalError", "Assembling the object failed; retry the Complete request.", false);
         }
         finally
         {

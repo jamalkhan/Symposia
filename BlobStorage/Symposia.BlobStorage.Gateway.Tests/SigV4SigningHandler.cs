@@ -5,7 +5,7 @@ using Symposia.BlobStorage.Gateway.Auth;
 namespace Symposia.BlobStorage.Gateway.Tests;
 
 /// <summary>Signs requests with AWS Signature V4 (header form, UNSIGNED-PAYLOAD) for tests of the /v1 API.</summary>
-internal sealed class SigV4SigningHandler(HttpMessageHandler inner, string accessKey, string secretKey, string region = "us-east-1")
+internal sealed class SigV4SigningHandler(HttpMessageHandler inner, string accessKey, string secretKey, string region = "us-east-1", bool keepPayloadHash = false)
     : DelegatingHandler(inner)
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -16,7 +16,9 @@ internal sealed class SigV4SigningHandler(HttpMessageHandler inner, string acces
         var uri = request.RequestUri!;
         request.Headers.Remove("x-amz-date");
         request.Headers.Add("x-amz-date", amzDate);
-        request.Headers.Add("x-amz-content-sha256", "UNSIGNED-PAYLOAD");
+        var payload = keepPayloadHash && request.Headers.TryGetValues("x-amz-content-sha256", out var given) ? given.Single() : "UNSIGNED-PAYLOAD";
+        request.Headers.Remove("x-amz-content-sha256");
+        request.Headers.Add("x-amz-content-sha256", payload);
         var host = uri.IsDefaultPort ? uri.Host : $"{uri.Host}:{uri.Port}";
 
         var path = string.Join('/', Uri.UnescapeDataString(uri.AbsolutePath).Split('/').Select(Encode));
@@ -25,7 +27,7 @@ internal sealed class SigV4SigningHandler(HttpMessageHandler inner, string acces
             .OrderBy(p => p.Item1, StringComparer.Ordinal).ThenBy(p => p.Item2, StringComparer.Ordinal)
             .Select(p => $"{p.Item1}={p.Item2}"));
         const string signed = "host;x-amz-content-sha256;x-amz-date";
-        var canonical = $"{request.Method.Method}\n{path}\n{query}\nhost:{host}\nx-amz-content-sha256:UNSIGNED-PAYLOAD\nx-amz-date:{amzDate}\n\n{signed}\nUNSIGNED-PAYLOAD";
+        var canonical = $"{request.Method.Method}\n{path}\n{query}\nhost:{host}\nx-amz-content-sha256:{payload}\nx-amz-date:{amzDate}\n\n{signed}\n{payload}";
         var scope = $"{dateStamp}/{region}/s3/aws4_request";
         var toSign = $"AWS4-HMAC-SHA256\n{amzDate}\n{scope}\n{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))}";
         var signature = SigV4Verifier.SignHex(SigV4Verifier.SigningKey(secretKey, dateStamp, region, "s3"), toSign);

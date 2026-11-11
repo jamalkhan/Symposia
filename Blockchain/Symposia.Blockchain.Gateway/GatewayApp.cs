@@ -23,6 +23,7 @@ public static class GatewayApp
         builder.Services.Configure<GatewayOptions>(builder.Configuration.GetSection("Gateway"));
         builder.Services.AddSingleton<RelayerAccount>();
         builder.Services.AddSingleton<BootstrapChainClient>();
+        builder.Services.AddSingleton<LocalDevChain>();
 
         var gateway = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
         if (gateway.EpochSealer.Enabled && gateway.RewardDistributorAddress.Length > 0 && gateway.EpochControllerAddress.Length > 0)

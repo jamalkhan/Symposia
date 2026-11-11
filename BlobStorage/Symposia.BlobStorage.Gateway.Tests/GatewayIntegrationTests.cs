@@ -439,8 +439,10 @@ public sealed class GatewayFixture : IAsyncLifetime
     }
 
     /// <summary>An HttpClient that SigV4-signs every request (#203's /v1 API), as an SDK or <c>curl --aws-sigv4</c> would.</summary>
-    public HttpClient SignedClient(string accessKey = "AKIAIOSFODNN7EXAMPLE", string secretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") =>
-        new(new SigV4SigningHandler(_gatewayFactory!.Server.CreateHandler(), accessKey, secretKey)) { BaseAddress = _gatewayFactory.Server.BaseAddress };
+    public HttpClient SignedClient(string accessKey = "AKIAIOSFODNN7EXAMPLE", string secretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        bool signPayloadHeader = false) =>
+        new(new SigV4SigningHandler(_gatewayFactory!.Server.CreateHandler(), accessKey, secretKey, keepPayloadHash: signPayloadHeader))
+        { BaseAddress = _gatewayFactory.Server.BaseAddress };
 
     public AmazonS3Client BuildS3Client(
         string accessKey = "AKIAIOSFODNN7EXAMPLE",

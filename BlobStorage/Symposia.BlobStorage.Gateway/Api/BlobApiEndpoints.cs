@@ -1,9 +1,7 @@
 using System.Text;
-using System.Text.RegularExpressions;
 using Symposia.BlobStorage.Gateway.History;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Gateway.Objects;
-using Symposia.BlobStorage.Gateway.Quorum;
 using Symposia.BlobStorage.Gateway.S3;
 
 namespace Symposia.BlobStorage.Gateway.Api;
@@ -15,7 +13,7 @@ namespace Symposia.BlobStorage.Gateway.Api;
 /// placement) now, operation history (#204) next. <c>/v1</c> can't collide with S3 paths because
 /// S3 bucket names are at least three characters. Auth is SigV4 with the gateway's access keys.
 /// </summary>
-public static partial class BlobApiEndpoints
+public static class BlobApiEndpoints
 {
     public const string Prefix = "/v1";
     public const string OpenApiPath = "/v1/openapi.json";
@@ -32,9 +30,9 @@ public static partial class BlobApiEndpoints
 
         v1.MapPut("/buckets/{bucket}", (string bucket, GatewayMetadataStore store) =>
         {
-            if (!IsValidBucketName(bucket))
+            if (!BucketNames.IsValid(bucket))
             {
-                return Error(400, "InvalidBucketName", "Bucket names are 3-63 lowercase letters, digits, dots and hyphens, starting and ending with a letter or digit.");
+                return Error(400, "InvalidBucketName", BucketNames.Rule);
             }
 
             store.CreateBucket(bucket); // idempotent, as in S3
@@ -73,32 +71,30 @@ public static partial class BlobApiEndpoints
             });
         });
 
-        v1.MapPut("/buckets/{bucket}/objects/{**key}", async (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, QuorumWriter writer) =>
+        v1.MapPut("/buckets/{bucket}/objects/{**key}", async (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects) =>
         {
             if (!store.BucketExists(bucket))
             {
                 return NoSuchBucket(bucket);
             }
 
-            var written = HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? HistoryOperation.Insert : HistoryOperation.Update, bucket, key, "v1");
             ObjectRecord? record;
             try
             {
-                record = await writer.WriteAsync(TenantId(ctx), bucket, key, ctx.Request.ContentType ?? "application/octet-stream",
-                    ctx.Request.Body, ctx.RequestAborted);
+                // The same body pipeline as S3 PUT: aws-chunked decoding, chunk signatures and every
+                // declared payload checksum (x-amz-content-sha256 included) verified as it streams.
+                record = await objects.PutAsync(ctx, bucket, key, ctx.Request.ContentType ?? "application/octet-stream", UploadBody.Open(ctx));
+            }
+            catch (InvalidDataException ex)
+            {
+                return Error(400, "IncompleteBody", ex.Message);
             }
             catch (S3RequestRejectedException ex)
             {
                 return Error(ex.Status, ex.Code, ex.Message);
             }
 
-            if (record is null)
-            {
-                return Unavailable();
-            }
-
-            (written.Size, written.Etag, written.Cid) = (record.SizeBytes, record.ETag, record.Cid);
-            return Results.Ok(Describe(record));
+            return record is null ? Unavailable() : Results.Ok(Describe(record));
         });
 
         v1.MapGet("/buckets/{bucket}/objects/{**key}", async (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects,
@@ -109,25 +105,21 @@ public static partial class BlobApiEndpoints
                 return History(bucket, key, ctx.Request.Query, history);
             }
 
-            var record = store.GetObject(bucket, key);
             if (ctx.Request.Query.ContainsKey("meta"))
             {
-                return record is null ? NoSuchKey(key) : Results.Ok(new
+                return store.GetObject(bucket, key) is not { } record ? NoSuchKey(key) : Results.Ok(new
                 {
                     bucket = record.Bucket, key = record.Key, size = record.SizeBytes, contentType = record.ContentType,
                     etag = record.ETag, cid = record.Cid, lastModified = record.LastModified, replicas = record.NodeIds,
                 });
             }
 
-            var view = HistoryCapture.Mark(ctx, HistoryOperation.View, bucket, key, "v1");
-            if (record is null)
+            return await objects.GetAsync(ctx, bucket, key) switch
             {
-                return NoSuchKey(key);
-            }
-
-            return await objects.ServeAsync(record, ctx.Request.Headers.Range.FirstOrDefault(), ctx, view) == ServeOutcome.NoReplica
-                ? Unavailable()
-                : Results.Empty;
+                ServeOutcome.NotFound => NoSuchKey(key),
+                ServeOutcome.NoReplica => Unavailable(),
+                _ => Results.Empty,
+            };
         });
 
         v1.MapMethods("/buckets/{bucket}/objects/{**key}", ["HEAD"], (string bucket, string key, HttpContext ctx, GatewayMetadataStore store) =>
@@ -144,18 +136,14 @@ public static partial class BlobApiEndpoints
             return Results.Ok();
         });
 
-        v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, HttpContext ctx, ObjectService objects) =>
+        v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects) =>
         {
-            var deleted = HistoryCapture.Mark(ctx, HistoryOperation.Delete, bucket, key, "v1");
-            if (objects.Delete(bucket, key) is { } record) // idempotent, as in S3
+            if (!store.BucketExists(bucket))
             {
-                (deleted.Size, deleted.Etag, deleted.Cid) = (record.SizeBytes, record.ETag, record.Cid);
-            }
-            else
-            {
-                deleted.Outcome = "NotFound";
+                return NoSuchBucket(bucket);
             }
 
+            objects.Delete(ctx, bucket, key); // idempotent, as in S3
             return Results.NoContent();
         });
     }
@@ -229,8 +217,6 @@ public static partial class BlobApiEndpoints
         bucket = r.Bucket, key = r.Key, size = r.SizeBytes, contentType = r.ContentType, etag = r.ETag, cid = r.Cid, lastModified = r.LastModified,
     };
 
-    private static string TenantId(HttpContext ctx) => ctx.Items["TenantId"] as string ?? "";
-
     // Opaque to callers: the last key returned, base64url-encoded.
     private static string EncodeCursor(string key) => Convert.ToBase64String(Encoding.UTF8.GetBytes(key)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
@@ -249,15 +235,6 @@ public static partial class BlobApiEndpoints
             return false;
         }
     }
-
-    internal static bool IsValidBucketName(string name) =>
-        name.Length is >= 3 and <= 63 && BucketName().IsMatch(name) && !name.Contains("..") && !IpAddress().IsMatch(name);
-
-    [GeneratedRegex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$")]
-    private static partial Regex BucketName();
-
-    [GeneratedRegex(@"^\d+\.\d+\.\d+\.\d+$")]
-    private static partial Regex IpAddress();
 
     private static readonly Lazy<string> OpenApi = new(() =>
     {

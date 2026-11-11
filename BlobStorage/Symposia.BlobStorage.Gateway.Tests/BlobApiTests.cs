@@ -167,6 +167,67 @@ public sealed class BlobApiTests(GatewayFixture f) : IClassFixture<GatewayFixtur
         Assert.Contains(listed.GetProperty("buckets").EnumerateArray(), b => b.GetProperty("name").GetString() == bucket);
     }
 
+    // Review (Carl #10): one naming rule for both APIs.
+    [Fact]
+    public async Task S3_RejectsBucketNamesV1Rejects()
+    {
+        var ex = await Assert.ThrowsAsync<Amazon.S3.AmazonS3Exception>(() =>
+            f.S3.PutBucketAsync(new PutBucketRequest { BucketName = "Has_Upper", UseClientRegion = true }));
+        Assert.Equal("InvalidBucketName", ex.ErrorCode);
+    }
+
+    // Review (Lenny #12): deletes in a missing bucket say so, like the other /v1 routes.
+    [Fact]
+    public async Task DeleteInAMissingBucket_IsNoSuchBucket()
+    {
+        var r = await _api.DeleteAsync($"/v1/buckets/{NewBucket()}/objects/k");
+        Assert.Equal(HttpStatusCode.NotFound, r.StatusCode);
+        Assert.Equal("NoSuchBucket", (await Json(r)).GetProperty("error").GetProperty("code").GetString());
+    }
+
+    // Review (Frank #1): a delete queues the blob for GC (behind GcMinAgeSeconds) rather than deleting it
+    // from nodes inline, so a concurrent identical upload can't be left pointing at a deleted blob.
+    [Fact]
+    public async Task Delete_QueuesTheBlobForGc_InsteadOfDeletingInline()
+    {
+        var bucket = await CreateBucketAsync();
+        var cid = (await Json(await PutAsync(bucket, "gc-me", "unique " + Guid.NewGuid()))).GetProperty("cid").GetString();
+        var store = (Metadata.GatewayMetadataStore)f.GatewayServices.GetService(typeof(Metadata.GatewayMetadataStore))!;
+
+        (await _api.DeleteAsync($"/v1/buckets/{bucket}/objects/gc-me")).EnsureSuccessStatusCode();
+
+        Assert.Contains(store.GetPendingDeletions(1000), d => d.Cid == cid);
+    }
+
+    // Review (Carl #1): /v1 PUT verifies the signed payload hash like S3 does.
+    [Fact]
+    public async Task V1Put_RejectsABodyThatDoesNotMatchItsSignedHash()
+    {
+        var bucket = await CreateBucketAsync();
+        var request = new HttpRequestMessage(HttpMethod.Put, $"/v1/buckets/{bucket}/objects/tampered") { Content = new StringContent("actual body") };
+        request.Headers.Add("x-amz-content-sha256", Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("signed body"))));
+        var r = await f.SignedClient(signPayloadHeader: true).SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, r.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _api.GetAsync($"/v1/buckets/{bucket}/objects/tampered")).StatusCode);
+    }
+
+    // Review (Carl #11): the OpenAPI document covers every mapped /v1 route.
+    [Fact]
+    public async Task OpenApi_DocumentsEveryV1Route()
+    {
+        var doc = await Json(await f.GatewayHttpClient.GetAsync(BlobApiEndpoints.OpenApiPath));
+        var documented = doc.GetProperty("paths").EnumerateObject().Select(p => p.Name).ToHashSet();
+        var sources = (Microsoft.AspNetCore.Routing.EndpointDataSource)f.GatewayServices.GetService(typeof(Microsoft.AspNetCore.Routing.EndpointDataSource))!;
+        var routes = sources.Endpoints.OfType<Microsoft.AspNetCore.Routing.RouteEndpoint>()
+            .Select(e => "/" + e.RoutePattern.RawText!.TrimStart('/').Replace("{**key}", "{key}"))
+            .Where(r => r.StartsWith("/v1/", StringComparison.Ordinal))
+            .ToHashSet();
+
+        Assert.NotEmpty(routes);
+        Assert.Empty(routes.Except(documented));
+    }
+
     [Fact]
     public async Task S3Responses_CarryRequestIds()
     {

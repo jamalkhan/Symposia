@@ -25,6 +25,8 @@ public sealed class HistoryRecorder : BackgroundService
     private readonly Counter<long> _expired;
     private readonly TimeSpan _sweepInterval;
     private long _lastDropLogMinute = -1;
+    private long _lastWriteFailureLogMinute = -1;
+    private int _failures;
 
     public HistoryRecorder(HistoryStore store, IOptions<GatewayOptions> options, ILogger<HistoryRecorder> logger, IMeterFactory? meters = null,
         TimeProvider? time = null)
@@ -47,10 +49,15 @@ public sealed class HistoryRecorder : BackgroundService
         _dropped = meter.CreateCounter<long>("blob_history.dropped");
         _expired = meter.CreateCounter<long>("blob_history.expired");
         meter.CreateObservableGauge("blob_history.queue_depth", () => _queue.Reader.Count);
+        // On-disk size (file + WAL), for disk accounting (#197/#199).
+        meter.CreateObservableGauge("blob_history.db_bytes", () => store.SizeBytes);
     }
 
     /// <summary>How long entries are kept.</summary>
     public TimeSpan Retention { get; }
+
+    /// <summary>The clock entries are stamped with.</summary>
+    public DateTimeOffset Now => _time.GetUtcNow();
 
     /// <summary>
     /// 1 hour on the LocalDev chain (31337); 30 days anywhere else, including a gateway with no chain
@@ -96,7 +103,17 @@ public sealed class HistoryRecorder : BackgroundService
                     batch.Add(entry);
                 }
 
-                Flush(batch);
+                if (!Flush(batch))
+                {
+                    // A failing store (disk full, locked) isn't hammered: back off up to 30 s. Entries queued
+                    // meanwhile wait in the bounded queue, and overflow is counted as drops.
+                    _failures = Math.Min(_failures + 1, 5);
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, 1 << _failures)), stoppingToken);
+                }
+                else
+                {
+                    _failures = 0;
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -134,6 +151,10 @@ public sealed class HistoryRecorder : BackgroundService
         {
             deleted = _store.DeleteOlderThan(cutoff, SweepBatch);
             total += deleted;
+            if (deleted == SweepBatch)
+            {
+                Thread.Yield(); // let the writer's next batch in between deletes
+            }
         }
         while (deleted == SweepBatch);
 
@@ -143,14 +164,16 @@ public sealed class HistoryRecorder : BackgroundService
             _store.IncrementalVacuum();
         }
 
+        _store.Checkpoint(); // keeps the WAL from growing without bound under steady writes
+
         return total;
     }
 
-    private void Flush(List<HistoryEntry> batch)
+    private bool Flush(List<HistoryEntry> batch)
     {
         if (batch.Count == 0)
         {
-            return;
+            return true;
         }
 
         try
@@ -164,14 +187,24 @@ public sealed class HistoryRecorder : BackgroundService
         catch (Exception ex)
         {
             _dropped.Add(batch.Count);
-            _logger.LogWarning("Could not write {Count} operation history entries: {Reason}", batch.Count, ex.Message);
+            var minute = Environment.TickCount64 / 60_000;
+            if (Interlocked.Exchange(ref _lastWriteFailureLogMinute, minute) != minute)
+            {
+                _logger.LogWarning("Could not write {Count} operation history entries: {Reason}", batch.Count, ex.Message);
+            }
+
+            batch.Clear();
+            return false;
         }
 
         batch.Clear();
+        return true;
     }
 
     private async Task SweepLoopAsync(CancellationToken ct)
     {
+        // Off the startup path: a long backlog of expired rows mustn't delay the gateway opening its port.
+        await Task.Yield();
         using var timer = new PeriodicTimer(_sweepInterval);
         try
         {

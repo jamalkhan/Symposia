@@ -29,11 +29,20 @@ public static class HistoryCapture
 
     public static string ApiOf(HttpContext ctx) => ctx.Request.Path.StartsWithSegments(BlobApiEndpoints.Prefix) ? "v1" : "s3";
 
+    /// <summary>Longest User-Agent kept, so one client can't inflate every row it causes.</summary>
+    public const int MaxUserAgent = 256;
+
     public static IApplicationBuilder UseHistoryCapture(this IApplicationBuilder app, IReadOnlyList<IPNetwork> trustedProxies) => app.Use(async (ctx, next) =>
     {
+        var failed = false;
         try
         {
             await next();
+        }
+        catch
+        {
+            failed = true; // the status still reads 200 here; the server turns this into a 500 afterwards
+            throw;
         }
         finally
         {
@@ -42,12 +51,13 @@ public static class HistoryCapture
                 var recorder = ctx.RequestServices.GetRequiredService<HistoryRecorder>();
                 var sigv4 = ctx.Items[nameof(SigV4Context)] as SigV4Context;
                 var ip = ClientAddress.Resolve(ctx.Connection.RemoteIpAddress, ctx.Request.Headers["X-Forwarded-For"].ToString(), trustedProxies)?.ToString();
-                var status = ctx.Response.StatusCode;
+                var status = failed && !ctx.Response.HasStarted ? StatusCodes.Status500InternalServerError : ctx.Response.StatusCode;
+                var userAgent = ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua[..Math.Min(ua.Length, MaxUserAgent)] : null;
+                var now = recorder.Now;
                 foreach (var op in ops)
                 {
-                    recorder.Record(new HistoryEntry(0, DateTimeOffset.UtcNow, op.Operation, op.Bucket, op.Key, op.Api, op.Size, op.Etag, op.Cid,
-                        ip, sigv4?.AccessKeyId, sigv4?.TenantId, ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua : null,
-                        RequestIds.Of(ctx), op.Outcome ?? OutcomeOf(status), status));
+                    recorder.Record(new HistoryEntry(0, now, op.Operation, op.Bucket, op.Key, op.Api, op.Size, op.Etag, op.Cid,
+                        ip, sigv4?.AccessKeyId, sigv4?.TenantId, userAgent, RequestIds.Of(ctx), failed ? "Error" : op.Outcome ?? OutcomeOf(status), status));
                 }
             }
         }

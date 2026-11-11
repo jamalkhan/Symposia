@@ -56,8 +56,12 @@ public sealed class DevFundingChainTests(RewardsChainFixture chain) : IClassFixt
     }
 
     private NodeServiceStaker Staker(WebApplicationFactory<Program> gateway, NodeIdentity node) =>
-        new(node, DevFunding.LocalDevChainId, new Uri(gateway.Server.BaseAddress, "/v1/rpc").ToString(), gateway.Server.BaseAddress,
-            chain.Addresses["StakingNodeRegistry"], gateway.CreateClient(), NullLogger.Instance, gateway.CreateClient());
+        new(node, DevFunding.LocalDevChainId, new Uri(gateway.Server.BaseAddress, "/v1/rpc").ToString(), chain.Addresses["StakingNodeRegistry"],
+            new DevGatewayStakeFunding(node, DevFunding.LocalDevChainId, gateway.Server.BaseAddress, gateway.CreateClient()), NullLogger.Instance,
+            gateway.CreateClient());
+
+    private static async Task<StakeOutcome> StakeAsync(NodeServiceStaker staker, byte service) =>
+        (await staker.EnsureStakedAsync([(service, BigInteger.One)], default))[service];
 
     private async Task<ServiceStatus> StatusAsync(string node, byte service) =>
         (ServiceStatus)await new Web3(chain.RpcUrl).Eth.GetContractQueryHandler<ServiceStatusOfFunction>()
@@ -70,7 +74,7 @@ public sealed class DevFundingChainTests(RewardsChainFixture chain) : IClassFixt
         var node = NewNode();
         var staker = Staker(gateway, node);
 
-        Assert.Equal(StakeOutcome.Active, await staker.EnsureStakedAsync(0, BigInteger.One, default));
+        Assert.Equal(StakeOutcome.Active, await StakeAsync(staker, 0));
         Assert.Equal(ServiceStatus.Active, await StatusAsync(node.NodeId, 0));
 
         var stake = await new Web3(chain.RpcUrl).Eth.GetContractQueryHandler<MinStakeForFunction>()
@@ -80,9 +84,33 @@ public sealed class DevFundingChainTests(RewardsChainFixture chain) : IClassFixt
         Assert.Equal(stake, held); // granted 2x the stake, staked 1x
 
         // A restart (or repeat) reads Active and does nothing.
-        Assert.Equal(StakeOutcome.Active, await staker.EnsureStakedAsync(0, BigInteger.One, default));
+        Assert.Equal(StakeOutcome.Active, await StakeAsync(staker, 0));
         Assert.Equal(held, await new Web3(chain.RpcUrl).Eth.GetContractQueryHandler<BalanceOfFunction>()
             .QueryAsync<BigInteger>(chain.Addresses["SYMToken"], new BalanceOfFunction { Account = node.NodeId }));
+    }
+
+    // Review (Lenny #1): one host's services stake together from one account without tripping over
+    // each other's allowance or nonce, funded by a single grant.
+    [Fact]
+    public async Task SeveralServicesOnOneNode_AllReachActive()
+    {
+        await using var gateway = Gateway(devFunding: true);
+        var node = NewNode();
+
+        var outcomes = await Staker(gateway, node).EnsureStakedAsync([(0, BigInteger.One), (8, BigInteger.Zero)], default);
+
+        Assert.Equal(StakeOutcome.Active, outcomes[0]);
+        Assert.Equal(StakeOutcome.Active, outcomes[8]);
+        Assert.Equal(ServiceStatus.Active, await StatusAsync(node.NodeId, 8));
+    }
+
+    [Fact]
+    public async Task DevFundingOn_TheProxyAcceptsSignedTransactions()
+    {
+        await using var gateway = Gateway(devFunding: true);
+        var send = await gateway.CreateClient().PostAsJsonAsync("/v1/rpc",
+            new { jsonrpc = "2.0", id = 1, method = "eth_sendRawTransaction", @params = new[] { "0x00" } });
+        Assert.DoesNotContain("not available", await send.Content.ReadAsStringAsync()); // forwarded (anvil rejects the junk itself)
     }
 
     [Fact]
@@ -91,7 +119,7 @@ public sealed class DevFundingChainTests(RewardsChainFixture chain) : IClassFixt
         await using var gateway = Gateway(devFunding: false);
         var node = NewNode();
 
-        Assert.Equal(StakeOutcome.Unavailable, await Staker(gateway, node).EnsureStakedAsync(0, BigInteger.One, default));
+        Assert.Equal(StakeOutcome.Unavailable, await StakeAsync(Staker(gateway, node), 0));
         var send = await gateway.CreateClient().PostAsJsonAsync("/v1/rpc",
             new { jsonrpc = "2.0", id = 1, method = "eth_sendRawTransaction", @params = new[] { "0x00" } });
         Assert.Contains("not available", await send.Content.ReadAsStringAsync());
@@ -115,7 +143,7 @@ public sealed class DevFundingChainTests(RewardsChainFixture chain) : IClassFixt
         var stale = await client.PostAsJsonAsync(DevFunding.FundPath, new DevFundRequest(victim.NodeId, services, old,
             victim.SignDevFunding(DevFunding.FundDigest(DevFunding.LocalDevChainId, victim.NodeId, services, old))));
 
-        Assert.Equal(HttpStatusCode.Unauthorized, forged.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, forged.StatusCode); // a valid signature, by the wrong key
         Assert.Equal(HttpStatusCode.Unauthorized, stale.StatusCode);
         Assert.Equal(BigInteger.Zero, (await new Web3(chain.RpcUrl).Eth.GetBalance.SendRequestAsync(victim.NodeId)).Value);
     }

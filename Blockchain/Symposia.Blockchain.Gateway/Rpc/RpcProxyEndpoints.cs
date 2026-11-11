@@ -45,7 +45,7 @@ public static class RpcProxyEndpoints
     public static void MapRpcProxy(this WebApplication app)
     {
         app.MapPost("/v1/rpc", async (HttpContext http, IOptions<GatewayOptions> gatewayOptions, IHttpClientFactory clients,
-            LatestBlockCache latest, RpcProxyLimiter limiter, ILoggerFactory loggers, CancellationToken ct) =>
+            LatestBlockCache latest, RpcProxyLimiter limiter, Staking.LocalDevChain localDev, ILoggerFactory loggers, CancellationToken ct) =>
         {
             var gateway = gatewayOptions.Value;
             var options = gateway.RpcProxy;
@@ -118,7 +118,7 @@ public static class RpcProxyEndpoints
                 return Error(limiter, null, -32600, "Invalid request: duplicate keys"); // System.Text.Json refuses duplicate property names
             }
 
-            if (!AllowedMethods.Contains(method) && !(gateway.DevFunding.Enabled && LocalDevWriteMethods.Contains(method)))
+            if (!AllowedMethods.Contains(method) && !(LocalDevWriteMethods.Contains(method) && await localDev.IsLocalDevAsync()))
             {
                 if (limiter.ShouldLog(client))
                 {

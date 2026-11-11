@@ -1,6 +1,3 @@
-using System.Globalization;
-using System.Net;
-using System.Net.Http.Json;
 using System.Numerics;
 using Microsoft.Extensions.Logging;
 using Nethereum.Web3;
@@ -16,86 +13,121 @@ public enum StakeOutcome
     /// <summary>Not there yet (funding throttled, verification pending); try again later.</summary>
     Retry,
 
-    /// <summary>The network has no dev funding (an older LocalDev host, or not LocalDev): don't retry.</summary>
+    /// <summary>The network has no stake funding (an older LocalDev host, or not LocalDev): don't retry.</summary>
     Unavailable,
 
-    /// <summary>The service is Suspended, Banned or Deregistering; staking can't change that.</summary>
+    /// <summary>Can't be staked as things stand: Suspended, Banned or Deregistering, or funding falls short of the stake.</summary>
     Blocked,
 }
 
 /// <summary>
-/// Stakes one of this node's Node Services on a LocalDev network (issue #200), so it can earn rewards
-/// locally: dev funds from the LocalDev gateway, then <c>approve</c> and <c>registerService</c> with the
-/// node's own key, then a verification from the gateway. Each call reads the registry first and does
-/// only what's missing, so restarts and repeats never double-stake.
+/// Stakes a node's Node Services (issue #200): funding from an <see cref="IStakeFunding"/> source, then
+/// <c>approve</c> and <c>registerService</c> with the node's own key, then verification. One instance
+/// per node, and one service at a time: <c>approve</c> sets (not adds to) the allowance and every
+/// transaction shares the node's nonce, so concurrent stakers on one key would trip over each other.
+/// Each pass reads the registry first and does only what's missing, so restarts never double-stake.
 /// </summary>
-public sealed class NodeServiceStaker(
-    NodeIdentity identity, ulong chainId, string rpcUrl, Uri gateway, string stakingRegistry, HttpClient http, ILogger logger,
-    HttpClient? rpcHttp = null)
+public sealed class NodeServiceStaker(NodeIdentity identity, ulong chainId, string rpcUrl, string stakingRegistry, IStakeFunding funding,
+    ILogger logger, HttpClient? rpcHttp = null)
 {
     /// <summary>The single region LocalDev nodes claim.</summary>
     public static readonly byte[] LocalDevRegion = Region("localdev");
 
+    private readonly SemaphoreSlim _gate = new(1, 1);
     private Web3? _web3;
 
-    public async Task<StakeOutcome> EnsureStakedAsync(byte service, BigInteger capacity, CancellationToken ct)
+    /// <summary>Stakes each of <paramref name="services"/> that isn't Active yet; returns each one's outcome.</summary>
+    public async Task<IReadOnlyDictionary<byte, StakeOutcome>> EnsureStakedAsync(
+        IReadOnlyList<(byte Service, BigInteger Capacity)> services, CancellationToken ct)
     {
-        var web3 = _web3 ??= rpcHttp is null // one client: Nethereum sets BaseAddress on the HttpClient it's given
-            ? new Web3(identity.ChainAccount(chainId), rpcUrl)
-            : new Web3(identity.ChainAccount(chainId), new Nethereum.JsonRpc.Client.RpcClient(new Uri(rpcUrl), rpcHttp));
-        var node = identity.NodeId;
-        var status = await StatusAsync(web3, node, service);
-        if (status is ServiceStatus.Active)
+        await _gate.WaitAsync(ct);
+        try
         {
-            return StakeOutcome.Active;
-        }
-
-        if (status is ServiceStatus.Suspended or ServiceStatus.Banned or ServiceStatus.Deregistering)
-        {
-            return StakeOutcome.Blocked;
-        }
-
-        if (status is ServiceStatus.Unregistered)
-        {
-            var services = new[] { new DevFundService(service, capacity.ToString(CultureInfo.InvariantCulture)) };
-            var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var fund = await PostAsync(DevFunding.FundPath,
-                new DevFundRequest(node, services, ts, identity.SignDevFunding(DevFunding.FundDigest(chainId, node, services, ts))), ct);
-            if (fund != StakeOutcome.Active)
+            var web3 = _web3 ??= rpcHttp is null // one client: Nethereum sets BaseAddress on the HttpClient it's given
+                ? new Web3(identity.ChainAccount(chainId), rpcUrl)
+                : new Web3(identity.ChainAccount(chainId), new Nethereum.JsonRpc.Client.RpcClient(new Uri(rpcUrl), rpcHttp));
+            var node = identity.NodeId;
+            var outcomes = new Dictionary<byte, StakeOutcome>();
+            var statuses = new Dictionary<byte, ServiceStatus>();
+            foreach (var (service, _) in services)
             {
-                return fund;
+                statuses[service] = await StatusAsync(web3, node, service);
             }
 
-            var stake = await web3.Eth.GetContractQueryHandler<MinStakeForFunction>()
-                .QueryAsync<BigInteger>(stakingRegistry, new MinStakeForFunction { NodeType = service, Capacity = capacity });
-            var token = await TokenAsync(web3);
-            await SendAsync(web3, token, new ApproveFunction { Spender = stakingRegistry, Value = stake }, "approve", ct);
-            await SendAsync(web3, stakingRegistry,
-                new RegisterServiceFunction { Service = service, Capacity = capacity, Region = LocalDevRegion, StakeAmount = stake }, "registerService", ct);
-            logger.LogInformation("Staked {Stake} wei for service {Service}; awaiting verification.", stake, service);
+            // Fund once for every service still to register, so the grant covers them together.
+            var unregistered = services.Where(s => statuses[s.Service] == ServiceStatus.Unregistered).ToList();
+            if (unregistered.Count > 0)
+            {
+                var funded = await funding.FundAsync(unregistered, ct);
+                if (funded != FundingResponse.Ok)
+                {
+                    foreach (var (service, _) in unregistered)
+                    {
+                        outcomes[service] = Map(funded);
+                    }
+                }
+            }
+
+            foreach (var (service, capacity) in services)
+            {
+                if (outcomes.ContainsKey(service))
+                {
+                    continue;
+                }
+
+                outcomes[service] = await StakeOneAsync(web3, node, service, capacity, statuses[service], ct);
+            }
+
+            return outcomes;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<StakeOutcome> StakeOneAsync(Web3 web3, string node, byte service, BigInteger capacity, ServiceStatus status, CancellationToken ct)
+    {
+        switch (status)
+        {
+            case ServiceStatus.Active:
+                return StakeOutcome.Active;
+            case ServiceStatus.Suspended or ServiceStatus.Banned or ServiceStatus.Deregistering:
+                return StakeOutcome.Blocked;
+            case ServiceStatus.Unregistered:
+                var stake = await web3.Eth.GetContractQueryHandler<MinStakeForFunction>()
+                    .QueryAsync<BigInteger>(stakingRegistry, new MinStakeForFunction { NodeType = service, Capacity = capacity });
+                var token = await TokenAsync(web3);
+                var held = await web3.Eth.GetContractQueryHandler<BalanceOfFunction>().QueryAsync<BigInteger>(token, new BalanceOfFunction { Account = node });
+                if (held < stake)
+                {
+                    // Funding is capped below this stake: registering would revert every retry and burn gas.
+                    logger.LogWarning("Funding covers {Held} wei but service {Service} needs {Stake} wei; not staking it.", held, service, stake);
+                    return StakeOutcome.Blocked;
+                }
+
+                await SendAsync(web3, token, new ApproveFunction { Spender = stakingRegistry, Value = stake }, "approve", ct);
+                await SendAsync(web3, stakingRegistry,
+                    new RegisterServiceFunction { Service = service, Capacity = capacity, Region = LocalDevRegion, StakeAmount = stake }, "registerService", ct);
+                logger.LogInformation("Staked {Stake} wei for service {Service}; awaiting verification.", stake, service);
+                break;
         }
 
-        var vts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var verified = await PostAsync(DevFunding.VerifyPath,
-            new DevVerifyRequest(node, service, vts, identity.SignDevFunding(DevFunding.VerifyDigest(chainId, node, service, vts))), ct);
-        return verified == StakeOutcome.Active && await StatusAsync(web3, node, service) == ServiceStatus.Active ? StakeOutcome.Active : verified switch
+        var verified = await funding.VerifyAsync(service, ct);
+        if (verified != FundingResponse.Ok)
         {
-            StakeOutcome.Active => StakeOutcome.Retry,
-            _ => verified,
-        };
+            return Map(verified);
+        }
+
+        return await StatusAsync(web3, node, service) == ServiceStatus.Active ? StakeOutcome.Active : StakeOutcome.Retry;
     }
 
-    private async Task<StakeOutcome> PostAsync<T>(string path, T body, CancellationToken ct)
+    private static StakeOutcome Map(FundingResponse response) => response switch
     {
-        using var response = await http.PostAsJsonAsync(new Uri(gateway, path), body, ct);
-        return response.StatusCode switch
-        {
-            HttpStatusCode.OK => StakeOutcome.Active,
-            HttpStatusCode.NotFound => StakeOutcome.Unavailable,
-            HttpStatusCode.Conflict => StakeOutcome.Blocked,
-            _ => StakeOutcome.Retry,
-        };
-    }
+        FundingResponse.Unavailable => StakeOutcome.Unavailable,
+        FundingResponse.Conflict => StakeOutcome.Blocked,
+        _ => StakeOutcome.Retry,
+    };
 
     private async Task<ServiceStatus> StatusAsync(Web3 web3, string node, byte service) =>
         (ServiceStatus)await web3.Eth.GetContractQueryHandler<ServiceStatusOfFunction>()

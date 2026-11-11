@@ -21,19 +21,20 @@ public sealed class HistoryStore
         }
 
         DatabasePath = path;
-        _connectionString = new SqliteConnectionStringBuilder { DataSource = path }.ToString();
+        // DefaultTimeout doubles as SQLite's busy timeout, so a sweep and a batch wait for each other briefly.
+        _connectionString = new SqliteConnectionStringBuilder { DataSource = path, DefaultTimeout = 5 }.ToString();
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
+            PRAGMA auto_vacuum = INCREMENTAL; -- before anything initialises the file, or it's ignored
             PRAGMA journal_mode = WAL;
-            PRAGMA auto_vacuum = INCREMENTAL;
             CREATE TABLE IF NOT EXISTS object_history (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts_ms         INTEGER NOT NULL,
-                operation     TEXT NOT NULL,
+                operation     TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'view', 'delete')),
                 bucket        TEXT NOT NULL,
                 key           TEXT NOT NULL,
-                api           TEXT NOT NULL,
+                api           TEXT NOT NULL CHECK (api IN ('s3', 'v1')),
                 size_bytes    INTEGER,
                 etag          TEXT,
                 cid           TEXT,
@@ -42,7 +43,7 @@ public sealed class HistoryStore
                 tenant_id     TEXT,
                 user_agent    TEXT,
                 request_id    TEXT NOT NULL,
-                outcome       TEXT NOT NULL,
+                outcome       TEXT NOT NULL CHECK (outcome IN ('Success', 'NotFound', 'AccessDenied', 'Error')),
                 status        INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_history_object ON object_history (bucket, key, id);
@@ -70,8 +71,9 @@ public sealed class HistoryStore
             INSERT INTO object_history (ts_ms, operation, bucket, key, api, size_bytes, etag, cid, client_ip, access_key_id, tenant_id, user_agent, request_id, outcome, status)
             VALUES ($ts, $op, $b, $k, $api, $size, $etag, $cid, $ip, $ak, $tenant, $ua, $rid, $outcome, $status)
             """;
+        var integers = new HashSet<string> { "$ts", "$size", "$status" };
         var p = new[] { "$ts", "$op", "$b", "$k", "$api", "$size", "$etag", "$cid", "$ip", "$ak", "$tenant", "$ua", "$rid", "$outcome", "$status" }
-            .Select(n => cmd.Parameters.Add(n, SqliteType.Text)).ToArray();
+            .Select(n => cmd.Parameters.Add(n, integers.Contains(n) ? SqliteType.Integer : SqliteType.Text)).ToArray();
         foreach (var e in entries)
         {
             object?[] values = [e.Timestamp.ToUnixTimeMilliseconds(), e.Operation, e.Bucket, e.Key, e.Api, e.Size, e.Etag, e.Cid, e.ClientIp,
@@ -147,6 +149,18 @@ public sealed class HistoryStore
         return cmd.ExecuteNonQuery();
     }
 
+    /// <summary>The database's size on disk, including its WAL.</summary>
+    public long SizeBytes => new[] { DatabasePath, DatabasePath + "-wal" }.Sum(f => File.Exists(f) ? new FileInfo(f).Length : 0);
+
+    /// <summary>Folds the WAL back into the database and truncates it.</summary>
+    public void Checkpoint()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+        cmd.ExecuteNonQuery();
+    }
+
     /// <summary>Returns freed pages to the file system after a sweep.</summary>
     public void IncrementalVacuum()
     {
@@ -162,6 +176,9 @@ public sealed class HistoryStore
     {
         var conn = new SqliteConnection(_connectionString);
         conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA synchronous = NORMAL;"; // per connection; WAL keeps it crash-safe, best-effort data needn't fsync per commit
+        cmd.ExecuteNonQuery();
         return conn;
     }
 }

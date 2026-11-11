@@ -37,19 +37,25 @@ public sealed class QuorumWriter
     /// </summary>
     public async Task<ObjectRecord?> WriteAsync(
         string tenantId, string bucket, string key, string contentType,
+        Stream body, CancellationToken cancellationToken) =>
+        (await WriteObjectAsync(tenantId, bucket, key, contentType, body, cancellationToken)).Record;
+
+    /// <summary>As <see cref="WriteAsync"/>, also reporting whether the commit replaced an existing object (#204).</summary>
+    public async Task<(ObjectRecord? Record, bool Replaced)> WriteObjectAsync(
+        string tenantId, string bucket, string key, string contentType,
         Stream body, CancellationToken cancellationToken)
     {
         var blob = await WriteBlobAsync(tenantId, bucket, key, body, cancellationToken);
         if (blob is null)
-            return null;
+            return (null, false);
 
         var record = new ObjectRecord(
             bucket, key, blob.Cid, blob.SizeBytes, contentType,
             DateTimeOffset.UtcNow, blob.NodeIds);
 
-        _metadata.PutObject(record);
+        var replaced = _metadata.PutObject(record);
         RepairIfShort(blob);
-        return record;
+        return (record, replaced);
     }
 
     /// <summary>
