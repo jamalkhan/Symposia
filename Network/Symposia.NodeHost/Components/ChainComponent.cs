@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using Symposia.Blockchain.Gateway.Chain;
 using Symposia.NodeHost.Settings;
 
 namespace Symposia.NodeHost.Components;
@@ -86,6 +87,9 @@ public sealed partial class ChainComponent : HostComponent
             throw new ComponentFaultException(
                 $"Port {network.AnvilPort} already has a chain on it (another host?). Use Join mode with that host's gateway URL, or change the anvil port.");
         }
+
+        // #210: sweep leaked history dirs; picked before our anvil starts, deleted off the startup path.
+        AnvilTmpSweeper.SweepInBackground(AnvilTmpSweeper.DefaultTmpDir, context.Logger);
 
         var anvilPath = FindFoundryTool(network.FoundryBin, "anvil");
         var start = new ProcessStartInfo
@@ -431,10 +435,11 @@ public sealed partial class ChainComponent : HostComponent
     /// --block-time: mine on an interval, not only on transactions, so the chain clock keeps up with
     /// real time and epochs close on an idle network (#193). --state-interval: also save periodically,
     /// so a crash or hard kill (or Windows, which has no SIGINT) loses at most a few seconds of chain state.
+    /// <see cref="AnvilArgs.PruneHistory"/>: never spill history to ~/.foundry/anvil/tmp, which a hard-killed anvil leaks (#210).
     /// </summary>
     internal static IReadOnlyList<string> AnvilArguments(int port, string statePath) =>
         ["--port", port.ToString(), "--chain-id", AnvilChainId.ToString(), "--block-time", AnvilBlockSeconds.ToString(),
-         "--state", statePath, "--state-interval", "5", "--silent"];
+         "--state", statePath, "--state-interval", "5", .. AnvilArgs.PruneHistory, "--silent"];
 
     /// <summary>This host's node address, the LocalDev telemetry committee (#181 FR2).</summary>
     internal static string LocalNodeAddress(HostContext context)

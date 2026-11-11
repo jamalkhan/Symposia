@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Symposia.Blockchain.Gateway.Chain;
 
 namespace Symposia.Blockchain.Gateway.Tests;
 
@@ -33,7 +34,7 @@ public sealed class RewardsChainFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _anvil = Process.Start(new ProcessStartInfo(Path.Combine(FoundryBin, "anvil"), $"--port {_port} --silent")
+        _anvil = Process.Start(new ProcessStartInfo(Path.Combine(FoundryBin, "anvil"), AnvilArgs.Fixture(_port))
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
