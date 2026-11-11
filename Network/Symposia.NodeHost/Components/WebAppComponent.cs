@@ -12,6 +12,7 @@ namespace Symposia.NodeHost.Components;
 public abstract class WebAppComponent : HostComponent
 {
     private WebApplication? _app;
+    private CancellationTokenSource? _staking;
 
     /// <summary>The running app's services; null while stopped.</summary>
     public IServiceProvider? Services => _app?.Services;
@@ -37,6 +38,9 @@ public abstract class WebAppComponent : HostComponent
 
     protected override string? SkipReason(HostContext context) =>
         context.Network is null ? "Waiting for the network (see chain component)" : null;
+
+    /// <summary>The on-chain Node Service this role stakes on a LocalDev network (#200), and the capacity it stakes for; null = none.</summary>
+    protected virtual (byte Service, long Capacity)? StakedService(HostContext context) => null;
 
     protected override async Task OnStartAsync(HostContext context, CancellationToken ct)
     {
@@ -77,10 +81,82 @@ public abstract class WebAppComponent : HostComponent
         }
 
         await _app.StartAsync(ct);
+        StartLocalDevStaking(context);
+    }
+
+    /// <summary>
+    /// On a LocalDev network, stakes this role's Node Service in the background so it can earn rewards
+    /// locally (#200). Retries every 30 s until the service is Active; never faults the component.
+    /// </summary>
+    private void StartLocalDevStaking(HostContext context)
+    {
+        var network = context.Network!;
+        if (StakedService(context) is not { } staked || network.ChainId != Symposia.Network.Node.Staking.DevFunding.LocalDevChainId
+            || string.IsNullOrEmpty(network.StakingRegistryAddress) || string.IsNullOrEmpty(network.RpcUrl))
+        {
+            return;
+        }
+
+        _staking = new CancellationTokenSource();
+        var ct = _staking.Token;
+        var logger = context.CreateLogger(Name, "Symposia.NodeHost.LocalDevStaking");
+        _ = Task.Run(async () =>
+        {
+            var identity = new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
+                new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = context.Paths.NodeKey }));
+            identity.EnsureLoadedOrGenerated();
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+            var staker = new Symposia.Network.Node.Staking.NodeServiceStaker(identity, network.ChainId, network.RpcUrl!,
+                new Uri(network.GatewayUrl), network.StakingRegistryAddress!, http, logger);
+            string? lastProblem = null;
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var outcome = await staker.EnsureStakedAsync(staked.Service, staked.Capacity, ct);
+                    if (outcome == Symposia.Network.Node.Staking.StakeOutcome.Active)
+                    {
+                        logger.LogInformation("Node Service {Service} is staked and Active on this LocalDev network.", staked.Service);
+                        return;
+                    }
+
+                    if (outcome is Symposia.Network.Node.Staking.StakeOutcome.Unavailable or Symposia.Network.Node.Staking.StakeOutcome.Blocked)
+                    {
+                        logger.LogWarning("Not staking Node Service {Service}: {Outcome} (the LocalDev gateway has no dev funding, or the service is suspended or banned).",
+                            staked.Service, outcome);
+                        return;
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (ex.Message != lastProblem)
+                    {
+                        logger.LogWarning("Staking Node Service {Service} failed; retrying: {Reason}", staked.Service, ex.Message);
+                        lastProblem = ex.Message;
+                    }
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+            }
+        }, ct);
     }
 
     protected override async Task OnStopAsync()
     {
+        _staking?.Cancel();
+        _staking?.Dispose();
+        _staking = null;
         var app = _app;
         _app = null;
         if (app is not null)

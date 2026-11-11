@@ -24,6 +24,16 @@ public static class RpcProxyEndpoints
         "eth_getBlockByHash", "eth_getTransactionReceipt", "eth_getCode",
     ], StringComparer.Ordinal);
 
+    /// <summary>
+    /// Also allowed on a LocalDev gateway (<see cref="DevFundingOptions.Enabled"/>, #200), so joining
+    /// hosts can send their own signed staking transactions to the anvil chain. Never on other networks.
+    /// </summary>
+    internal static readonly FrozenSet<string> LocalDevWriteMethods = FrozenSet.ToFrozenSet(
+    [
+        "eth_sendRawTransaction", "eth_getTransactionCount", "eth_estimateGas", "eth_gasPrice",
+        "eth_maxPriorityFeePerGas", "eth_feeHistory", "eth_getBalance", "eth_getTransactionByHash",
+    ], StringComparer.Ordinal);
+
     public static void AddRpcProxy(this IServiceCollection services, RpcProxyOptions options)
     {
         services.AddSingleton<LatestBlockCache>();
@@ -108,7 +118,7 @@ public static class RpcProxyEndpoints
                 return Error(limiter, null, -32600, "Invalid request: duplicate keys"); // System.Text.Json refuses duplicate property names
             }
 
-            if (!AllowedMethods.Contains(method))
+            if (!AllowedMethods.Contains(method) && !(gateway.DevFunding.Enabled && LocalDevWriteMethods.Contains(method)))
             {
                 if (limiter.ShouldLog(client))
                 {

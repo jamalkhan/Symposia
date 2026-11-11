@@ -38,6 +38,30 @@ public sealed class RelayerAccount
 
     public string Address => _account.Address;
 
+    /// <summary>Sends <paramref name="ether"/> to <paramref name="to"/> through the same nonce gate (LocalDev funding, #200).</summary>
+    public async Task<TransactionReceipt> SendEtherAsync(string to, decimal ether, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        string hash;
+        try
+        {
+            hash = await Web3.Eth.GetEtherTransferService().TransferEtherAsync(to, ether);
+        }
+        catch
+        {
+            await _account.NonceService.ResetNonceAsync();
+            throw;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(ReceiptTimeout);
+        return await Web3.TransactionReceiptPolling.PollForReceiptAsync(hash, timeout.Token);
+    }
+
     /// <summary>Sends <paramref name="function"/> to <paramref name="contract"/> and waits for its receipt (status unchecked).</summary>
     public async Task<TransactionReceipt> SendAsync<TFunction>(string contract, TFunction function, CancellationToken ct = default)
         where TFunction : FunctionMessage, new()

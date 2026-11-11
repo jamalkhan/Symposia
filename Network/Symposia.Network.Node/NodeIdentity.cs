@@ -139,6 +139,15 @@ public sealed class NodeIdentity
     /// </summary>
     public byte[] Sign(byte[] digest) => Eip712NodeRegistrySigner.Sign(Key, digest);
 
+    /// <summary>Signs a LocalDev funding or verification request (issue #200).</summary>
+    public string SignDevFunding(byte[] digest) => Staking.DevFunding.Sign(Key, digest);
+
+    /// <summary>
+    /// An account that sends this node's own transactions (issue #200: LocalDev self-staking). The key
+    /// stays in memory; it's never returned as text.
+    /// </summary>
+    public Nethereum.Web3.Accounts.Account ChainAccount(ulong chainId) => new(Key, chainId);
+
     private EthECKey Key =>
         _key ?? throw new InvalidOperationException($"{nameof(NodeIdentity)} not loaded. Call {nameof(EnsureLoadedOrGenerated)}() first.");
 

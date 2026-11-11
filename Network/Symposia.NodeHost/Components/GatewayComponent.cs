@@ -39,6 +39,8 @@ public sealed class GatewayComponent : WebAppComponent
             ["Gateway:StakingRegistryAddress"] = network.StakingRegistryAddress,
             ["Gateway:DeployBlock"] = network.DeployBlock.ToString(),
             ["Gateway:TelemetryBlobs:CacheDirectory"] = Path.Combine(context.Paths.DataDir, "telemetry-blobs"),
+            // LocalDev only: fund and verify joining hosts' self-staking with the anvil dev key (#200).
+            ["Gateway:DevFunding:Enabled"] = (context.Settings.Network.Mode == NetworkMode.LocalDev).ToString(),
             ["Gateway:RelayerPrivateKey"] = context.Settings.Network.Mode == NetworkMode.LocalDev
                 ? ChainComponent.AnvilDevKey
                 : context.Secrets.RelayerPrivateKey,

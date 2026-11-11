@@ -46,6 +46,12 @@ public sealed class StorageRoleComponent : WebAppComponent
 
     protected override int Port(HostContext context) => context.Settings.Storage.Port;
 
+    // Storage stake scales per TB offered, rounded up (tokenomics-mvp §6: "per TB offered (ceil)").
+    protected override (byte Service, long Capacity)? StakedService(HostContext context) =>
+        (0, (context.Settings.Storage.MaxCapacityBytes + StakeUnitBytes - 1) / StakeUnitBytes);
+
+    private const long StakeUnitBytes = 1_000_000_000_000;
+
     protected override IDictionary<string, string?> Configuration(HostContext context)
     {
         var storage = context.Settings.Storage;
@@ -202,6 +208,8 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
         BlobGatewayApp.Create(options, configure);
 
     protected override int Port(HostContext context) => context.Settings.BlobGateway.Port;
+
+    protected override (byte Service, long Capacity)? StakedService(HostContext context) => (8, 0);
 
     protected override IDictionary<string, string?> Configuration(HostContext context)
     {
