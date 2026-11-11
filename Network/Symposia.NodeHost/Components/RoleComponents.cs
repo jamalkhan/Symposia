@@ -42,6 +42,7 @@ public sealed class StorageRoleComponent : WebAppComponent
             // Heartbeat acceptance surfaces on the host's Diagnostics page (#181 FR5); each start is a fresh run.
             context.Telemetry.Reset();
             builder.Services.AddSingleton(context.Telemetry);
+            builder.Services.AddSingleton<Symposia.Network.Node.Alerts.IOperatorAlertSink>(context.Alerts);
         });
 
     protected override int Port(HostContext context) => context.Settings.Storage.Port;

@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Symposia.BlobStorage.StorageNode.Grpc;
 using Symposia.BlobStorage.StorageNode.Storage;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Symposia.Network.Node;
+using Symposia.Network.Node.Alerts;
 using Symposia.Network.Node.Telemetry;
 
 namespace Symposia.BlobStorage.StorageNode;
@@ -70,6 +72,12 @@ public static class StorageNodeApp
         }
         builder.Services.AddSingleton<ManifestStore>();
         builder.Services.AddHostedService<IntegritySelfCheckWorker>();
+        // Allocation vs. free disk, measured once every 30 s for everyone (issues #197, #199). The Node Host
+        // supplies its Operator Alerts sink; standalone, alerts go nowhere.
+        builder.Services.TryAddSingleton<IDiskSpace, DriveDiskSpace>();
+        builder.Services.TryAddSingleton<IOperatorAlertSink>(NullOperatorAlertSink.Instance);
+        builder.Services.AddSingleton<StorageCapacityMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<StorageCapacityMonitor>());
 
         // Node identity, on-chain registration, peer discovery, and handshake (issue #129),
         // configured from this node's own "StorageNode" section.

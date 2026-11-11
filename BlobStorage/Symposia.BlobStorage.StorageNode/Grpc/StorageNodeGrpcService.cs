@@ -127,7 +127,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
 
     public override Task<ProbeResponse> Probe(ProbeRequest request, ServerCallContext context)
     {
-        var usedBytes = _manifestStore.SumSizeBytes();
+        var usedBytes = _manifestStore.UsedBytes;
         var availableBytes = Math.Max(0, _options.MaxCapacityBytes - usedBytes);
 
         return Task.FromResult(new ProbeResponse

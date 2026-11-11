@@ -148,6 +148,12 @@ async function refresh() {
     ['Last accepted', t?.configured ? beat(t.lastAccepted) : ''], ['Last rejected', t?.configured ? beat(t.lastRejected) : '']]);
   $('#rewards-stale').hidden = !s.rewardsStale;
   if (s.rewardsStale) $('[data-reason]', $('#rewards-stale')).textContent = s.rewardsStale.reason;
+  const c = s.storageCapacity, gb = (b) => `${(b / GB).toFixed(1)} GB`;
+  $('#capacity-card').hidden = !c;
+  if (c) {
+    $('#capacity').innerHTML = dl([['Allocated', gb(c.allocated)], ['Used', gb(c.used)], ['Unused allocated', gb(c.unused)],
+      ['Free on disk', `${gb(c.free)} (${c.volumeRoot})`], ['Disk space', c.diskLow === 'Ok' ? 'OK' : `${c.diskLow}: warning below ${gb(c.warnBelow)}, error below ${gb(c.errorBelow)}`]]);
+  }
   const g = s.blobGateway;
   $('#blobgateway-card').hidden = !g || !g.configured;
   if (g && g.configured) {

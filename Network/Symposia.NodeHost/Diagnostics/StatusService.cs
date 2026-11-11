@@ -70,6 +70,7 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
                 lastAttempt = p.LastAttempt,
             }),
             blobGateway = health.Local().Gateway,
+            storageCapacity = health.StorageCapacity(),
             activeAlerts = context.Alerts.Active,
             logs = context.Logs.Tail(200),
         };

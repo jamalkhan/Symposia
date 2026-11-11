@@ -106,26 +106,22 @@ public sealed class NodeHealth(ComponentSupervisor supervisor, string nodeAddres
         }
 
         var component = supervisor.Storage;
-        var manifest = component.Services?.GetService<ManifestStore>();
-        if (component.Status != ComponentStatus.Running || manifest is null)
+        var capacity = StorageCapacity();
+        if (component.Status != ComponentStatus.Running || capacity is null)
         {
             return new StorageHealth(true, HealthLevel.Bad, settings.MaxCapacityBytes, null, $"Storage is {component.Status}");
         }
 
         // Free is the smaller of the unused quota and what the disk actually has left.
-        var capacity = settings.MaxCapacityBytes;
-        var free = Math.Max(0, capacity - manifest.SumSizeBytes());
-        try
-        {
-            free = Math.Min(free, new DriveInfo(supervisor.Context.RoleDataDir("storage")).AvailableFreeSpace);
-        }
-        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
-        {
-            // Quota-only figure is still meaningful.
-        }
-
-        return new StorageHealth(true, StorageLevel(free, capacity), capacity, free, null);
+        var free = Math.Min(capacity.Unused, capacity.Free);
+        return new StorageHealth(true, StorageLevel(free, capacity.Allocated), capacity.Allocated, free, null);
     }
+
+    /// <summary>The running storage role's latest capacity measurement (#197); null when it isn't running.</summary>
+    public StorageCapacitySnapshot? StorageCapacity() =>
+        supervisor.Storage.Status == ComponentStatus.Running
+            ? supervisor.Storage.Services?.GetService<StorageCapacityMonitor>()?.Current
+            : null;
 
     private ComputeHealth Compute()
     {
