@@ -1,8 +1,6 @@
 using System.Numerics;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
-using Nethereum.ABI.FunctionEncoding.Attributes;
-using Nethereum.Contracts;
 using Symposia.NodeHost.Components;
 
 namespace Symposia.NodeHost.Diagnostics;
@@ -255,17 +253,17 @@ public sealed class ChainStorageHistorySource(ComponentSupervisor supervisor, IL
         var epochs = SampleEpochs(first, current - 1, MaxEpochs);
 
         var web3 = new Nethereum.Web3.Web3(network.RpcUrl);
-        var query = web3.Eth.GetContractQueryHandler<GetEpochMetricRecordFunction>();
+        var query = web3.Eth.GetContractQueryHandler<Symposia.Blockchain.Contracts.GetEpochMetricRecordFunction>();
         var calls = nodes.SelectMany(n => epochs.Select(e => (Node: n.ToLowerInvariant(), Epoch: e))).ToList();
-        var results = new (string Node, long Epoch, EpochMetricRecord? Record, bool Read)[calls.Count];
+        var results = new (string Node, long Epoch, Symposia.Blockchain.Contracts.AggregatedMetricRecord? Record, bool Read)[calls.Count];
         await Parallel.ForEachAsync(Enumerable.Range(0, calls.Count), new ParallelOptions { MaxDegreeOfParallelism = Concurrency, CancellationToken = ct },
             async (i, token) =>
             {
                 var (node, epoch) = calls[i];
                 try
                 {
-                    var output = await query.QueryDeserializingToObjectAsync<EpochMetricRecordOutput>(
-                        new GetEpochMetricRecordFunction { Node = node, Epoch = epoch }, network.TelemetryRegistryAddress).WaitAsync(token);
+                    var output = await query.QueryDeserializingToObjectAsync<Symposia.Blockchain.Contracts.EpochMetricRecordOutput>(
+                        new Symposia.Blockchain.Contracts.GetEpochMetricRecordFunction { Node = node, Epoch = epoch }, network.TelemetryRegistryAddress).WaitAsync(token);
                     results[i] = (node, epoch, output?.Record is { Exists: true } r ? r : null, true);
                 }
                 catch (Exception ex) when (!token.IsCancellationRequested)
@@ -316,38 +314,5 @@ public sealed class ChainStorageHistorySource(ComponentSupervisor supervisor, IL
 
         var step = (double)(count - 1) / (max - 1);
         return Enumerable.Range(0, max).Select(i => last - (long)Math.Round(i * step)).Distinct().Order().ToList();
-    }
-
-    [Function("getEpochMetricRecord")]
-    public sealed class GetEpochMetricRecordFunction : FunctionMessage
-    {
-        [Parameter("address", "node", 1)] public string Node { get; set; } = "";
-
-        [Parameter("uint256", "epoch", 2)] public BigInteger Epoch { get; set; }
-    }
-
-    [FunctionOutput]
-    public sealed class EpochMetricRecordOutput : IFunctionOutputDTO
-    {
-        [Parameter("tuple", "", 1, structTypeName: "AggregatedMetricRecord")] public EpochMetricRecord Record { get; set; } = new();
-    }
-
-    /// <summary>ABI mirror of <c>TelemetryCheckpointRegistry.AggregatedMetricRecord</c>.</summary>
-    [Struct("AggregatedMetricRecord")]
-    public sealed class EpochMetricRecord
-    {
-        [Parameter("tuple", "selfReported", 1, structTypeName: "MetricValues")] public Symposia.Blockchain.Contracts.MetricValuesInput SelfReported { get; set; } = new();
-        [Parameter("tuple", "verifierAttested", 2, structTypeName: "MetricValues")] public Symposia.Blockchain.Contracts.MetricValuesInput VerifierAttested { get; set; } = new();
-        [Parameter("uint32", "heartbeatsReceived", 3)] public uint HeartbeatsReceived { get; set; }
-        [Parameter("uint32", "heartbeatsExpected", 4)] public uint HeartbeatsExpected { get; set; }
-        [Parameter("uint16", "heartbeatComplianceBps", 5)] public ushort HeartbeatComplianceBps { get; set; }
-        [Parameter("uint16", "attestationCount", 6)] public ushort AttestationCount { get; set; }
-        [Parameter("uint16", "firstCheckpoint", 7)] public ushort FirstCheckpoint { get; set; }
-        [Parameter("uint16", "lastCheckpoint", 8)] public ushort LastCheckpoint { get; set; }
-        [Parameter("bool", "eligible", 9)] public bool Eligible { get; set; }
-        [Parameter("bool", "divergenceFlag", 10)] public bool DivergenceFlag { get; set; }
-        [Parameter("bool", "exists", 11)] public bool Exists { get; set; }
-        [Parameter("uint64", "availableBytes", 12)] public ulong AvailableBytes { get; set; }
-        [Parameter("uint64", "usedBytes", 13)] public ulong UsedBytes { get; set; }
     }
 }
