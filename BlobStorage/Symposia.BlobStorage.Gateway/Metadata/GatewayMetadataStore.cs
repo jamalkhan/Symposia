@@ -170,6 +170,20 @@ public sealed partial class GatewayMetadataStore
             ("$n", name), ("$t", Now())));
     }
 
+    /// <summary>Every bucket with its creation time, by name (#203).</summary>
+    public IReadOnlyList<(string Name, DateTimeOffset CreatedAt)> ListBuckets()
+    {
+        using var conn = Open();
+        using var r = Query(conn, "SELECT name, created_at FROM buckets ORDER BY name").ExecuteReader();
+        var buckets = new List<(string, DateTimeOffset)>();
+        while (r.Read())
+        {
+            buckets.Add((r.GetString(0), DateTimeOffset.Parse(r.GetString(1))));
+        }
+
+        return buckets;
+    }
+
     /// <summary>Returns false if the bucket is non-empty.</summary>
     public bool DeleteBucket(string name)
     {
@@ -198,12 +212,14 @@ public sealed partial class GatewayMetadataStore
             EtagOverride: r.IsDBNull(5) ? null : r.GetString(5));
     }
 
-    public void PutObject(ObjectRecord record)
+    /// <summary>Inserts or replaces an object; true when it replaced one (read inside the write's transaction, #204).</summary>
+    public bool PutObject(ObjectRecord record)
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
-        UpsertObject(conn, tx, record);
+        var replaced = UpsertObject(conn, tx, record);
         tx.Commit();
+        return replaced;
     }
 
     /// <summary>
@@ -212,14 +228,16 @@ public sealed partial class GatewayMetadataStore
     /// deletion queued before this write must not run), and queues the overwritten blob for GC if
     /// nothing references it any more.
     /// </summary>
-    private static void UpsertObject(SqliteConnection conn, SqliteTransaction tx, ObjectRecord record)
+    private static bool UpsertObject(SqliteConnection conn, SqliteTransaction tx, ObjectRecord record)
     {
         (string Cid, string[] NodeIds)? previous = null;
+        bool existed;
         using (var old = Query(conn, "SELECT cid, node_ids FROM objects WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key)))
         {
             old.Transaction = tx;
             using var r = old.ExecuteReader();
-            if (r.Read() && r.GetString(0) != record.Cid)
+            existed = r.Read();
+            if (existed && r.GetString(0) != record.Cid)
             {
                 previous = (r.GetString(0), SplitNodeIds(r.GetString(1)));
             }
@@ -248,6 +266,8 @@ public sealed partial class GatewayMetadataStore
         {
             CollectIfUnreferenced(conn, tx, p.Cid, p.NodeIds);
         }
+
+        return existed;
     }
 
     /// <summary>A blob is referenced again: drop any queued deletion of it (GC/dedup race, #5 review).</summary>
@@ -288,6 +308,37 @@ public sealed partial class GatewayMetadataStore
         using var cmd = Query(conn, sql, args);
         cmd.Transaction = tx;
         cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Deletes an object and, in the same IMMEDIATE transaction, queues its blob for GC if nothing
+    /// else references the CID (#203 review). The physical delete is left to GcWorker after
+    /// <c>GcMinAgeSeconds</c>, and an upload that dedups onto the CID meanwhile cancels it, so a
+    /// concurrent identical PUT can't be left pointing at a deleted blob. Returns the removed record.
+    /// </summary>
+    public ObjectRecord? DeleteObjectAndCollect(string bucket, string key)
+    {
+        var record = GetObject(bucket, key);
+        if (record is null)
+        {
+            return null;
+        }
+
+        using var conn = Open();
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        using (var delete = Query(conn, "DELETE FROM objects WHERE bucket = $b AND key = $k AND cid = $cid",
+                   ("$b", bucket), ("$k", key), ("$cid", record.Cid)))
+        {
+            delete.Transaction = tx;
+            if (delete.ExecuteNonQuery() == 0)
+            {
+                return null; // replaced or deleted since the read; the newer write's record stands
+            }
+        }
+
+        CollectIfUnreferenced(conn, tx, record.Cid, record.NodeIds);
+        tx.Commit();
+        return record;
     }
 
     /// <summary>Returns false if the object did not exist (externally delete is always idempotent).</summary>
@@ -580,8 +631,14 @@ public sealed partial class GatewayMetadataStore
 
         if (!string.IsNullOrEmpty(prefix))
         {
-            sql.Append(" AND key LIKE $prefix ESCAPE '\\'");
-            cmd.Parameters.AddWithValue("$prefix", EscapeLike(prefix) + "%");
+            // A key range rather than LIKE (#203): it stays on the (bucket, key) index, and it's
+            // case-sensitive, where SQLite's LIKE folds ASCII case (prefix "A" matched "a..." keys).
+            // The range bounds the index seek; substr filters to exact prefix matches inside it. The
+            // upper bound (prefix + two U+10FFFF, the highest code point) misses only keys continuing
+            // with two U+10FFFF noncharacters and more, which no client sends.
+            sql.Append(" AND key >= $prefix AND key <= $prefixEnd AND substr(key, 1, length($prefix)) = $prefix");
+            cmd.Parameters.AddWithValue("$prefix", prefix);
+            cmd.Parameters.AddWithValue("$prefixEnd", prefix + char.ConvertFromUtf32(0x10FFFF) + char.ConvertFromUtf32(0x10FFFF));
         }
 
         if (!string.IsNullOrEmpty(continuationToken))
@@ -618,9 +675,6 @@ public sealed partial class GatewayMetadataStore
 
     private static string[] SplitNodeIds(string raw) =>
         raw.Length == 0 ? [] : raw.Split(',');
-
-    private static string EscapeLike(string value) =>
-        value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
     private static string Now() => DateTimeOffset.UtcNow.ToString("O");
 

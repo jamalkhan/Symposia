@@ -11,3 +11,6 @@ public sealed class EpochStartFunction : FunctionMessage { [Parameter("uint256",
 
 [Function("epochLength", "uint256")]
 public sealed class EpochLengthFunction : FunctionMessage;
+
+[Function("currentEpoch", "uint256")]
+public sealed class CurrentEpochFunction : FunctionMessage;

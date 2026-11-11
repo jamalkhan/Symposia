@@ -38,6 +38,9 @@ public abstract class WebAppComponent : HostComponent
     protected override string? SkipReason(HostContext context) =>
         context.Network is null ? "Waiting for the network (see chain component)" : null;
 
+    /// <summary>The on-chain Node Service this role stakes on a LocalDev network (#200), and the capacity it stakes for; null = none.</summary>
+    protected virtual (byte Service, long Capacity)? StakedService(HostContext context) => null;
+
     protected override async Task OnStartAsync(HostContext context, CancellationToken ct)
     {
         var dir = context.Paths.Component(Name);
@@ -77,6 +80,16 @@ public abstract class WebAppComponent : HostComponent
         }
 
         await _app.StartAsync(ct);
+        StartLocalDevStaking(context);
+    }
+
+    /// <summary>On a LocalDev network, asks the host's shared staker to stake this role's Node Service (#200).</summary>
+    private void StartLocalDevStaking(HostContext context)
+    {
+        if (StakedService(context) is { } staked)
+        {
+            context.LocalDevStaking?.Request(staked.Service, staked.Capacity);
+        }
     }
 
     protected override async Task OnStopAsync()
