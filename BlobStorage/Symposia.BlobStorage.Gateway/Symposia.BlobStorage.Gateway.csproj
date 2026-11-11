@@ -23,4 +23,8 @@
     </AssemblyAttribute>
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Api/openapi.json" LogicalName="Symposia.BlobStorage.Gateway.Api.openapi.json" />
+  </ItemGroup>
+
 </Project>

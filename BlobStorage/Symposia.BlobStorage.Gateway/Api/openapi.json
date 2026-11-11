@@ -1,0 +1,42 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Symposia Blob API", "version": "1", "description": "Symposia-native blob API (issue #203), beside the S3-compatible API over the same buckets and objects. Authenticate every call except this document with AWS Signature V4 (service \"s3\", region = the gateway's region) using the gateway's access keys." },
+  "servers": [{ "url": "/" }],
+  "components": {
+    "securitySchemes": { "sigv4": { "type": "apiKey", "in": "header", "name": "Authorization", "description": "AWS4-HMAC-SHA256 SigV4 Authorization header, with x-amz-date and x-amz-content-sha256." } },
+    "schemas": {
+      "Error": { "type": "object", "properties": { "error": { "type": "object", "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "requestId": { "type": "string" } }, "required": ["code", "message", "requestId"] } } },
+      "Object": { "type": "object", "properties": { "bucket": { "type": "string" }, "key": { "type": "string" }, "size": { "type": "integer" }, "contentType": { "type": "string" }, "etag": { "type": "string" }, "cid": { "type": "string" }, "lastModified": { "type": "string", "format": "date-time" } } },
+      "ObjectMeta": { "allOf": [{ "$ref": "#/components/schemas/Object" }, { "type": "object", "properties": { "replicas": { "type": "array", "items": { "type": "string" } } } }] }
+    }
+  },
+  "security": [{ "sigv4": [] }],
+  "paths": {
+    "/v1/openapi.json": { "get": { "summary": "This document.", "security": [], "responses": { "200": { "description": "OpenAPI 3.1 document." } } } },
+    "/v1/buckets": { "get": { "summary": "List buckets.", "responses": { "200": { "description": "{ buckets: [{ name, createdAt }] }" } } } },
+    "/v1/buckets/{bucket}": {
+      "parameters": [{ "name": "bucket", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "put": { "summary": "Create a bucket (idempotent). S3 naming rules.", "responses": { "200": { "description": "{ name }" }, "400": { "description": "InvalidBucketName", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } } },
+      "delete": { "summary": "Delete an empty bucket.", "responses": { "204": { "description": "Deleted." }, "404": { "description": "NoSuchBucket" }, "409": { "description": "BucketNotEmpty" } } }
+    },
+    "/v1/buckets/{bucket}/objects": {
+      "parameters": [
+        { "name": "bucket", "in": "path", "required": true, "schema": { "type": "string" } },
+        { "name": "prefix", "in": "query", "schema": { "type": "string" } },
+        { "name": "cursor", "in": "query", "description": "Opaque; the previous page's nextCursor.", "schema": { "type": "string" } },
+        { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 } }
+      ],
+      "get": { "summary": "List objects by key, paged.", "responses": { "200": { "description": "{ objects: Object[], nextCursor: string|null }" }, "400": { "description": "InvalidArgument" }, "404": { "description": "NoSuchBucket" } } }
+    },
+    "/v1/buckets/{bucket}/objects/{key}": {
+      "parameters": [
+        { "name": "bucket", "in": "path", "required": true, "schema": { "type": "string" } },
+        { "name": "key", "in": "path", "required": true, "description": "May contain slashes.", "schema": { "type": "string" } }
+      ],
+      "put": { "summary": "Write an object (raw body).", "responses": { "200": { "description": "Object", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } } }, "404": { "description": "NoSuchBucket" } } },
+      "get": { "summary": "Read an object (supports Range). With ?meta, its metadata and replica placement instead.", "parameters": [{ "name": "meta", "in": "query", "allowEmptyValue": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Object bytes, or ObjectMeta with ?meta." }, "206": { "description": "Partial content." }, "404": { "description": "NoSuchKey" } } },
+      "head": { "summary": "Object headers only.", "responses": { "200": { "description": "Exists." }, "404": { "description": "Missing." } } },
+      "delete": { "summary": "Delete an object (idempotent).", "responses": { "204": { "description": "Deleted or absent." } } }
+    }
+  }
+}

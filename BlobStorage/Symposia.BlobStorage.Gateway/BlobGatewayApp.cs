@@ -1,3 +1,4 @@
+using Symposia.BlobStorage.Gateway.Api;
 using Symposia.BlobStorage.Gateway;
 using Symposia.BlobStorage.Gateway.Admin;
 using Symposia.BlobStorage.Gateway.Auth;
@@ -132,12 +133,15 @@ public static class BlobGatewayApp
 
         // ── SigV4 middleware ──────────────────────────────────────────────────────────
 
-        // Runs before routing. Exempt health and admin endpoints.
+        app.UseRequestIds();
+
+        // Runs before routing. Exempt health and admin endpoints, and the /v1 API's OpenAPI document.
         app.Use(async (ctx, next) =>
         {
             var path = ctx.Request.Path.Value ?? "";
             if (path.StartsWith("/healthz/", StringComparison.Ordinal) ||
-                path.StartsWith("/admin/", StringComparison.Ordinal))
+                path.StartsWith("/admin/", StringComparison.Ordinal) ||
+                path == BlobApiEndpoints.OpenApiPath)
             {
                 await next();
                 return;
@@ -146,6 +150,12 @@ public static class BlobGatewayApp
             var verifier = ctx.RequestServices.GetRequiredService<SigV4Verifier>();
             var sigv4 = verifier.Authenticate(ctx.Request);
             var tenantId = sigv4?.TenantId;
+            if (tenantId is null && ctx.Request.Path.StartsWithSegments(BlobApiEndpoints.Prefix))
+            {
+                await BlobApiEndpoints.Error(401, "AccessDenied", "Missing or invalid AWS Signature V4.").ExecuteAsync(ctx);
+                return;
+            }
+
             if (tenantId is null)
             {
                 ctx.Response.StatusCode = 403;
@@ -177,6 +187,11 @@ public static class BlobGatewayApp
         AdminEndpoints.Map(app);
 
         // ── S3 routes ─────────────────────────────────────────────────────────────────
+
+        // ── Symposia-native API (#203) ────────────────────────────────────────────────
+
+        // The literal /v1 segment outranks S3's {bucket} parameter; registered first for clarity.
+        BlobApiEndpoints.Map(app);
 
         // Object routes must be registered before bucket routes so /{bucket}/{**key}
         // takes priority over /{bucket} when a key is present.
