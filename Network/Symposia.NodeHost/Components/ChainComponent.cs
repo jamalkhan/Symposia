@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using Symposia.Blockchain.Gateway.Chain;
 using Symposia.NodeHost.Settings;
 
 namespace Symposia.NodeHost.Components;
@@ -87,13 +88,8 @@ public sealed partial class ChainComponent : HostComponent
                 $"Port {network.AnvilPort} already has a chain on it (another host?). Use Join mode with that host's gateway URL, or change the anvil port.");
         }
 
-        // #210: pick stale history dirs before our anvil starts (so its own dir is never picked), delete off the startup path.
-        var staleHistory = AnvilTmpSweeper.FindStale(AnvilTmpSweeper.DefaultTmpDir, AnvilTmpSweeper.RunningAnvilStartTimesUtc());
-        if (staleHistory.Count > 0)
-        {
-            context.Logger.LogInformation("Removing {Count} stale anvil history dirs.", staleHistory.Count);
-            _ = Task.Run(() => AnvilTmpSweeper.Delete(staleHistory, context.Logger), CancellationToken.None);
-        }
+        // #210: sweep leaked history dirs; picked before our anvil starts, deleted off the startup path.
+        AnvilTmpSweeper.SweepInBackground(AnvilTmpSweeper.DefaultTmpDir, context.Logger);
 
         var anvilPath = FindFoundryTool(network.FoundryBin, "anvil");
         var start = new ProcessStartInfo
@@ -439,18 +435,11 @@ public sealed partial class ChainComponent : HostComponent
     /// --block-time: mine on an interval, not only on transactions, so the chain clock keeps up with
     /// real time and epochs close on an idle network (#193). --state-interval: also save periodically,
     /// so a crash or hard kill (or Windows, which has no SIGINT) loses at most a few seconds of chain state.
-    /// --prune-history: keep only recent states in memory and never spill history to ~/.foundry/anvil/tmp,
-    /// which a hard-killed anvil leaks (#210). --state still dumps the current state.
+    /// <see cref="AnvilArgs.PruneHistory"/>: never spill history to ~/.foundry/anvil/tmp, which a hard-killed anvil leaks (#210).
     /// </summary>
     internal static IReadOnlyList<string> AnvilArguments(int port, string statePath) =>
         ["--port", port.ToString(), "--chain-id", AnvilChainId.ToString(), "--block-time", AnvilBlockSeconds.ToString(),
-         "--state", statePath, "--state-interval", "5", "--prune-history", AnvilHistoryStates.ToString(), "--silent"];
-
-    /// <summary>
-    /// States anvil keeps (#210): ~2 minutes at <see cref="AnvilBlockSeconds"/>. Every pinned-block read in the
-    /// repo reads the latest block, and the ledger's start-block search falls back without archive state (#182).
-    /// </summary>
-    internal const int AnvilHistoryStates = 64;
+         "--state", statePath, "--state-interval", "5", .. AnvilArgs.PruneHistory, "--silent"];
 
     /// <summary>This host's node address, the LocalDev telemetry committee (#181 FR2).</summary>
     internal static string LocalNodeAddress(HostContext context)

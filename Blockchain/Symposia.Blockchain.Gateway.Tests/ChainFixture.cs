@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Symposia.Blockchain.Gateway.Chain;
 
 namespace Symposia.Blockchain.Gateway.Tests;
 
@@ -62,7 +63,7 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
         _anvil = Process.Start(new ProcessStartInfo
         {
             FileName = Path.Combine(foundryBin, "anvil"),
-            Arguments = AnvilLaunch.Arguments(_port),
+            Arguments = string.Join(' ', AnvilArgs.Fixture(_port)),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
