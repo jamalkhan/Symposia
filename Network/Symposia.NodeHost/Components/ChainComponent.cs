@@ -21,6 +21,7 @@ public sealed partial class ChainComponent : HostComponent
     internal const string AnvilDevKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
     private const ulong AnvilChainId = 31337;
+    private const int AnvilBlockSeconds = 2;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
 
     private Process? _anvil;
@@ -87,15 +88,18 @@ public sealed partial class ChainComponent : HostComponent
         }
 
         var anvilPath = FindFoundryTool(network.FoundryBin, "anvil");
-        _anvil = Process.Start(new ProcessStartInfo
+        var start = new ProcessStartInfo
         {
             FileName = anvilPath,
-            // --state-interval: also save periodically, so a crash or hard kill (or Windows, which
-            // has no SIGINT) loses at most a few seconds of chain state.
-            ArgumentList = { "--port", network.AnvilPort.ToString(), "--chain-id", AnvilChainId.ToString(), "--state", context.Paths.AnvilState, "--state-interval", "5", "--silent" },
             // Not redirected: undrained pipes would eventually block anvil.
             UseShellExecute = false,
-        }) ?? throw new ComponentFaultException("Failed to start anvil.");
+        };
+        foreach (var arg in AnvilArguments(network.AnvilPort, context.Paths.AnvilState))
+        {
+            start.ArgumentList.Add(arg);
+        }
+
+        _anvil = Process.Start(start) ?? throw new ComponentFaultException("Failed to start anvil.");
 
         await WaitForRpcAsync(rpcUrl, ct);
 
@@ -423,16 +427,27 @@ public sealed partial class ChainComponent : HostComponent
         }
     }
 
+    /// <summary>
+    /// --block-time: mine on an interval, not only on transactions, so the chain clock keeps up with
+    /// real time and epochs close on an idle network (#193). --state-interval: also save periodically,
+    /// so a crash or hard kill (or Windows, which has no SIGINT) loses at most a few seconds of chain state.
+    /// </summary>
+    internal static IReadOnlyList<string> AnvilArguments(int port, string statePath) =>
+        ["--port", port.ToString(), "--chain-id", AnvilChainId.ToString(), "--block-time", AnvilBlockSeconds.ToString(),
+         "--state", statePath, "--state-interval", "5", "--silent"];
+
     /// <summary>This host's node address, the LocalDev telemetry committee (#181 FR2).</summary>
-    private static string LocalNodeAddress(HostContext context)
+    internal static string LocalNodeAddress(HostContext context)
     {
         if (!File.Exists(context.Paths.NodeKey))
         {
             throw new ComponentFaultException("LocalDev needs this host's node key to make it the telemetry committee, and none was found.");
         }
 
-        return new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
-            new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = context.Paths.NodeKey })).NodeId;
+        var identity = new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
+            new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = context.Paths.NodeKey }));
+        identity.EnsureLoadedOrGenerated(); // the key exists (checked above), so this only loads it
+        return identity.NodeId;
     }
 
     /// <summary>Compares the deployed epoch length and committee with the LocalDev profile; null when they match.</summary>
