@@ -124,6 +124,75 @@ public sealed class TelemetryGossipReachTests : IDisposable
         Assert.Null(_diagnostics.GossipWarning(_time.GetUtcNow(), otherMembers: 2)); // clears after a successful push
     }
 
+    // Review (Lenny 1/2, Frank 1): a 404 or 401 from every target must never lose the queue.
+    [Fact]
+    public async Task OnlyPeerAnswers404_NothingIsLost_AndItAllGoesOutToARealPeerLater()
+    {
+        var gossip = Node(new TelemetryGossipOptions { MaxItemsPerRequest = 2 });
+        _peers.Add(_peer.NodeId);
+        _network.Status = HttpStatusCode.NotFound;
+        for (uint s = 0; s < 6; s++)
+        {
+            await gossip.PublishAsync(Beat(s));
+        }
+
+        await gossip.FlushAsync(new HttpClient(_network), default);
+        Assert.Equal(1, _network.Attempts); // one 404, then it stops targeting that peer
+        Assert.Equal(0, gossip.Metrics.Dropped);
+
+        var real = TestSupport.NewIdentity(_dir);
+        _peers.Add(real.NodeId);
+        _network.Status = HttpStatusCode.Accepted;
+        await gossip.FlushAsync(new HttpClient(_network), default);
+        Assert.Equal(6, gossip.Metrics.Pushed);
+        Assert.Equal(0, gossip.Metrics.Dropped);
+    }
+
+    [Fact]
+    public async Task PeerThatHasntRecognizedUsYet_401_KeepsTheBatchQueued()
+    {
+        _peers.Add(_peer.NodeId);
+        _network.Status = HttpStatusCode.Unauthorized;
+        await _gossip.PublishAsync(Beat(0));
+        await FlushAsync();
+        Assert.Equal(1, _network.Attempts); // no pointless retries on a 401
+
+        _network.Status = HttpStatusCode.Accepted;
+        Assert.Equal(1, await FlushAsync());
+        Assert.Equal(1, _gossip.Metrics.Pushed);
+    }
+
+    [Fact]
+    public async Task PushedCountsEachItemOnce_WhateverTheFanOut()
+    {
+        _peers.Add(_peer.NodeId);
+        _peers.Add(TestSupport.NewIdentity(_dir).NodeId);
+        await _gossip.PublishAsync(Beat(0));
+
+        Assert.Equal(2, await FlushAsync());
+        Assert.Equal(1, _gossip.Metrics.Pushed);
+    }
+
+    [Fact]
+    public async Task ComputeOnlyPeers_NeverRaiseTheWarning()
+    {
+        _peers.Add(_peer.NodeId);
+        _network.Status = HttpStatusCode.NotFound;
+        _diagnostics.Accepted(0, 0, _time.GetUtcNow());
+        await _gossip.PublishAsync(Beat(0));
+        await FlushAsync();
+        await FlushAsync();
+
+        Assert.Equal(1, _diagnostics.Gossip.UnsupportedPeers);
+        Assert.Null(_diagnostics.GossipWarning(_time.GetUtcNow().AddHours(2), otherMembers: 1));
+        Assert.NotNull(_diagnostics.GossipWarning(_time.GetUtcNow().AddHours(2), otherMembers: 2)); // a storage peer is still unreached
+    }
+
+    private TelemetryGossipNode Node(TelemetryGossipOptions options) =>
+        new(new InMemoryTelemetryGossip(TestSupport.ChainId, TestSupport.Registry), _peers, new NodeIdentityTelemetrySigner(_self),
+            new TelemetryEip712(TestSupport.ChainId, "0x00000000000000000000000000000000000000aa"), _time, Options.Create(options),
+            TestSupport.ChainId, _diagnostics, new TelemetryScheduleSource(Schedule));
+
     private Task<int> FlushAsync() => _gossip.FlushAsync(new HttpClient(_network), default);
 
     private SignedTelemetry<HeartbeatSample> Beat(uint slot) =>

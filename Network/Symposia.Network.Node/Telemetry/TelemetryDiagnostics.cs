@@ -24,8 +24,11 @@ public sealed class TelemetryDiagnostics
     }
 
     /// <summary>Records one flush: how many peers it could target and the checkpoint window length it warns over.</summary>
-    public void GossipTargets(int recognizedPeers, long windowSeconds, DateTimeOffset at) =>
-        UpdateGossip(g => g with { RecognizedPeers = recognizedPeers, WindowSeconds = windowSeconds, Since = g.Since ?? at });
+    public void GossipTargets(int recognizedPeers, int unsupportedPeers, long windowSeconds, DateTimeOffset at) =>
+        UpdateGossip(g => g with
+        {
+            RecognizedPeers = recognizedPeers, UnsupportedPeers = unsupportedPeers, WindowSeconds = windowSeconds, Since = g.Since ?? at,
+        });
 
     public void GossipPushed(DateTimeOffset at) => UpdateGossip(g => g with { LastPushSucceeded = at });
 
@@ -34,11 +37,13 @@ public sealed class TelemetryDiagnostics
     /// <summary>
     /// Why heartbeats may not be reaching the committee, or null. Only once a heartbeat was accepted,
     /// other registry members exist, and a full checkpoint window has passed since gossip started.
+    /// <paramref name="otherMembers"/> is the registry's other nodes; those known not to gossip
+    /// (404, e.g. compute-only) are discounted, so they never raise a false warning.
     /// </summary>
     public string? GossipWarning(DateTimeOffset now, int otherMembers)
     {
         var g = Gossip;
-        if (Current.LastAccepted is null || otherMembers == 0 || g.Since is not { } since)
+        if (Current.LastAccepted is null || otherMembers - g.UnsupportedPeers <= 0 || g.Since is not { } since)
         {
             return null;
         }
@@ -85,9 +90,10 @@ public sealed class TelemetryDiagnostics
         while (Interlocked.CompareExchange(ref _gossip, next, seen) != seen);
     }
 
-    public sealed record GossipState(int RecognizedPeers, DateTimeOffset? LastPushSucceeded, long FailedPushes, long WindowSeconds, DateTimeOffset? Since)
+    public sealed record GossipState(
+        int RecognizedPeers, int UnsupportedPeers, DateTimeOffset? LastPushSucceeded, long FailedPushes, long WindowSeconds, DateTimeOffset? Since)
     {
-        public static readonly GossipState Empty = new(0, null, 0, 3600, null);
+        public static readonly GossipState Empty = new(0, 0, null, 0, (long)Committee.TelemetryGossipOptions.FallbackWindow.TotalSeconds, null);
     }
 
     public sealed record Snapshot(bool ScheduleSynced, HeartbeatEvent? LastAccepted, HeartbeatEvent? LastRejected, string? ScheduleProblem);

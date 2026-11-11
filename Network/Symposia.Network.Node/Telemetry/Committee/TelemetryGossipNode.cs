@@ -59,6 +59,9 @@ public sealed class TelemetryGossipOptions
 
     public long MaxClockSkewSeconds { get; set; } = 60;
 
+    /// <summary>The warning window before the chain schedule is known (#207); afterwards it's one checkpoint window.</summary>
+    public static readonly TimeSpan FallbackWindow = TimeSpan.FromMinutes(10);
+
     /// <summary>Items kept queued while no peer is reachable (#207); the oldest are dropped beyond this.</summary>
     public int MaxQueuedItems { get; set; } = 10_000;
 }
@@ -199,25 +202,23 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
         }
     }
 
-    /// <summary>Drains the outbound queue and pushes it to a random subset of peers. Returns envelopes sent.</summary>
+    /// <summary>
+    /// Drains the outbound queue and pushes it to a random subset of peers. Returns envelopes sent.
+    /// A batch no peer accepted (unreachable, 401 before the peer recognizes us, or only 404 peers)
+    /// goes back on the queue rather than being lost (#207); only the <see cref="TelemetryGossipOptions.MaxQueuedItems"/>
+    /// bound ever drops items, oldest first.
+    /// </summary>
     public async Task<int> FlushAsync(HttpClient http, CancellationToken ct)
     {
         var now = _time.GetUtcNow();
-        var peers = _peers.Peers()
-            .Where(p => !string.Equals(p.Address, _signer.Address, StringComparison.OrdinalIgnoreCase)
-                        && !(_unsupported.TryGetValue(p.Address, out var until) && until > now))
-            .ToList();
-        _diagnostics?.GossipTargets(peers.Count, WindowSeconds, now);
+        Prune(now);
+        var peers = Targets(now);
+        _diagnostics?.GossipTargets(peers.Count, _unsupported.Count, WindowSeconds, now);
+        Trim();
         if (peers.Count == 0)
         {
-            // Keep the queue (#207): heartbeats from before the first discovery tick, or during a
-            // network restart, must still reach the committee once a peer is recognized.
-            var excess = _outbound.Count - _options.MaxQueuedItems;
-            for (; excess > 0 && _outbound.TryDequeue(out _); excess--)
-            {
-                Interlocked.Increment(ref Metrics.DroppedField);
-            }
-
+            // Keep the queue: heartbeats from before the first discovery tick, or during a network
+            // restart, must still reach the committee once a peer is recognized.
             if (!_outbound.IsEmpty)
             {
                 WarnOnce("", "No recognized telemetry gossip peers; {Count} items stay queued until one is recognized.", _outbound.Count);
@@ -227,12 +228,18 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
         }
 
         var sent = 0;
-        while (!_outbound.IsEmpty)
+        for (var pending = _outbound.Count; pending > 0 && peers.Count > 0;)
         {
             var batch = new List<object>(_options.MaxItemsPerRequest);
-            while (batch.Count < _options.MaxItemsPerRequest && _outbound.TryDequeue(out var item))
+            while (batch.Count < _options.MaxItemsPerRequest && pending > 0 && _outbound.TryDequeue(out var item))
             {
                 batch.Add(item);
+                pending--;
+            }
+
+            if (batch.Count == 0)
+            {
+                break;
             }
 
             var envelope = new TelemetryEnvelope(
@@ -240,17 +247,68 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
                 [.. batch.OfType<SignedTelemetry<Attestation>>()],
                 [.. batch.OfType<CheckpointEndorsement>()],
                 [.. batch.OfType<RecordsSignature>()]);
-            var targets = peers.OrderBy(_ => Random.Shared.Next()).Take(_options.FanOut);
-            foreach (var peer in targets)
+            var delivered = false;
+            foreach (var peer in peers.OrderBy(_ => Random.Shared.Next()).Take(_options.FanOut).ToList())
             {
                 if (await PushAsync(http, peer, envelope, ct))
                 {
+                    delivered = true;
                     sent++;
                 }
             }
+
+            peers = Targets(_time.GetUtcNow()); // a peer that just answered 404 is no longer a target
+            if (delivered)
+            {
+                Interlocked.Add(ref Metrics.PushedField, batch.Count);
+                continue;
+            }
+
+            // Nobody took it: requeue and stop for this tick, so an isolated node retries once per flush.
+            foreach (var item in batch)
+            {
+                _outbound.Enqueue(item);
+            }
+
+            Trim();
+            break;
         }
 
         return sent;
+    }
+
+    private List<(string Address, string Endpoint)> Targets(DateTimeOffset now) =>
+        [.. _peers.Peers().Where(p => !string.Equals(p.Address, _signer.Address, StringComparison.OrdinalIgnoreCase)
+                                      && !(_unsupported.TryGetValue(p.Address, out var until) && until > now))];
+
+    /// <summary>Drops the oldest queued items beyond <see cref="TelemetryGossipOptions.MaxQueuedItems"/>.</summary>
+    private void Trim()
+    {
+        for (var excess = _outbound.Count - _options.MaxQueuedItems; excess > 0 && _outbound.TryDequeue(out _); excess--)
+        {
+            Interlocked.Increment(ref Metrics.DroppedField);
+        }
+    }
+
+    /// <summary>Forgets expired 404 back-offs and warnings from past windows, so neither grows with peer churn.</summary>
+    private void Prune(DateTimeOffset now)
+    {
+        foreach (var (address, until) in _unsupported)
+        {
+            if (until <= now)
+            {
+                _unsupported.TryRemove(address, out _);
+            }
+        }
+
+        var window = now.ToUnixTimeSeconds() / WindowSeconds;
+        foreach (var (key, last) in _warned)
+        {
+            if (last < window)
+            {
+                _warned.TryRemove(key, out _);
+            }
+        }
     }
 
     /// <summary>Pushes an envelope straight to specific peers (e.g. missing samples to the committee, #158 huddle item 12).</summary>
@@ -266,7 +324,7 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
     /// <summary>The checkpoint window the warnings and diagnostics are measured over.</summary>
     private long WindowSeconds => _schedule?.Current is { } s && s.CheckpointsPerEpoch > 0
         ? Math.Max(1, s.EpochSeconds / s.CheckpointsPerEpoch)
-        : 3600;
+        : (long)TelemetryGossipOptions.FallbackWindow.TotalSeconds;
 
     private async Task<bool> PushAsync(HttpClient http, (string Address, string Endpoint) peer, TelemetryEnvelope envelope, CancellationToken ct)
     {
@@ -281,7 +339,7 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
                 return false;
             default:
                 _diagnostics?.GossipPushFailed();
-                WarnOnce(peer.Address, "Telemetry gossip push to {Peer} at {Endpoint} failed; its {Count} items were dropped.",
+                WarnOnce(peer.Address, "Telemetry gossip push to {Peer} at {Endpoint} failed; {Count} items stay queued if no other peer takes them.",
                     peer.Address, peer.Endpoint, envelope.Count);
                 return false;
         }
@@ -332,15 +390,17 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
                 using var response = await http.SendAsync(request, ct);
                 if (response.IsSuccessStatusCode)
                 {
-                    Interlocked.Add(ref Metrics.PushedField, envelope.Count);
                     return PushOutcome.Delivered;
                 }
 
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    // Undelivered, so the items count as dropped, but the peer simply doesn't gossip.
-                    Interlocked.Add(ref Metrics.DroppedField, envelope.Count);
-                    return PushOutcome.Unsupported;
+                    return PushOutcome.Unsupported; // the peer simply doesn't gossip
+                }
+
+                if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                {
+                    return PushOutcome.Failed; // it hasn't recognized us yet: retrying now won't help
                 }
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
@@ -348,7 +408,6 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
             }
         }
 
-        Interlocked.Add(ref Metrics.DroppedField, envelope.Count);
         return PushOutcome.Failed;
     }
 
@@ -428,7 +487,10 @@ public sealed class TelemetryGossipMetrics
     /// <summary>Items received from peers and refused, by reason (#183); e.g. a peer with a skewed clock.</summary>
     public TelemetryRejectionCounters ReceivedRejected { get; } = new();
 
+    /// <summary>Items delivered to at least one peer, each counted once.</summary>
     public long Pushed => Interlocked.Read(ref PushedField);
+
+    /// <summary>Items dropped because the outbound queue was full (#207), each counted once.</summary>
 
     public long Dropped => Interlocked.Read(ref DroppedField);
 }

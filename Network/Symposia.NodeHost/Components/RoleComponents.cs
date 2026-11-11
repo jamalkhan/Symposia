@@ -5,7 +5,10 @@ using Symposia.NodeHost.Diagnostics;
 
 namespace Symposia.NodeHost.Components;
 
-/// <summary>Node-network settings every hosted role shares. Roles only answer handshakes; the host registers and discovers once.</summary>
+/// <summary>
+/// Node-network settings every hosted role shares. Roles only answer handshakes; the host registers and discovers once,
+/// so a role that needs peers (telemetry gossip) reads the host's table through <see cref="HostTelemetryPeers"/> (#207).
+/// </summary>
 internal static class RoleNetwork
 {
     public static void Add(IDictionary<string, string?> config, string section, HostContext context, string advertisedEndpoint)

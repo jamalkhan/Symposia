@@ -65,7 +65,8 @@ public sealed class StatusService(ComponentSupervisor supervisor, string nodeAdd
                     lastPushSucceeded = context.Telemetry.Gossip.LastPushSucceeded,
                     failedPushes = context.Telemetry.Gossip.FailedPushes,
                     warning = context.Telemetry.GossipWarning(DateTimeOffset.UtcNow,
-                        peers.Count(p => !string.Equals(p.ExpectedAddress ?? p.Address, nodeAddress, StringComparison.OrdinalIgnoreCase))),
+                        // Registry entries other than this node; seed entries have no expected address.
+                        peers.Count(p => p.ExpectedAddress is { } a && !string.Equals(a, nodeAddress, StringComparison.OrdinalIgnoreCase))),
                 },
             } : null,
             peers = peers.Select(p => new
