@@ -12,6 +12,7 @@
     <span id="node-address" class="mono"></span>
     <nav id="nav" hidden>
       <button data-view="diagnostics" class="tab active">Diagnostics</button>
+      <button data-view="logs" class="tab">Logs</button>
       <button data-view="network" class="tab">Network</button>
       <button data-view="services" class="tab">Node Services</button>
       <button data-view="ledger" class="tab">Ledger</button>
@@ -60,7 +61,10 @@
       </div>
       <div class="card"><h2>Peers <small>(handshake results)</small></h2><table id="peers"></table></div>
       <div class="card"><h2>Registry members</h2><table id="members"></table></div>
-      <div class="card"><h2>Recent log</h2><pre id="logs" class="logs"></pre></div>
+    </section>
+
+    <section id="view-logs" hidden>
+      <div class="card"><h2>Log</h2><pre id="logs" class="logs"></pre></div>
     </section>
 
     <section id="view-network" hidden>

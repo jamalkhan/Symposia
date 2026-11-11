@@ -23,7 +23,7 @@ async function api(method, path, body) {
 }
 
 // Views that live behind the login get a #hash so refresh and back/forward keep the page.
-const NAV_VIEWS = ['diagnostics', 'network', 'services', 'ledger', 'settings'];
+const NAV_VIEWS = ['diagnostics', 'logs', 'network', 'services', 'ledger', 'settings'];
 const hashView = () => (NAV_VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : null);
 
 function show(view) {
@@ -32,6 +32,7 @@ function show(view) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === view));
   clearInterval(pollTimer);
   if (view === 'diagnostics') { refresh(); pollTimer = setInterval(refresh, 5000); }
+  if (view === 'logs') { refreshLogs(); pollTimer = setInterval(refreshLogs, 5000); }
   if (view === 'network') { refreshNetwork(); pollTimer = setInterval(refreshNetwork, 5000); }
   if (view === 'settings') loadSettings();
   if (view === 'services') { loadSettings(); loadServices(); }
@@ -82,11 +83,16 @@ function setTitle(node, chainId) {
   $('header h1').textContent = title;
 }
 
+// Parts of /api/status every polled tab renders (header, alert banner), so one poll per tab keeps them current.
+function applyStatus(s) {
+  $('#node-address').textContent = s.node;
+}
+
 async function refresh() {
   let s;
   try { s = await api('GET', '/status'); $('#stale').hidden = true; }
   catch (ex) { $('#stale').hidden = false; $('#stale').textContent = `Status unavailable (${ex.message}) — showing last known data.`; return; }
-  $('#node-address').textContent = s.node;
+  applyStatus(s);
   $('#unconfigured').hidden = s.mode !== 'Unconfigured';
   $('#components').innerHTML = table(['Component', 'Status', 'Detail'], s.components.map((c) =>
     `<tr><td>${esc(c.name)}</td><td class="status ${esc(c.status)}">${esc(c.status)}</td><td>${esc(c.reason)}</td></tr>`));
@@ -124,9 +130,16 @@ async function refresh() {
       ['Storage nodes', g.storageNodes != null ? `${g.healthyStorageNodes} reachable of ${g.storageNodes}` : ''],
       ['Waiting for another copy', g.underReplicated]]);
   }
-  const logs = $('#logs'), atBottom = logs.scrollTop + logs.clientHeight >= logs.scrollHeight - 4;
+}
+
+// ---------- logs (#195) ----------
+async function refreshLogs() {
+  let s;
+  try { s = await api('GET', '/status'); } catch { return; }
+  applyStatus(s);
+  const logs = $('#logs'), first = !logs.textContent, atBottom = logs.scrollTop + logs.clientHeight >= logs.scrollHeight - 4;
   logs.textContent = s.logs.map((l) => `${new Date(l.time).toLocaleTimeString()} [${l.component}] ${l.level}: ${l.message}`).join('\n');
-  if (atBottom) logs.scrollTop = logs.scrollHeight;
+  if (first || atBottom) logs.scrollTop = logs.scrollHeight;
 }
 
 $('#reset-rewards').addEventListener('click', async () => {

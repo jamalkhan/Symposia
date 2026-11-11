@@ -46,3 +46,4 @@ table.factors td { padding:3px 8px; } td.num { text-align:right; font-variant-nu
 .filters label { margin:0; min-width:180px; }
 a.button { display:inline-block; padding:7px 14px; border-radius:6px; border:1px solid var(--accent); color:var(--accent); text-decoration:none; }
 .neg { color:var(--bad); } .pos { color:var(--ok); }
+#view-logs .logs { max-height:none; height:calc(100vh - 170px); height:calc(100dvh - 170px); white-space:pre-wrap; overflow-wrap:anywhere; }
