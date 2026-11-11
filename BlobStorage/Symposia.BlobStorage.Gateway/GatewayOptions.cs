@@ -77,6 +77,15 @@ public sealed class GatewayOptions
     /// <summary>Port the S3 listener binds on all interfaces.</summary>
     public int ListenPort { get; set; } = 5181;
 
+    /// <summary>Per-object operation history (#204).</summary>
+    public HistoryOptions History { get; set; } = new();
+
+    /// <summary>
+    /// IPs or CIDRs of reverse proxies in front of the gateway (#204). Their <c>X-Forwarded-For</c> is
+    /// honored for the client IP recorded in operation history; empty = trust nothing.
+    /// </summary>
+    public string[] TrustedProxies { get; set; } = [];
+
     /// <summary>How often every storage node is probed for health (seconds).</summary>
     public int ProbeIntervalSeconds { get; set; } = 30;
 
@@ -109,4 +118,17 @@ public enum NodeSourceKind
 {
     Static,
     Registry,
+}
+
+public sealed class HistoryOptions
+{
+    /// <summary>History database file; empty = <c>gateway-history.db</c> beside the metadata DB.</summary>
+    public string DbPath { get; set; } = "";
+
+    /// <summary>Retention override in hours (capped at 720); null = 1 h on chain 31337, else 30 days.</summary>
+    public int? RetentionHours { get; set; }
+
+    public int QueueCapacity { get; set; } = 10_000;
+
+    public int SweepIntervalSeconds { get; set; } = 300;
 }

@@ -198,6 +198,9 @@ internal static class MultipartEndpoints
 
         var parts = requested.Select(p => stored[p.PartNumber]).ToList();
         var finalEtag = MultipartEtag(parts.Select(p => p.Cid));
+        var written = History.HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? History.HistoryOperation.Insert : History.HistoryOperation.Update,
+            bucket, key, "s3");
+        (written.Size, written.Etag) = (parts.Sum(p => p.SizeBytes), finalEtag);
 
         // Assembly runs detached from the request (#5 review): its own service scope, cancelled only by
         // shutdown. A client that disconnects doesn't strand the upload; its retry gets the idempotent result.
@@ -226,6 +229,7 @@ internal static class MultipartEndpoints
             using var keepAlive = new CancellationTokenSource();
             var heartbeat = KeepAliveAsync(ctx, keepAlive.Token);
             var result = await assembly;
+            written.Outcome = result.Ok ? null : "Error"; // the status is already 200 on this path
             await keepAlive.CancelAsync();
             await heartbeat;
             await ctx.Response.WriteAsync(result.Ok ? document : ErrorDocument(result.Code, result.Message), ctx.RequestAborted);

@@ -1,3 +1,4 @@
+using Symposia.BlobStorage.Gateway.History;
 using Symposia.BlobStorage.Gateway.Api;
 using Symposia.BlobStorage.Gateway;
 using Symposia.BlobStorage.Gateway.Admin;
@@ -34,6 +35,19 @@ public static class BlobGatewayApp
         builder.Services.AddSingleton<CredentialStore>();
         builder.Services.AddSingleton<SigV4Verifier>();
         builder.Services.AddSingleton<GatewayMetadataStore>();
+
+        // Operation history (#204): its own DB file beside the metadata DB, written off the request path.
+        var gatewayConfig = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
+        var trustedProxies = gatewayConfig.TrustedProxies.Select(p => Symposia.Network.Node.ClientAddress.TryParseNetwork(p, out var n)
+            ? n : throw new InvalidOperationException($"Gateway:TrustedProxies has an invalid entry: '{p}'.")).ToList();
+        builder.Services.AddSingleton(sp =>
+        {
+            var o = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value;
+            return new History.HistoryStore(o.History.DbPath.Length > 0 ? o.History.DbPath
+                : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(o.MetadataDbPath)) ?? ".", "gateway-history.db"));
+        });
+        builder.Services.AddSingleton<History.HistoryRecorder>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<History.HistoryRecorder>());
 
         // NodeRegistry: INodeRegistry + IHostedService (background health probing).
         // The IHostedService delegate resolves NodeRegistry, so NodeRegistry must stay registered.
@@ -169,6 +183,9 @@ public static class BlobGatewayApp
             ctx.Items[nameof(SigV4Context)] = sigv4;
             await next();
         });
+
+        // After auth, so each recorded operation carries its caller (#204).
+        app.UseHistoryCapture(trustedProxies);
 
         // ── Health endpoints ──────────────────────────────────────────────────────────
 

@@ -1,3 +1,4 @@
+using Symposia.BlobStorage.Gateway.History;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Gateway.Objects;
 using Symposia.BlobStorage.Gateway.Quorum;
@@ -33,10 +34,12 @@ internal static class ObjectEndpoints
         // x-amz-copy-source header triggers CopyObject semantics.
         var copySource = ctx.Request.Headers["x-amz-copy-source"].FirstOrDefault();
         if (copySource is not null)
-            return CopyObject(bucket, key, copySource, store);
+            return CopyObject(bucket, key, copySource, store, ctx);
 
         if (!store.BucketExists(bucket))
             return S3Xml.NoSuchBucket(bucket);
+
+        var written = HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? HistoryOperation.Insert : HistoryOperation.Update, bucket, key, "s3");
 
         var contentType = ctx.Request.ContentType ?? "application/octet-stream";
 
@@ -70,6 +73,7 @@ internal static class ObjectEndpoints
         if (record is null)
             return S3Xml.ServiceUnavailable();
 
+        (written.Size, written.Etag, written.Cid) = (record.SizeBytes, record.ETag, record.Cid);
         ctx.Response.Headers.ETag = $"\"{record.Cid}\"";
         return Results.Ok();
     }
@@ -78,7 +82,7 @@ internal static class ObjectEndpoints
     // We simply copy the metadata pointer (the CID is identical if content is identical,
     // which is the expected semantics). Different key → new metadata entry, same CID.
     private static IResult CopyObject(
-        string destBucket, string destKey, string copySource, GatewayMetadataStore store)
+        string destBucket, string destKey, string copySource, GatewayMetadataStore store, HttpContext ctx)
     {
         // copy-source format: /bucket/key or bucket/key (AWS SDK v4 percent-encodes slashes)
         // URL-decode first so %2F-encoded slashes become real separators before we split.
@@ -89,11 +93,17 @@ internal static class ObjectEndpoints
         var srcBucket = path[..slash];
         var srcKey = path[(slash + 1)..];
 
+        // History (#204): a view of the source and a write of the destination, under one request ID.
+        var read = HistoryCapture.Mark(ctx, HistoryOperation.View, srcBucket, srcKey, "s3");
         var src = store.GetObject(srcBucket, srcKey);
         if (src is null) return S3Xml.NoSuchKey(srcKey);
 
+        var written = HistoryCapture.Mark(ctx, store.GetObject(destBucket, destKey) is null ? HistoryOperation.Insert : HistoryOperation.Update,
+            destBucket, destKey, "s3");
         var dest = src with { Bucket = destBucket, Key = destKey, LastModified = DateTimeOffset.UtcNow };
         store.PutObject(dest);
+        (read.Size, read.Etag, read.Cid) = (src.SizeBytes, src.ETag, src.Cid);
+        (written.Size, written.Etag, written.Cid) = (dest.SizeBytes, dest.ETag, dest.Cid);
 
         return S3Xml.CopyObjectResponse(dest.ETag, dest.LastModified);
     }
@@ -106,10 +116,11 @@ internal static class ObjectEndpoints
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
         if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.ListParts(bucket, key, ctx);
 
+        var view = HistoryCapture.Mark(ctx, HistoryOperation.View, bucket, key, "s3");
         var record = store.GetObject(bucket, key);
         if (record is null) return S3Xml.NoSuchKey(key);
 
-        return await objects.ServeAsync(record, ctx.Request.Headers.Range.FirstOrDefault(), ctx) == ServeOutcome.NoReplica
+        return await objects.ServeAsync(record, ctx.Request.Headers.Range.FirstOrDefault(), ctx, view) == ServeOutcome.NoReplica
             ? S3Xml.ServiceUnavailable()
             : Results.Empty;
     }
@@ -138,7 +149,11 @@ internal static class ObjectEndpoints
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
         if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.Abort(bucket, key, ctx);
 
-        objects.Delete(bucket, key);
+        var deleted = HistoryCapture.Mark(ctx, HistoryOperation.Delete, bucket, key, "s3");
+        if (objects.Delete(bucket, key) is { } record)
+            (deleted.Size, deleted.Etag, deleted.Cid) = (record.SizeBytes, record.ETag, record.Cid);
+        else
+            deleted.Outcome = "NotFound";
 
         // S3 DeleteObject is always 204, even if the key did not exist.
         return Results.StatusCode(204);

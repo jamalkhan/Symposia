@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using Symposia.BlobStorage.Gateway.History;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Gateway.Objects;
 using Symposia.BlobStorage.Gateway.Quorum;
@@ -79,6 +80,7 @@ public static partial class BlobApiEndpoints
                 return NoSuchBucket(bucket);
             }
 
+            var written = HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? HistoryOperation.Insert : HistoryOperation.Update, bucket, key, "v1");
             ObjectRecord? record;
             try
             {
@@ -90,11 +92,23 @@ public static partial class BlobApiEndpoints
                 return Error(ex.Status, ex.Code, ex.Message);
             }
 
-            return record is null ? Unavailable() : Results.Ok(Describe(record));
+            if (record is null)
+            {
+                return Unavailable();
+            }
+
+            (written.Size, written.Etag, written.Cid) = (record.SizeBytes, record.ETag, record.Cid);
+            return Results.Ok(Describe(record));
         });
 
-        v1.MapGet("/buckets/{bucket}/objects/{**key}", async (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects) =>
+        v1.MapGet("/buckets/{bucket}/objects/{**key}", async (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects,
+            HistoryStore history) =>
         {
+            if (ctx.Request.Query.ContainsKey("history"))
+            {
+                return History(bucket, key, ctx.Request.Query, history);
+            }
+
             var record = store.GetObject(bucket, key);
             if (ctx.Request.Query.ContainsKey("meta"))
             {
@@ -105,12 +119,13 @@ public static partial class BlobApiEndpoints
                 });
             }
 
+            var view = HistoryCapture.Mark(ctx, HistoryOperation.View, bucket, key, "v1");
             if (record is null)
             {
                 return NoSuchKey(key);
             }
 
-            return await objects.ServeAsync(record, ctx.Request.Headers.Range.FirstOrDefault(), ctx) == ServeOutcome.NoReplica
+            return await objects.ServeAsync(record, ctx.Request.Headers.Range.FirstOrDefault(), ctx, view) == ServeOutcome.NoReplica
                 ? Unavailable()
                 : Results.Empty;
         });
@@ -129,10 +144,74 @@ public static partial class BlobApiEndpoints
             return Results.Ok();
         });
 
-        v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, ObjectService objects) =>
+        v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, HttpContext ctx, ObjectService objects) =>
         {
-            objects.Delete(bucket, key); // idempotent, as in S3
+            var deleted = HistoryCapture.Mark(ctx, HistoryOperation.Delete, bucket, key, "v1");
+            if (objects.Delete(bucket, key) is { } record) // idempotent, as in S3
+            {
+                (deleted.Size, deleted.Etag, deleted.Cid) = (record.SizeBytes, record.ETag, record.Cid);
+            }
+            else
+            {
+                deleted.Outcome = "NotFound";
+            }
+
             return Results.NoContent();
+        });
+    }
+
+    /// <summary>
+    /// <c>?history</c> (#204): the object's operations, oldest first, paged. Works for deleted objects,
+    /// and an unknown bucket or key is an empty list, not a 404, so the API can't probe for existence.
+    /// </summary>
+    private static IResult History(string bucket, string key, IQueryCollection q, HistoryStore history)
+    {
+        var max = DefaultLimit;
+        if (q["limit"].FirstOrDefault() is { } limit && (!int.TryParse(limit, out max) || max is < 1 or > MaxLimit))
+        {
+            return Error(400, "InvalidArgument", $"limit must be an integer from 1 to {MaxLimit}.");
+        }
+
+        DateTimeOffset? since = null, until = null;
+        if (q["since"].FirstOrDefault() is { } s)
+        {
+            if (!DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var v))
+                return Error(400, "InvalidArgument", "since must be an ISO 8601 date-time.");
+            since = v;
+        }
+
+        if (q["until"].FirstOrDefault() is { } u)
+        {
+            if (!DateTimeOffset.TryParse(u, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var v))
+                return Error(400, "InvalidArgument", "until must be an ISO 8601 date-time.");
+            until = v;
+        }
+
+        string[]? operations = null;
+        if (q["operation"].FirstOrDefault() is { Length: > 0 } ops)
+        {
+            operations = ops.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (operations.FirstOrDefault(o => !HistoryOperation.All.Contains(o)) is { } bad)
+                return Error(400, "InvalidArgument", $"operation '{bad}' is not one of insert, update, view, delete.");
+        }
+
+        long after = 0;
+        if (q["cursor"].FirstOrDefault() is { } cursor && (!TryDecodeCursor(cursor, out var decoded) || !long.TryParse(decoded, out after)))
+        {
+            return Error(400, "InvalidArgument", "cursor is not one this API returned.");
+        }
+
+        var rows = history.Query(bucket, key, since, until, operations, after, max + 1);
+        var page = rows.Take(max).ToList();
+        return Results.Ok(new
+        {
+            entries = page.Select(e => new
+            {
+                id = e.Id, timestamp = e.Timestamp, operation = e.Operation, api = e.Api, size = e.Size, etag = e.Etag, cid = e.Cid,
+                clientIp = e.ClientIp, accessKeyId = e.AccessKeyId, tenantId = e.TenantId, userAgent = e.UserAgent,
+                requestId = e.RequestId, outcome = e.Outcome, status = e.Status,
+            }),
+            nextCursor = rows.Count > max ? EncodeCursor(page[^1].Id.ToString(System.Globalization.CultureInfo.InvariantCulture)) : null,
         });
     }
 

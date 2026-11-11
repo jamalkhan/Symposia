@@ -29,7 +29,7 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
     /// only once a replica is streaming, so on <see cref="ServeOutcome.NoReplica"/> the caller can
     /// still answer with its own error format.
     /// </summary>
-    public async Task<ServeOutcome> ServeAsync(ObjectRecord record, string? rangeHeader, HttpContext ctx)
+    public async Task<ServeOutcome> ServeAsync(ObjectRecord record, string? rangeHeader, HttpContext ctx, History.PendingOperation? view = null)
     {
         long offset = 0, length = 0;
         var isRange = rangeHeader is not null && TryParseRange(rangeHeader, record.SizeBytes, out offset, out length);
@@ -45,6 +45,11 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         }
 
         using var activeCall = call;
+        if (view is not null)
+        {
+            (view.Size, view.Etag, view.Cid) = (isRange ? length : record.SizeBytes, record.ETag, record.Cid);
+        }
+
         ctx.Response.ContentType = record.ContentType;
         ctx.Response.Headers.ETag = $"\"{record.ETag}\"";
         ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
