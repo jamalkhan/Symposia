@@ -15,7 +15,7 @@ namespace Symposia.NodeHost.Components;
 public sealed class NetworkComponent : HostComponent
 {
     private IHost? _host;
-    private HostContext? _context;
+    private HostContext? _context; // OnStopAsync isn't given the context; kept only to clear HostPeers (#207)
 
     public override string Name => "network";
 
