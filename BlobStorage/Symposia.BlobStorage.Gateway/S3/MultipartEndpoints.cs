@@ -98,7 +98,7 @@ internal static class MultipartEndpoints
         try
         {
             body = UploadBody.Open(ctx);
-            blob = await writer.WriteBlobAsync(tenantId, bucket, key, body, ctx.RequestAborted);
+            blob = await writer.WriteBlobAsync(tenantId, bucket, key, body, ctx.RequestAborted, Objects.ObjectService.ExpectedLength(ctx.Request));
         }
         catch (InvalidDataException ex)
         {

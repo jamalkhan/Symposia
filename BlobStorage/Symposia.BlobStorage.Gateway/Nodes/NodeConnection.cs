@@ -112,6 +112,26 @@ public sealed class NodeConnection : IDisposable
         LastProbe?.Healthy == true &&
         (DateTimeOffset.UtcNow - LastProbeTime).TotalSeconds < 90;
 
+    /// <summary>Healthy and not refusing writes for disk space (#199).</summary>
+    public bool IsWritable => LastProbe?.ReadOnly != true;
+
+    /// <summary>Room for a write of this size, by the last probe; unknown sizes and unprobed nodes are given the benefit.</summary>
+    public bool CanFit(long? sizeBytes) => sizeBytes is not > 0 || LastProbe is null || LastProbe.AvailableStorageBytes >= sizeBytes;
+
+    /// <summary>Answered a probe recently, healthy or not; deletes still go to such a node (#199: it most needs the space).</summary>
+    public bool IsReachable => LastProbe is not null && (DateTimeOffset.UtcNow - LastProbeTime).TotalSeconds < 90;
+
+    /// <summary>The node refused a write as read-only: skip it for writes until its next probe says otherwise.</summary>
+    public void MarkReadOnly()
+    {
+        if (LastProbe is { } probe)
+        {
+            var copy = probe.Clone();
+            copy.ReadOnly = true;
+            LastProbe = copy;
+        }
+    }
+
     /// <summary>
     /// Set to true by NodeRegistry when this node first comes back online after a failed probe.
     /// NodeReconciler reads and clears this flag to schedule reconciliation.

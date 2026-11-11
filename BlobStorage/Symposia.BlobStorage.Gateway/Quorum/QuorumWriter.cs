@@ -37,15 +37,15 @@ public sealed class QuorumWriter
     /// </summary>
     public async Task<ObjectRecord?> WriteAsync(
         string tenantId, string bucket, string key, string contentType,
-        Stream body, CancellationToken cancellationToken) =>
-        (await WriteObjectAsync(tenantId, bucket, key, contentType, body, cancellationToken)).Record;
+        Stream body, CancellationToken cancellationToken, long? expectedSize = null) =>
+        (await WriteObjectAsync(tenantId, bucket, key, contentType, body, cancellationToken, expectedSize)).Record;
 
     /// <summary>As <see cref="WriteAsync"/>, also reporting whether the commit replaced an existing object (#204).</summary>
     public async Task<(ObjectRecord? Record, bool Replaced)> WriteObjectAsync(
         string tenantId, string bucket, string key, string contentType,
-        Stream body, CancellationToken cancellationToken)
+        Stream body, CancellationToken cancellationToken, long? expectedSize = null)
     {
-        var blob = await WriteBlobAsync(tenantId, bucket, key, body, cancellationToken);
+        var blob = await WriteBlobAsync(tenantId, bucket, key, body, cancellationToken, expectedSize);
         if (blob is null)
             return (null, false);
 
@@ -75,14 +75,21 @@ public sealed class QuorumWriter
     /// parts, #5). Null if quorum was not reached. Throws (after cancelling node writes) if reading
     /// the body fails, e.g. a failed integrity check.
     /// </summary>
+    /// <remarks>
+    /// Targets only nodes that take writes (#199); a node that refuses as read-only mid-write is
+    /// dropped from this write without being marked unhealthy, and repair tops up the copies. The
+    /// body is streamed, not buffered, so a refused copy can't be resent elsewhere: if too few
+    /// nodes accept, quorum fails and the caller answers 503 for the client to retry.
+    /// </remarks>
     public async Task<BlobWriteResult?> WriteBlobAsync(
-        string tenantId, string bucket, string key, Stream body, CancellationToken cancellationToken)
+        string tenantId, string bucket, string key, Stream body, CancellationToken cancellationToken, long? expectedSize = null)
     {
-        var targetNodes = _nodes.Healthy;
+        expectedSize ??= body.CanSeek ? body.Length - body.Position : null;
+        var targetNodes = _nodes.Writable(expectedSize);
         if (targetNodes.Count == 0)
             return null;
 
-        var header = new WriteBlobHeader { TenantId = tenantId, Bucket = bucket, Key = key };
+        var header = new WriteBlobHeader { TenantId = tenantId, Bucket = bucket, Key = key, ExpectedSizeBytes = expectedSize ?? 0 };
         var sessions = targetNodes.Select(n => new NodeWriteSession(n)).ToList();
 
         // Open streams and send header to all nodes.
@@ -113,6 +120,11 @@ public sealed class QuorumWriter
         // Complete all streams and collect results.
         await Task.WhenAll(sessions.Select(s => s.CompleteAsync()));
 
+        foreach (var refused in sessions.Where(s => s.RefusedReadOnly))
+        {
+            refused.Node.MarkReadOnly();
+        }
+
         var successes = sessions.Where(s => s.Response is not null).ToList();
         if (successes.Count < _quorumCount)
             return null; // Quorum not reached.
@@ -131,6 +143,7 @@ public sealed class QuorumWriter
     {
         private readonly global::Grpc.Core.AsyncClientStreamingCall<WriteBlobChunk, WriteBlobResponse> _call;
         private bool _active = true;
+        private bool _aborted;
 
         public NodeWriteSession(NodeConnection node)
         {
@@ -140,6 +153,9 @@ public sealed class QuorumWriter
 
         public NodeConnection Node { get; }
         public WriteBlobResponse? Response { get; private set; }
+
+        /// <summary>The node refused the write for disk space (#199), not a fault.</summary>
+        public bool RefusedReadOnly { get; private set; }
 
         public async Task SendHeaderAsync(WriteBlobHeader header, CancellationToken ct)
         {
@@ -155,23 +171,48 @@ public sealed class QuorumWriter
             catch { _active = false; }
         }
 
+        private static bool IsReadOnlyRefusal(global::Grpc.Core.RpcException ex) =>
+            ex.StatusCode == global::Grpc.Core.StatusCode.ResourceExhausted
+            && ex.Trailers.GetValue(ReadOnlyRefusal.Trailer) == "read-only";
+
         public void Abort()
         {
             _active = false;
+            _aborted = true;
             _call.Dispose();
         }
 
         public async Task CompleteAsync()
         {
-            if (!_active) return;
+            if (_aborted) return;
             try
             {
-                await _call.RequestStream.CompleteAsync();
-                Response = await _call.ResponseAsync;
+                if (_active)
+                {
+                    await _call.RequestStream.CompleteAsync();
+                    Response = await _call.ResponseAsync;
+                    return;
+                }
+
+                // A send failed: the node may have ended the call itself; its status says why (#199).
+                await _call.ResponseAsync.WaitAsync(TimeSpan.FromSeconds(5));
             }
-            catch { _active = false; }
+            catch (global::Grpc.Core.RpcException ex) when (IsReadOnlyRefusal(ex))
+            {
+                RefusedReadOnly = true;
+            }
+            catch { }
+            finally
+            {
+                if (Response is null) _active = false;
+            }
         }
     }
+}
+
+internal static class ReadOnlyRefusal
+{
+    public const string Trailer = "symposia-reason";
 }
 
 /// <summary>A blob stored at quorum: its content hash, size and the nodes holding it.</summary>

@@ -152,7 +152,10 @@ async function refresh() {
   $('#capacity-card').hidden = !c;
   if (c) {
     $('#capacity').innerHTML = dl([['Allocated', gb(c.allocated)], ['Used', gb(c.used)], ['Unused allocated', gb(c.unused)],
-      ['Free on disk', `${gb(c.free)} (${c.volumeRoot})`], ['Disk space', c.diskLow === 'Ok' ? 'OK' : `${c.diskLow}: warning below ${gb(c.warnBelow)}, error below ${gb(c.errorBelow)}`]]);
+      ['Free on disk', `${gb(c.free)} (${c.volumeRoot}, ${gb(c.reserve)} kept in reserve)`],
+      ['Disk space', c.diskLow === 'Ok' ? 'OK' : `${c.diskLow}: warning below ${gb(c.warnBelow)}, error below ${gb(c.errorBelow)}`],
+      ['Mode', c.mode === 'Writable' ? 'Accepting writes' : c.mode === 'ReadOnly' ? `Read-only until ${gb(c.exitAbove)} free` : 'Critical: below reserve, reporting unhealthy'],
+      ['Reported', `${gb(c.available)} available of ${gb(c.total)}`]]);
   }
   const g = s.blobGateway;
   $('#blobgateway-card').hidden = !g || !g.configured;

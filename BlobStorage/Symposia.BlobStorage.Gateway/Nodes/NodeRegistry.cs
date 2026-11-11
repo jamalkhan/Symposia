@@ -309,6 +309,12 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                 return;
             }
 
+            if (wasHealthy && !response.Healthy)
+            {
+                // The node answered but says it's unhealthy (#199 critical disk): start the repair grace period.
+                node.LastUnhealthyAt = DateTimeOffset.UtcNow;
+            }
+
             node.LastProbe = response;
             node.LastProbeTime = DateTimeOffset.UtcNow;
             node.LastProbeError = null;
