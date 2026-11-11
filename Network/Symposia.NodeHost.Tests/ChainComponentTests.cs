@@ -16,6 +16,67 @@ public sealed class ChainComponentTests : IDisposable
     private HostContext Context(HostSettings settings) =>
         new(new HostPaths(_dir.Path), new SecretStore(new HostPaths(_dir.Path)), new LogBuffer()) { Settings = settings };
 
+    // #193: with no transactions at all, LocalDev's anvil still mines, so the chain clock (and the epoch) moves.
+    [Fact]
+    public async Task LocalDevAnvil_MinesWithoutTransactions()
+    {
+        var foundry = Environment.GetEnvironmentVariable("FOUNDRY_BIN")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
+        using var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(foundry, "anvil")) { UseShellExecute = false };
+        foreach (var arg in ChainComponent.AnvilArguments(port, Path.Combine(_dir.Path, "anvil.json")))
+        {
+            start.ArgumentList.Add(arg);
+        }
+
+        using var anvil = System.Diagnostics.Process.Start(start)!;
+        try
+        {
+            using var http = new HttpClient();
+            async Task<(long Number, long Timestamp)?> HeadAsync()
+            {
+                try
+                {
+                    using var response = await http.PostAsync($"http://127.0.0.1:{port}", new StringContent(
+                        """{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}""",
+                        System.Text.Encoding.UTF8, "application/json"));
+                    var block = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("result");
+                    return (Convert.ToInt64(block.GetProperty("number").GetString(), 16), Convert.ToInt64(block.GetProperty("timestamp").GetString(), 16));
+                }
+                catch (HttpRequestException)
+                {
+                    return null;
+                }
+            }
+
+            (long Number, long Timestamp)? first = null;
+            for (var i = 0; i < 100 && first is null; i++)
+            {
+                first = await HeadAsync();
+                if (first is null)
+                {
+                    await Task.Delay(100);
+                }
+            }
+
+            Assert.NotNull(first);
+            await Task.Delay(TimeSpan.FromSeconds(5));
+            var later = await HeadAsync();
+
+            Assert.NotNull(later);
+            Assert.True(later.Value.Number >= first.Value.Number + 2, $"anvil mined {later.Value.Number - first.Value.Number} blocks in 5 s");
+            Assert.True(later.Value.Timestamp >= first.Value.Timestamp + 4, "the chain clock did not advance");
+        }
+        finally
+        {
+            anvil.Kill(entireProcessTree: true);
+            await anvil.WaitForExitAsync();
+        }
+    }
+
     [Fact]
     public async Task RemoteRpc_UndeployedPreset_FaultsWithoutNetwork()
     {
