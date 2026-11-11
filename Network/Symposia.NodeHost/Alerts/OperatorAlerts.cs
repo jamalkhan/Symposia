@@ -124,11 +124,17 @@ public sealed class OperatorAlerts : IOperatorAlertSink
                 a.LastChangedAt = now;
             }
 
+            // Detail figures move every tick (free space); only a change of state or title is worth a
+            // disk write, especially on a volume that is short of space.
+            var persist = changed || a.Title != title || a.Stale;
             a.Severity = severity;
             a.Title = title;
             a.Detail = detail;
             a.Stale = false;
-            Save();
+            if (persist)
+            {
+                Save();
+            }
         }
     }
 
@@ -170,21 +176,27 @@ public sealed class OperatorAlerts : IOperatorAlertSink
     }
 
     /// <summary>Runs <paramref name="update"/> on every record under the lock, then persists and drops settled clears.</summary>
-    internal void Update(Action<AlertRecord> update)
+    /// <param name="update">Returns true when it changed the record.</param>
+    internal void Update(Func<AlertRecord, bool> update)
     {
         lock (_gate)
         {
+            var changed = false;
             foreach (var a in _alerts.Values)
             {
-                update(a);
+                changed |= update(a);
             }
 
             foreach (var key in _alerts.Values.Where(a => a.Severity is null && a.NotifiedSeverity is null).Select(a => a.Key).ToList())
             {
                 _alerts.Remove(key);
+                changed = true;
             }
 
-            Save();
+            if (changed)
+            {
+                Save();
+            }
         }
     }
 

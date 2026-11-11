@@ -98,7 +98,7 @@ internal static class MultipartEndpoints
         try
         {
             body = UploadBody.Open(ctx);
-            blob = await writer.WriteBlobAsync(tenantId, bucket, key, body, ctx.RequestAborted, Objects.ObjectService.ExpectedLength(ctx.Request));
+            blob = await writer.WriteBlobAsync(tenantId, bucket, key, body, ctx.RequestAborted, UploadBody.ExpectedLength(ctx.Request));
         }
         catch (InvalidDataException ex)
         {
@@ -112,7 +112,7 @@ internal static class MultipartEndpoints
 
         if (blob is null)
         {
-            return S3Xml.ServiceUnavailable();
+            return S3Xml.SlowDown();
         }
 
         var checksum = upload.ChecksumAlgorithm is { } alg && body.Computed.TryGetValue(alg, out var value) ? value : null;
@@ -263,12 +263,19 @@ internal static class MultipartEndpoints
         var committed = false;
         try
         {
-            await using var assembled = new ChecksumVerifyingStream(
-                new PartsStream(parts, services.GetRequiredService<INodeRegistry>(), logger), fullObject);
-            blob = await services.GetRequiredService<QuorumWriter>().WriteBlobAsync(upload.TenantId, upload.Bucket, upload.Key, assembled, ct);
+            // The parts are already stored, so unlike a streamed PUT the object can be re-read: a write that
+            // misses quorum because nodes refused as read-only is retried once on the remaining ones (#199).
+            for (var attempt = 0; attempt < 2 && blob is null; attempt++)
+            {
+                await using var assembled = new ChecksumVerifyingStream(
+                    new PartsStream(parts, services.GetRequiredService<INodeRegistry>(), logger), fullObject);
+                blob = await services.GetRequiredService<QuorumWriter>().WriteBlobAsync(upload.TenantId, upload.Bucket, upload.Key, assembled, ct,
+                    parts.Sum(p => p.SizeBytes));
+            }
+
             if (blob is null)
             {
-                return (false, 503, "ServiceUnavailable", "Write quorum was not reached while assembling the object.", false);
+                return (false, 503, "SlowDown", "Write quorum was not reached while assembling the object.", false);
             }
 
             // Quota (quota-management.md) would be enforced here once a quota engine exists; descoped (#5 addendum).

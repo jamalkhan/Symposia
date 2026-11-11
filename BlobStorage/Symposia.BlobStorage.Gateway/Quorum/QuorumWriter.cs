@@ -173,7 +173,10 @@ public sealed class QuorumWriter
 
         private static bool IsReadOnlyRefusal(global::Grpc.Core.RpcException ex) =>
             ex.StatusCode == global::Grpc.Core.StatusCode.ResourceExhausted
-            && ex.Trailers.GetValue(ReadOnlyRefusal.Trailer) == "read-only";
+            && ex.Trailers.GetValue(StorageNodeErrors.ReasonTrailer) == StorageNodeErrors.ReadOnly;
+
+        /// <summary>How long to wait for the status of a call whose send failed: a node that ended it has already answered.</summary>
+        private static readonly TimeSpan StatusWait = TimeSpan.FromMilliseconds(250);
 
         public void Abort()
         {
@@ -189,13 +192,15 @@ public sealed class QuorumWriter
             {
                 if (_active)
                 {
-                    await _call.RequestStream.CompleteAsync();
-                    Response = await _call.ResponseAsync;
-                    return;
+                    // The node may have ended the call already (a refusal at the header while our sends
+                    // were still buffered); then completing the request stream throws, but the status
+                    // below still says why.
+                    try { await _call.RequestStream.CompleteAsync(); }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { _active = false; }
                 }
 
-                // A send failed: the node may have ended the call itself; its status says why (#199).
-                await _call.ResponseAsync.WaitAsync(TimeSpan.FromSeconds(5));
+                // A send failed: wait only briefly, so a black-holed node doesn't hold the whole write (#199).
+                Response = _active ? await _call.ResponseAsync : await _call.ResponseAsync.WaitAsync(StatusWait);
             }
             catch (global::Grpc.Core.RpcException ex) when (IsReadOnlyRefusal(ex))
             {
@@ -208,11 +213,6 @@ public sealed class QuorumWriter
             }
         }
     }
-}
-
-internal static class ReadOnlyRefusal
-{
-    public const string Trailer = "symposia-reason";
 }
 
 /// <summary>A blob stored at quorum: its content hash, size and the nodes holding it.</summary>

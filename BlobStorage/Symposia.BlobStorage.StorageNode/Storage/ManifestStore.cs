@@ -15,6 +15,7 @@ public sealed class ManifestStore
     // Writes are serialised so the used-bytes counter (#197) applies each record's exact delta.
     private readonly object _writeGate = new();
     private long _usedBytes;
+    private long _writeSeq;
 
     public ManifestStore(IOptions<StorageNodeOptions> options)
     {
@@ -54,13 +55,18 @@ public sealed class ManifestStore
     /// </summary>
     public long UsedBytes => Interlocked.Read(ref _usedBytes);
 
-    /// <summary>Recomputes <see cref="UsedBytes"/> from the table; returns the drift it corrected.</summary>
+    /// <summary>
+    /// Recomputes <see cref="UsedBytes"/> from the table; returns the drift it corrected. The SUM runs
+    /// outside the write lock so writes aren't stalled by a full scan; if a write lands meanwhile, the
+    /// counter (already exact for that write) is kept and the next reconcile tries again.
+    /// </summary>
     public long ReconcileUsedBytes()
     {
+        var seq = Interlocked.Read(ref _writeSeq);
+        var actual = SumSizeBytes();
         lock (_writeGate)
         {
-            var actual = SumSizeBytes();
-            return actual - Interlocked.Exchange(ref _usedBytes, actual);
+            return _writeSeq != seq ? 0 : actual - Interlocked.Exchange(ref _usedBytes, actual);
         }
     }
 
@@ -88,6 +94,7 @@ public sealed class ManifestStore
             var previous = SizeOf(connection, record.Cid);
             UpsertRow(connection, record);
             Interlocked.Add(ref _usedBytes, record.SizeBytes - (previous ?? 0));
+            Interlocked.Increment(ref _writeSeq);
         }
     }
 
@@ -163,6 +170,7 @@ public sealed class ManifestStore
             if (deleted)
             {
                 Interlocked.Add(ref _usedBytes, -(previous ?? 0));
+                Interlocked.Increment(ref _writeSeq);
             }
 
             return deleted;

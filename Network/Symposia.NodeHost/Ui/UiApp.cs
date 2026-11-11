@@ -247,7 +247,18 @@ public static class UiApp
                 return Results.StatusCode(StatusCodes.Status429TooManyRequests);
             }
 
-            var password = string.IsNullOrEmpty(req.SmtpPassword) ? secrets.SmtpPassword : req.SmtpPassword;
+            // The saved password is only ever sent to the saved server: otherwise a session could point the
+            // test at its own SMTP server and capture the credential.
+            var saved = settings.Effective.Alerts;
+            var sameServer = string.Equals(alerts.SmtpHost, saved.SmtpHost, StringComparison.OrdinalIgnoreCase)
+                && alerts.SmtpPort == saved.SmtpPort && alerts.Security == saved.Security && alerts.Username == saved.Username;
+            if (string.IsNullOrEmpty(req.SmtpPassword) && !sameServer && !string.IsNullOrEmpty(alerts.Username) && secrets.HasSmtpPassword)
+            {
+                testGate.Release();
+                return Results.BadRequest(new { errors = new[] { "Enter the SMTP password to test a server other than the saved one." } });
+            }
+
+            var password = string.IsNullOrEmpty(req.SmtpPassword) ? (sameServer ? secrets.SmtpPassword : null) : req.SmtpPassword;
             try
             {
                 if (DateTimeOffset.UtcNow - lastTest < TimeSpan.FromSeconds(10))

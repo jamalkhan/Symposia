@@ -53,7 +53,11 @@ public sealed class NetworkDashboard(NetworkOverview overview, IStorageHistorySo
     public const int UptimeWindowDays = 30;
     public const int TopVersions = 5;
 
+    /// <summary>A history load (nodes × sampled epochs of view calls) is abandoned after this long.</summary>
+    public static readonly TimeSpan HistoryTimeout = TimeSpan.FromSeconds(20);
+
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _historyGate = new(1, 1);
 
     public async Task<StorageNetworkSummary> StorageAsync(CancellationToken ct)
     {
@@ -71,27 +75,7 @@ public sealed class NetworkDashboard(NetworkOverview overview, IStorageHistorySo
             }
 
             var crawl = await overview.CrawlAsync();
-            var nodes = StorageRows(crawl.Rows).Select(r => r.Node).ToList();
-            StorageHistory? past = null;
-            if (nodes.Count > 0)
-            {
-                var key = "dashboard|history|" + string.Join(',', nodes.Order(StringComparer.OrdinalIgnoreCase));
-                if (!cache.TryGetValue(key, out past))
-                {
-                    try
-                    {
-                        past = await history.LoadAsync(nodes, ct);
-                    }
-                    catch (Exception ex) when (!ct.IsCancellationRequested)
-                    {
-                        logger.LogWarning("Network dashboard: telemetry history unavailable ({Error})", ex.Message);
-                    }
-
-                    // Even a failed read is cached briefly, so a slow RPC isn't retried on every refresh.
-                    cache.Set(key, past, past is null ? CacheFor : HistoryCacheFor);
-                }
-            }
-
+            var past = await HistoryAsync(StorageRows(crawl.Rows).Select(r => r.Node).ToList());
             var summary = Summarize(crawl, past);
             cache.Set("dashboard|storage", summary, CacheFor);
             return summary;
@@ -99,6 +83,51 @@ public sealed class NetworkDashboard(NetworkOverview overview, IStorageHistorySo
         finally
         {
             _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The chain history, cached for an hour. Loaded by one caller at a time, bounded by
+    /// <see cref="HistoryTimeout"/>, and independent of any request's cancellation, so a slow RPC
+    /// delays at most one refresh and a failed load is cached briefly instead of retried every time.
+    /// </summary>
+    private async Task<StorageHistory?> HistoryAsync(IReadOnlyList<string> nodes)
+    {
+        if (nodes.Count == 0)
+        {
+            return null;
+        }
+
+        var key = "dashboard|history|" + string.Join(',', nodes.Order(StringComparer.OrdinalIgnoreCase));
+        if (cache.TryGetValue(key, out StorageHistory? past))
+        {
+            return past;
+        }
+
+        if (!await _historyGate.WaitAsync(0))
+        {
+            // Another refresh is loading it; show totals now and uptime once that load lands.
+            return null;
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(HistoryTimeout);
+            try
+            {
+                past = await history.LoadAsync(nodes, timeout.Token);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning("Network dashboard: telemetry history unavailable ({Error})", ex.Message);
+            }
+
+            cache.Set(key, past, past is null ? CacheFor : HistoryCacheFor);
+            return past;
+        }
+        finally
+        {
+            _historyGate.Release();
         }
     }
 
@@ -135,7 +164,7 @@ public sealed class NetworkDashboard(NetworkOverview overview, IStorageHistorySo
                 continue;
             }
 
-            if (s.Level == HealthLevel.Bad || s.Mode == "Critical")
+            if (s.Level == HealthLevel.Bad || s.Mode == nameof(Symposia.BlobStorage.StorageNode.Storage.StorageMode.Critical))
             {
                 unhealthy++;
             }
@@ -228,23 +257,42 @@ public sealed class ChainStorageHistorySource(ComponentSupervisor supervisor, IL
         var web3 = new Nethereum.Web3.Web3(network.RpcUrl);
         var query = web3.Eth.GetContractQueryHandler<GetEpochMetricRecordFunction>();
         var calls = nodes.SelectMany(n => epochs.Select(e => (Node: n.ToLowerInvariant(), Epoch: e))).ToList();
-        var results = new (string Node, long Epoch, EpochMetricRecord? Record)[calls.Count];
+        var results = new (string Node, long Epoch, EpochMetricRecord? Record, bool Read)[calls.Count];
         await Parallel.ForEachAsync(Enumerable.Range(0, calls.Count), new ParallelOptions { MaxDegreeOfParallelism = Concurrency, CancellationToken = ct },
             async (i, token) =>
             {
                 var (node, epoch) = calls[i];
-                var output = await query.QueryDeserializingToObjectAsync<EpochMetricRecordOutput>(
-                    new GetEpochMetricRecordFunction { Node = node, Epoch = epoch }, network.TelemetryRegistryAddress);
-                results[i] = (node, epoch, output?.Record is { Exists: true } r ? r : null);
+                try
+                {
+                    var output = await query.QueryDeserializingToObjectAsync<EpochMetricRecordOutput>(
+                        new GetEpochMetricRecordFunction { Node = node, Epoch = epoch }, network.TelemetryRegistryAddress).WaitAsync(token);
+                    results[i] = (node, epoch, output?.Record is { Exists: true } r ? r : null, true);
+                }
+                catch (Exception ex) when (!token.IsCancellationRequested)
+                {
+                    // One failed read leaves that epoch out rather than losing everyone's history.
+                    logger.LogDebug("getEpochMetricRecord({Node}, {Epoch}) failed: {Error}", node, epoch, ex.Message);
+                    results[i] = (node, epoch, null, false);
+                }
             });
         logger.LogDebug("Network dashboard: read {Calls} epoch record(s) for {Nodes} node(s) over {Epochs} epoch(s)", calls.Count, nodes.Count, epochs.Count);
 
         var uptime = new Dictionary<string, double>();
         var latest = new Dictionary<string, (ulong, ulong)>();
-        foreach (var g in results.Where(r => r.Record is not null).GroupBy(r => r.Node))
+        foreach (var g in results.GroupBy(r => r.Node))
         {
-            uptime[g.Key] = g.Average(r => (double)(r.Record!.AttestationCount > 0 ? r.Record.VerifierAttested.UptimeBps : r.Record.SelfReported.UptimeBps));
-            var last = g.MaxBy(r => r.Epoch).Record!;
+            var recorded = g.Where(r => r.Record is not null).ToList();
+            if (recorded.Count == 0)
+            {
+                continue;
+            }
+
+            // From a node's first recorded epoch on, an epoch it has no record for was an epoch it was
+            // down, so it counts as 0 rather than being skipped. Epochs that failed to read are left out.
+            var since = recorded.Min(r => r.Epoch);
+            uptime[g.Key] = g.Where(r => r.Read && r.Epoch >= since)
+                .Average(r => r.Record is null ? 0.0 : r.Record.AttestationCount > 0 ? r.Record.VerifierAttested.UptimeBps : r.Record.SelfReported.UptimeBps);
+            var last = recorded.MaxBy(r => r.Epoch).Record!;
             latest[g.Key] = (last.UsedBytes, last.AvailableBytes);
         }
 

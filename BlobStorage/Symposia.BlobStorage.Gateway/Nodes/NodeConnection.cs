@@ -112,8 +112,13 @@ public sealed class NodeConnection : IDisposable
         LastProbe?.Healthy == true &&
         (DateTimeOffset.UtcNow - LastProbeTime).TotalSeconds < 90;
 
-    /// <summary>Healthy and not refusing writes for disk space (#199).</summary>
-    public bool IsWritable => LastProbe?.ReadOnly != true;
+    /// <summary>
+    /// Not refusing writes for disk space (#199): neither its last probe says read-only nor has it
+    /// refused a write since that probe. Says nothing about health; <see cref="INodeRegistry.Writable"/> checks both.
+    /// </summary>
+    public bool IsWritable => LastProbe?.ReadOnly != true && !(_refusedWriteAt >= LastProbeTime);
+
+    private DateTimeOffset? _refusedWriteAt;
 
     /// <summary>Room for a write of this size, by the last probe; unknown sizes and unprobed nodes are given the benefit.</summary>
     public bool CanFit(long? sizeBytes) => sizeBytes is not > 0 || LastProbe is null || LastProbe.AvailableStorageBytes >= sizeBytes;
@@ -121,16 +126,11 @@ public sealed class NodeConnection : IDisposable
     /// <summary>Answered a probe recently, healthy or not; deletes still go to such a node (#199: it most needs the space).</summary>
     public bool IsReachable => LastProbe is not null && (DateTimeOffset.UtcNow - LastProbeTime).TotalSeconds < 90;
 
-    /// <summary>The node refused a write as read-only: skip it for writes until its next probe says otherwise.</summary>
-    public void MarkReadOnly()
-    {
-        if (LastProbe is { } probe)
-        {
-            var copy = probe.Clone();
-            copy.ReadOnly = true;
-            LastProbe = copy;
-        }
-    }
+    /// <summary>
+    /// The node refused a write as read-only: skip it for writes until a probe newer than the refusal
+    /// says otherwise. A timestamp, not an edit of <see cref="LastProbe"/>, so a concurrent probe isn't overwritten.
+    /// </summary>
+    public void MarkReadOnly() => _refusedWriteAt = DateTimeOffset.UtcNow;
 
     /// <summary>
     /// Set to true by NodeRegistry when this node first comes back online after a failed probe.

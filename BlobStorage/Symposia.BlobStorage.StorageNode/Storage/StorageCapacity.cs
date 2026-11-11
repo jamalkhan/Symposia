@@ -167,7 +167,10 @@ public sealed record StorageCapacitySnapshot(
 /// <summary>
 /// Measures the storage node's capacity every 30 s (issues #197, #199) and publishes an immutable
 /// <see cref="Current"/> snapshot, so Probe, heartbeats and health never do disk or SQL work
-/// themselves. Raises and clears the <see cref="AlertKeys.StorageDiskLow"/> Operator Alert.
+/// themselves. Raises and clears the <see cref="AlertKeys.StorageDiskLow"/> and
+/// <see cref="AlertKeys.StorageReadOnly"/> Operator Alerts. Alerts are left standing when the role
+/// stops: across a host restart they are re-asserted, and if the role stays off the host clears
+/// them after its stale-alert grace period (#196), so a restart never emails a false "resolved".
 /// </summary>
 public sealed class StorageCapacityMonitor : BackgroundService
 {
@@ -238,7 +241,10 @@ public sealed class StorageCapacityMonitor : BackgroundService
 
             var root = _options.Value.StorageRoot;
             var previous = _current;
+            // Writes released after this read are not in the measurement; keep them counted.
+            var writtenBefore = Interlocked.Read(ref _writtenSinceMeasure);
             long free, total;
+            var unmeasured = false;
             try
             {
                 (free, total) = _disk.Measure(root);
@@ -252,17 +258,24 @@ public sealed class StorageCapacityMonitor : BackgroundService
                     return previous;
                 }
 
-                (free, total) = (0, 0);
+                // Never measured: refuse writes, but don't claim the disk is critical on one failed stat.
+                (free, total, unmeasured) = (0, 0, true);
             }
 
             var allocated = Math.Max(0, _options.Value.MaxCapacityBytes);
             var used = _manifest.UsedBytes;
             var unused = Math.Max(0, allocated - used);
-            var state = DiskLow.Evaluate(previous?.DiskLow ?? DiskLowState.Ok, free, unused);
-            var mode = ReadOnlyMode.Evaluate(previous?.Mode ?? StorageMode.Writable, free, unused, ReadOnlyMode.Reserve(total), ref _exitStreak);
+            var state = unmeasured ? DiskLowState.Ok : DiskLow.Evaluate(previous?.DiskLow ?? DiskLowState.Ok, free, unused);
+            var mode = unmeasured ? StorageMode.ReadOnly
+                : ReadOnlyMode.Evaluate(previous?.Mode ?? StorageMode.Writable, free, unused, ReadOnlyMode.Reserve(total), ref _exitStreak);
             var snapshot = new StorageCapacitySnapshot(allocated, used, free, total, Path.GetFullPath(root), state, now, mode);
-            Interlocked.Exchange(ref _writtenSinceMeasure, 0);
+            Interlocked.Add(ref _writtenSinceMeasure, -writtenBefore);
             _current = snapshot;
+            if (unmeasured)
+            {
+                return snapshot;
+            }
+
             if (previous is not null && previous.Mode != mode)
             {
                 _logger.LogWarning("Storage mode {From} → {To}: free {Free}, unused allocation {Unused}, reserve {Reserve}",
@@ -328,14 +341,6 @@ public sealed class StorageCapacityMonitor : BackgroundService
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));
-    }
-
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        await base.StopAsync(cancellationToken);
-        // A stopped role is reported by its component status; its disk alerts no longer apply.
-        _alerts.Clear(AlertKeys.StorageDiskLow);
-        _alerts.Clear(AlertKeys.StorageReadOnly);
     }
 
     private void AssertModeAlert(StorageCapacitySnapshot s)

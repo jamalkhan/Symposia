@@ -99,6 +99,10 @@ public sealed class ChecksumVerifyingStream(Stream inner, IReadOnlyList<Checksum
 /// </summary>
 public static class UploadBody
 {
+    /// <summary>The body's decoded size when the request states it, so read-only or full nodes are skipped up front (#199).</summary>
+    public static long? ExpectedLength(HttpRequest request) =>
+        AwsChunkedStream.Applies(request) ? AwsChunkedStream.DecodedLength(request) : request.ContentLength;
+
     public static ChecksumVerifyingStream Open(HttpContext ctx)
     {
         var request = ctx.Request;

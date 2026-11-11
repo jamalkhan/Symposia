@@ -49,7 +49,7 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         var written = History.HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? History.HistoryOperation.Insert : History.HistoryOperation.Update,
             bucket, key, History.HistoryCapture.ApiOf(ctx));
         var (record, replaced) = await writer.WriteObjectAsync(ctx.Items["TenantId"] as string ?? "", bucket, key, contentType, body, ctx.RequestAborted,
-            ExpectedLength(ctx.Request));
+            S3.UploadBody.ExpectedLength(ctx.Request));
         if (record is not null)
         {
             Fill(written, record, replaced);
@@ -57,10 +57,6 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
 
         return record;
     }
-
-    /// <summary>The body's decoded size when the request states it, so read-only or full nodes are skipped up front (#199).</summary>
-    internal static long? ExpectedLength(HttpRequest request) =>
-        S3.AwsChunkedStream.Applies(request) ? S3.AwsChunkedStream.DecodedLength(request) : request.ContentLength;
 
     /// <summary>Copies an object's metadata pointer (content-addressed: no data moves), recording a view of the source and a write of the destination.</summary>
     public ObjectRecord? Copy(HttpContext ctx, string sourceBucket, string sourceKey, string bucket, string key)

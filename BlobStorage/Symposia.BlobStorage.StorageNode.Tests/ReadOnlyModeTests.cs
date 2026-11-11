@@ -113,6 +113,43 @@ public sealed class ReadOnlyModeTests : IDisposable
     }
 
     [Fact]
+    public void FirstDiskReadFailing_RefusesWrites_WithoutReportingCritical()
+    {
+        var sink = new StorageCapacityTests.RecordingSink();
+        var monitor = Monitor(new ThrowingDisk(), sink, allocated: 5 * GB, used: 3 * GB);
+
+        var s = monitor.Evaluate();
+
+        Assert.Equal(StorageMode.ReadOnly, s.Mode);
+        Assert.False(monitor.TryReserve(0));
+        Assert.Empty(sink.Alerts);
+    }
+
+    [Fact]
+    public async Task StoppingTheRole_LeavesAlertsStanding_ForTheHostToCarryAcrossARestart()
+    {
+        var disk = new FakeDisk { Free = 1 * GB };
+        var sink = new StorageCapacityTests.RecordingSink();
+        var monitor = Monitor(disk, sink, allocated: 5 * GB, used: 3 * GB);
+        monitor.Evaluate();
+
+        await monitor.StopAsync(CancellationToken.None);
+
+        Assert.True(sink.Alerts.ContainsKey(AlertKeys.StorageReadOnly));
+        Assert.True(sink.Alerts.ContainsKey(AlertKeys.StorageDiskLow));
+    }
+
+    [Fact]
+    public void DiskFull_IsRecognisedByErrno_NotByUnrelatedCodes()
+    {
+        var enospc = new IOException("No space left on device", OperatingSystem.IsWindows() ? unchecked((int)0x80070070) : 28);
+        var enotempty = new IOException("Directory not empty", 39);
+
+        Assert.True(StorageNodeGrpcService.IsDiskFull(enospc));
+        Assert.Equal(OperatingSystem.IsWindows(), StorageNodeGrpcService.IsDiskFull(enotempty));
+    }
+
+    [Fact]
     public void Admission_RefusesWhileReadOnly_AndBeyondWhatTheDiskCanBack()
     {
         var disk = new FakeDisk { Free = 4 * GB };
@@ -143,7 +180,7 @@ public sealed class ReadOnlyModeTests : IDisposable
 
         var refused = await Assert.ThrowsAsync<RpcException>(() => Write(client, "new data"u8.ToArray()));
         Assert.Equal(StatusCode.ResourceExhausted, refused.StatusCode);
-        Assert.Equal(StorageNodeGrpcService.ReadOnlyReason, refused.Trailers.GetValue(StorageNodeGrpcService.ReasonTrailer));
+        Assert.Equal(StorageNodeErrors.ReadOnly, refused.Trailers.GetValue(StorageNodeErrors.ReasonTrailer));
 
         var read = client.ReadBlob(new ReadBlobRequest { Cid = cid });
         var bytes = new List<byte>();
@@ -215,6 +252,11 @@ public sealed class ReadOnlyModeTests : IDisposable
         store.Upsert(new BlobRecord(Cid.FromHash(SHA256.HashData("used"u8)), used, "t", "b", "k", [], DateTimeOffset.UtcNow, null, BlobStatus.Active));
         var options = Options.Create(new StorageNodeOptions { StorageRoot = Path.Combine(_dir, "blobs"), MaxCapacityBytes = allocated });
         return new StorageCapacityMonitor(store, options, disk, sink, NullLogger<StorageCapacityMonitor>.Instance);
+    }
+
+    private sealed class ThrowingDisk : IDiskSpace
+    {
+        public (long Free, long Total) Measure(string path) => throw new IOException("stat failed");
     }
 
     internal sealed class FakeDisk : IDiskSpace

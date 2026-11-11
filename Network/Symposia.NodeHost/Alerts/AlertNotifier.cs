@@ -66,7 +66,7 @@ public sealed class AlertNotifier(
             {
                 if (now - a.LastChangedAt < Damping)
                 {
-                    return;
+                    return false;
                 }
 
                 var kind = a.Severity is null ? "RESOLVED" : a.Severity.Value.ToString().ToUpperInvariant();
@@ -78,6 +78,7 @@ public sealed class AlertNotifier(
                 a.NotifiedSeverity = a.Severity;
                 a.NotifiedAt = now;
                 a.LastReminderAt = null;
+                return true;
             }
             else if (a.Severity == AlertSeverity.Error && now - (a.LastReminderAt ?? a.NotifiedAt ?? now) >= ReminderEvery)
             {
@@ -87,7 +88,10 @@ public sealed class AlertNotifier(
                 }
 
                 a.LastReminderAt = now;
+                return true;
             }
+
+            return false;
         });
 
         await SendDueAsync(now, config, ct);

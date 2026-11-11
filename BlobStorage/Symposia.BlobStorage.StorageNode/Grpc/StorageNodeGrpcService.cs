@@ -18,9 +18,6 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
 {
     private const int ChunkSizeBytes = 64 * 1024;
 
-    /// <summary>Trailer on a write refused for disk space (#199), so gateways can tell it from other ResourceExhausted errors.</summary>
-    public const string ReasonTrailer = "symposia-reason";
-    public const string ReadOnlyReason = "read-only";
 
     private readonly LocalBlobStore _blobStore;
     private readonly ManifestStore _manifestStore;
@@ -41,7 +38,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
 
     private static RpcException ReadOnly() =>
         new(new Status(StatusCode.ResourceExhausted, "node is read-only: insufficient disk"),
-            new Metadata { { ReasonTrailer, ReadOnlyReason } });
+            new Metadata { { StorageNodeErrors.ReasonTrailer, StorageNodeErrors.ReadOnly } });
 
     public override async Task<WriteBlobResponse> WriteBlob(
         IAsyncStreamReader<WriteBlobChunk> requestStream, ServerCallContext context)
@@ -144,9 +141,10 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         }
     }
 
-    // ENOSPC (28 on Linux and macOS) / ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL on Windows.
-    private static bool IsDiskFull(IOException ex) =>
-        (ex.HResult & 0xFFFF) is 28 or 112 or 39;
+    // ENOSPC is errno 28 on Linux and macOS (HResult is the raw errno there); Windows uses
+    // ERROR_DISK_FULL (112) and ERROR_HANDLE_DISK_FULL (39), which mean other things as errnos.
+    public static bool IsDiskFull(IOException ex) =>
+        OperatingSystem.IsWindows() ? (ex.HResult & 0xFFFF) is 112 or 39 : ex.HResult == 28;
 
     public override async Task ReadBlob(
         ReadBlobRequest request, IServerStreamWriter<ReadBlobChunk> responseStream, ServerCallContext context)
