@@ -20,6 +20,7 @@
       <button id="logout" class="link">Log out</button>
     </nav>
   </header>
+  <div id="alerts-banner" hidden></div>
 
   <main>
     <section id="view-setup" class="card narrow" hidden>
@@ -191,6 +192,20 @@
           <h2>Discovery</h2>
           <label>Interval (seconds) <input type="number" name="Discovery.IntervalSeconds" min="1"></label>
           <label>Seed peers (comma separated) <input name="Discovery.SeedPeers"></label>
+        </div>
+
+        <div class="card">
+          <h2>Operator Alerts</h2>
+          <p class="hint">Alerts (low disk space, read-only storage) always show at the top of this page. Enter an address to also get them by email: one when an alert starts, changes or clears, and a daily reminder while an error lasts.</p>
+          <label>Alert email address <input type="email" name="Alerts.Email" placeholder="not set (alerts are not emailed)" autocomplete="off"></label>
+          <label>SMTP server <input name="Alerts.SmtpHost" placeholder="smtp.example.com"></label>
+          <label>SMTP port <input type="number" name="Alerts.SmtpPort" min="1" max="65535"></label>
+          <label>Security <select name="Alerts.Security"><option value="StartTls">STARTTLS</option><option value="Tls">TLS</option><option value="None">None</option></select></label>
+          <label>Username <input name="Alerts.Username" autocomplete="off"></label>
+          <label>Password <input type="password" name="smtpPassword" autocomplete="new-password" placeholder="not set"></label>
+          <label class="inline"><input type="checkbox" name="clearSmtpPassword"> Clear the saved password</label>
+          <label>From address <input type="email" name="Alerts.From" placeholder="the alert address"></label>
+          <p><button type="button" id="alerts-test">Send test email</button> <span id="alerts-test-result" class="hint"></span></p>
         </div>
 
         <div class="card">

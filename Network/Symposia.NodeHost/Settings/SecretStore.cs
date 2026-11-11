@@ -19,6 +19,8 @@ public sealed class SecretStore(HostPaths paths)
         public string? RelayerPrivateKey { get; set; }
 
         public string? BlobGatewaySecret { get; set; }
+
+        public string? SmtpPassword { get; set; }
     }
 
     public bool HasPassword => Load().PasswordHash is not null;
@@ -59,6 +61,13 @@ public sealed class SecretStore(HostPaths paths)
 
     public void SetBlobGatewaySecret(string? secret) =>
         Update(s => s.BlobGatewaySecret = string.IsNullOrWhiteSpace(secret) ? null : secret.Trim());
+
+    public bool HasSmtpPassword => !string.IsNullOrEmpty(Load().SmtpPassword);
+
+    /// <summary>Password for the Operator Alerts SMTP server (issue #196).</summary>
+    public string? SmtpPassword => Load().SmtpPassword;
+
+    public void SetSmtpPassword(string? password) => Update(s => s.SmtpPassword = string.IsNullOrEmpty(password) ? null : password);
 
     public void SetRelayerKey(string? key) => Update(s => s.RelayerPrivateKey = string.IsNullOrWhiteSpace(key) ? null : key.Trim());
 

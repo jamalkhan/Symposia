@@ -86,7 +86,33 @@ function setTitle(node, chainId) {
 // Parts of /api/status every polled tab renders (header, alert banner), so one poll per tab keeps them current.
 function applyStatus(s) {
   $('#node-address').textContent = s.node;
+  renderAlerts(s.activeAlerts || []);
 }
+
+// ---------- operator alerts (#196) ----------
+function renderAlerts(alerts) {
+  const banner = $('#alerts-banner');
+  banner.hidden = alerts.length === 0;
+  banner.innerHTML = alerts.map((a) => `<div class="alert ${a.severity === 'Error' ? 'bad' : 'warn'}"><b>${esc(a.title)}</b> ${esc(a.detail)}</div>`).join('');
+}
+
+// Tabs that don't poll /api/status still keep the banner current.
+setInterval(async () => {
+  const view = hashView();
+  if ($('#nav').hidden || view === 'diagnostics' || view === 'logs') return;
+  try { renderAlerts((await api('GET', '/status')).activeAlerts || []); } catch { /* next tick */ }
+}, 15000);
+
+$('#alerts-test').addEventListener('click', async () => {
+  const out = $('#alerts-test-result'), form = $('#settings-form');
+  const alerts = {};
+  $$('[name^="Alerts."]', form).forEach((el) => (alerts[el.name.slice(7)] = el.type === 'number' ? Number(el.value) : el.value));
+  out.textContent = 'Sending…';
+  try {
+    const r = await api('POST', '/alerts/test', { alerts, smtpPassword: $('[name="smtpPassword"]', form).value || null });
+    out.textContent = r.sent ? `Sent to ${alerts.Email}.` : `Failed: ${r.error}`;
+  } catch (ex) { out.textContent = ex.message; }
+});
 
 async function refresh() {
   let s;
@@ -240,6 +266,8 @@ async function loadSettings() {
   settingsFields().forEach((el) => {
     const name = el.name;
     if (name === 'blobGatewaySecret') { el.value = ''; el.placeholder = data.blobGatewaySecretSet ? '•••••••• (set — enter a new secret to replace)' : 'not set'; return; }
+    if (name === 'smtpPassword') { el.value = ''; el.placeholder = data.smtpPasswordSet ? '•••••••• (set — enter a new password to replace)' : 'not set'; return; }
+    if (name === 'clearSmtpPassword') { el.checked = false; el.disabled = !data.smtpPasswordSet; return; }
     if (name === 'relayerKey') { el.value = ''; el.placeholder = data.relayerKeySet ? '•••••••• (set — enter a new key to replace)' : 'not set'; return; }
     let value = name === 'Storage.MaxCapacityGb' ? Math.round(get(current, 'Storage.MaxCapacityBytes') / GB) : get(current, name);
     if (el.type === 'radio') el.checked = el.value === value;
@@ -271,11 +299,13 @@ $('#use-join').addEventListener('click', () => {
 settingsForms().forEach((f) => f.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target, next = structuredClone(current), result = $('[data-save-result]', form);
-  let relayerKey = null, blobGatewaySecret = null;
+  let relayerKey = null, blobGatewaySecret = null, smtpPassword = null;
   $$('[name]', form).forEach((el) => {
     if (el.disabled || el.hasAttribute('data-dup') && el.closest('[hidden]')) return;
     if (el.name === 'relayerKey') { if (el.value) relayerKey = el.value; return; }
     if (el.name === 'blobGatewaySecret') { if (el.value) blobGatewaySecret = el.value; return; }
+    if (el.name === 'smtpPassword') { if (el.value) smtpPassword = el.value; return; }
+    if (el.name === 'clearSmtpPassword') { if (el.checked && smtpPassword === null) smtpPassword = ''; return; }
     if (el.type === 'radio') { if (el.checked) set(next, el.name, el.value); return; }
     if (el.closest('[data-mode][hidden]')) return;
     let v = el.type === 'checkbox' ? el.checked : el.value;
@@ -288,7 +318,7 @@ settingsForms().forEach((f) => f.addEventListener('submit', async (e) => {
   });
   result.textContent = 'Applying…';
   try {
-    await api('PUT', '/settings', { settings: next, relayerKey, blobGatewaySecret });
+    await api('PUT', '/settings', { settings: next, relayerKey, blobGatewaySecret, smtpPassword });
     result.textContent = 'Saved. Components restarted as needed.';
     await loadSettings();
   } catch (ex) { result.textContent = ex.message; }
