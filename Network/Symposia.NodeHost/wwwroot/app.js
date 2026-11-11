@@ -146,7 +146,10 @@ async function refresh() {
     ['Epoch', rw ? `${rw.epoch} (${Math.round(rw.epochSeconds / 60)} min)` : ''], ['Epoch ends', when(rw?.epochEndsAt)],
     ['Sealable from', when(rw?.sealableFrom)], ['Telemetry committee', rw ? (rw.committeeMember ? `this node (${rw.threshold} of ${rw.committeeSize})` : `not a member (${rw.committeeSize} members)`) : ''],
     ['Heartbeats', !t ? 'off' : !t.configured ? 'telemetry not configured' : t.scheduleProblem ? `held: ${t.scheduleProblem}` : !t.scheduleSynced ? 'holding until the chain schedule syncs' : 'sending'],
-    ['Last accepted', t?.configured ? beat(t.lastAccepted) : ''], ['Last rejected', t?.configured ? beat(t.lastRejected) : '']]);
+    ['Last accepted', t?.configured ? beat(t.lastAccepted) : ''], ['Last rejected', t?.configured ? beat(t.lastRejected) : ''],
+    // Gossip reach (issue #207): accepted heartbeats only count once they leave this node.
+    ['Gossip', !t?.gossip ? '' : t.gossip.warning ? `⚠ ${t.gossip.warning}`
+      : `${t.gossip.recognizedPeers} peers, last push ${t.gossip.lastPushSucceeded ? when(t.gossip.lastPushSucceeded) : 'none yet'}, ${t.gossip.failedPushes} failed`]]);
   $('#rewards-stale').hidden = !s.rewardsStale;
   if (s.rewardsStale) $('[data-reason]', $('#rewards-stale')).textContent = s.rewardsStale.reason;
   const c = s.storageCapacity, gb = (b) => `${(b / GB).toFixed(1)} GB`;

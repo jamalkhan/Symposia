@@ -24,7 +24,8 @@ public static class TelemetryNetworkExtensions
         services.AddHttpClient(nameof(TelemetryGossipNode), c => c.Timeout = TimeSpan.FromSeconds(10));
 
         services.AddSingleton<ITelemetrySigner, NodeIdentityTelemetrySigner>();
-        services.AddSingleton<ITelemetryPeers, PeerTableTelemetryPeers>();
+        // TryAdd: a Node Host supplies its own host-wide peer view before this runs (#207).
+        services.TryAddSingleton<ITelemetryPeers, PeerTableTelemetryPeers>();
         services.AddSingleton(sp => new TelemetryEip712(Network(sp).ChainId, Telemetry(sp).Chain.TelemetryRegistryAddress));
         services.AddSingleton(sp =>
         {
@@ -38,7 +39,8 @@ public static class TelemetryNetworkExtensions
         services.AddSingleton(sp => new TelemetryGossipNode(
             sp.GetRequiredService<InMemoryTelemetryGossip>(), sp.GetRequiredService<ITelemetryPeers>(), sp.GetRequiredService<ITelemetrySigner>(),
             sp.GetRequiredService<TelemetryEip712>(), sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<IOptions<TelemetryGossipOptions>>(),
-            Network(sp).ChainId));
+            Network(sp).ChainId, sp.GetService<TelemetryDiagnostics>(), sp.GetRequiredService<TelemetryScheduleSource>(),
+            sp.GetService<ILogger<TelemetryGossipNode>>()));
         services.AddSingleton<ITelemetryGossip>(sp => sp.GetRequiredService<TelemetryGossipNode>());
         services.AddHostedService<TelemetryGossipFlusher>();
 
