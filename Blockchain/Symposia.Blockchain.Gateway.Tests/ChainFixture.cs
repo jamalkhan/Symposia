@@ -62,7 +62,7 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
         _anvil = Process.Start(new ProcessStartInfo
         {
             FileName = Path.Combine(foundryBin, "anvil"),
-            Arguments = $"--port {_port} --silent",
+            Arguments = AnvilLaunch.Arguments(_port),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,

@@ -33,7 +33,7 @@ public sealed class RewardsChainFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _anvil = Process.Start(new ProcessStartInfo(Path.Combine(FoundryBin, "anvil"), $"--port {_port} --silent")
+        _anvil = Process.Start(new ProcessStartInfo(Path.Combine(FoundryBin, "anvil"), AnvilLaunch.Arguments(_port))
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,

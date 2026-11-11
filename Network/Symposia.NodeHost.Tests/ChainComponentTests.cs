@@ -77,6 +77,96 @@ public sealed class ChainComponentTests : IDisposable
         }
     }
 
+    // #210: with --prune-history, a burst of blocks spills no history to ~/.foundry/anvil/tmp, and --state still
+    // carries the chain across a restart.
+    [Fact]
+    public async Task LocalDevAnvil_PrunesHistoryAndKeepsStateAcrossRestart()
+    {
+        var foundry = Environment.GetEnvironmentVariable("FOUNDRY_BIN")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
+        using var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        var statePath = Path.Combine(_dir.Path, "anvil.json");
+        const string address = "0x00000000000000000000000000000000000d2100";
+        var tmp = AnvilTmpSweeper.DefaultTmpDir;
+        string[] Snapshots() => Directory.Exists(tmp) ? Directory.GetDirectories(tmp, "anvil-state-*") : [];
+        var before = Snapshots();
+
+        using var http = new HttpClient();
+        async Task<System.Text.Json.JsonElement?> RpcAsync(string method, string parameters)
+        {
+            try
+            {
+                using var response = await http.PostAsync($"http://127.0.0.1:{port}", new StringContent(
+                    $$"""{"jsonrpc":"2.0","id":1,"method":"{{method}}","params":{{parameters}}}""",
+                    System.Text.Encoding.UTF8, "application/json"));
+                return System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("result").Clone();
+            }
+            catch (HttpRequestException)
+            {
+                return null;
+            }
+        }
+
+        async Task<System.Diagnostics.Process> StartAsync()
+        {
+            var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(foundry, "anvil")) { UseShellExecute = false };
+            foreach (var arg in ChainComponent.AnvilArguments(port, statePath))
+            {
+                start.ArgumentList.Add(arg);
+            }
+
+            var process = System.Diagnostics.Process.Start(start)!;
+            for (var i = 0; i < 100 && await RpcAsync("eth_blockNumber", "[]") is null; i++)
+            {
+                await Task.Delay(100);
+            }
+
+            return process;
+        }
+
+        async Task StopAsync(System.Diagnostics.Process process)
+        {
+            // Clean exit, as ChainComponent.OnStopAsync does, so anvil dumps --state.
+            using (var signal = System.Diagnostics.Process.Start("kill", ["-INT", process.Id.ToString()]))
+            {
+                await signal!.WaitForExitAsync();
+            }
+
+            using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await process.WaitForExitAsync(wait.Token);
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return; // No SIGINT to request the --state dump on exit.
+        }
+
+        var anvil = await StartAsync();
+        try
+        {
+            await RpcAsync("anvil_setCode", $"""["{address}","0x6001"]""");
+            await RpcAsync("anvil_mine", """["0x7d0"]""");
+            Assert.Empty(Snapshots().Except(before));
+            await StopAsync(anvil);
+
+            anvil = await StartAsync();
+            Assert.Equal("0x6001", (await RpcAsync("eth_getCode", $"""["{address}","latest"]"""))?.GetString());
+        }
+        finally
+        {
+            if (!anvil.HasExited)
+            {
+                anvil.Kill(entireProcessTree: true);
+                await anvil.WaitForExitAsync();
+            }
+
+            anvil.Dispose();
+        }
+    }
+
     // #191: LocalDev reads the committee address from the key Program.cs already wrote, without a loaded identity.
     [Fact]
     public void LocalNodeAddress_LoadsTheExistingNodeKey()
