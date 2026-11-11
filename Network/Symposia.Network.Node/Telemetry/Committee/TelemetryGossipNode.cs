@@ -95,6 +95,7 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
     private readonly TelemetryGossipOptions _options;
     private readonly ulong _chainId;
     private readonly ConcurrentQueue<object> _outbound = new();
+    private List<object> _retry = []; // the oldest undelivered items, tried before the queue; only the flusher touches it
     private readonly ConcurrentDictionary<string, (long Window, int Count)> _rate = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _unsupported = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _warned = new(StringComparer.OrdinalIgnoreCase);
@@ -219,18 +220,21 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
         {
             // Keep the queue: heartbeats from before the first discovery tick, or during a network
             // restart, must still reach the committee once a peer is recognized.
-            if (!_outbound.IsEmpty)
+            if (_retry.Count > 0 || !_outbound.IsEmpty)
             {
-                WarnOnce("", "No recognized telemetry gossip peers; {Count} items stay queued until one is recognized.", _outbound.Count);
+                WarnOnce("", "No recognized telemetry gossip peers; {Count} items stay queued until one is recognized.", _retry.Count + _outbound.Count);
             }
 
             return 0;
         }
 
         var sent = 0;
-        for (var pending = _outbound.Count; pending > 0 && peers.Count > 0;)
+        for (var pending = _outbound.Count; (pending > 0 || _retry.Count > 0) && peers.Count > 0;)
         {
             var batch = new List<object>(_options.MaxItemsPerRequest);
+            var fromRetry = Math.Min(_retry.Count, _options.MaxItemsPerRequest);
+            batch.AddRange(_retry.Take(fromRetry));
+            _retry = _retry[fromRetry..];
             while (batch.Count < _options.MaxItemsPerRequest && pending > 0 && _outbound.TryDequeue(out var item))
             {
                 batch.Add(item);
@@ -264,12 +268,9 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
                 continue;
             }
 
-            // Nobody took it: requeue and stop for this tick, so an isolated node retries once per flush.
-            foreach (var item in batch)
-            {
-                _outbound.Enqueue(item);
-            }
-
+            // Nobody took it: keep it at the front, oldest first, and stop for this tick, so an
+            // isolated node retries once per flush and the cap still drops the oldest items.
+            _retry = [.. batch, .. _retry];
             Trim();
             break;
         }
@@ -284,7 +285,11 @@ public sealed class TelemetryGossipNode : ITelemetryGossip
     /// <summary>Drops the oldest queued items beyond <see cref="TelemetryGossipOptions.MaxQueuedItems"/>.</summary>
     private void Trim()
     {
-        for (var excess = _outbound.Count - _options.MaxQueuedItems; excess > 0 && _outbound.TryDequeue(out _); excess--)
+        var excess = _retry.Count + _outbound.Count - _options.MaxQueuedItems;
+        var fromRetry = Math.Clamp(excess, 0, _retry.Count);
+        _retry = _retry[fromRetry..];
+        Interlocked.Add(ref Metrics.DroppedField, fromRetry);
+        for (excess -= fromRetry; excess > 0 && _outbound.TryDequeue(out _); excess--)
         {
             Interlocked.Increment(ref Metrics.DroppedField);
         }

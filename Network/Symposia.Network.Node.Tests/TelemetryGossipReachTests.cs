@@ -162,6 +162,32 @@ public sealed class TelemetryGossipReachTests : IDisposable
         Assert.Equal(1, _gossip.Metrics.Pushed);
     }
 
+    // Review (Lenny, round 2): over the cap while requeuing, the oldest beats go, the newest stay.
+    [Fact]
+    public async Task OverTheCapWhileRequeuing_DropsTheOldest()
+    {
+        _peers.Add(_peer.NodeId);
+        _network.Status = HttpStatusCode.Unauthorized;
+        for (uint s = 0; s < 3; s++)
+        {
+            await _gossip.PublishAsync(Beat(s));
+        }
+
+        await FlushAsync(); // 0..2 held for retry
+        for (uint s = 3; s < 8; s++)
+        {
+            await _gossip.PublishAsync(Beat(s));
+        }
+
+        await FlushAsync(); // 8 items, cap 5
+        Assert.Equal(3, _gossip.Metrics.Dropped);
+
+        _network.Status = HttpStatusCode.Accepted;
+        _network.Capture = true;
+        await FlushAsync();
+        Assert.Equal([3u, 4u, 5u, 6u, 7u], _network.Slots.Order());
+    }
+
     [Fact]
     public async Task PushedCountsEachItemOnce_WhateverTheFanOut()
     {
@@ -215,15 +241,26 @@ public sealed class TelemetryGossipReachTests : IDisposable
 
         public int Delivered { get; private set; }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        public bool Capture { get; set; }
+
+        public List<uint> Slots { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Attempts++;
+            if (Capture)
+            {
+                var envelope = System.Text.Json.JsonSerializer.Deserialize<TelemetryEnvelope>(await request.Content!.ReadAsByteArrayAsync(ct),
+                    new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+                Slots.AddRange(envelope.Heartbeats!.Select(h => h.Payload.SampleIndex));
+            }
+
             if ((int)Status < 300)
             {
                 Delivered++;
             }
 
-            return Task.FromResult(new HttpResponseMessage(Status));
+            return new HttpResponseMessage(Status);
         }
     }
 }
