@@ -170,6 +170,20 @@ public sealed partial class GatewayMetadataStore
             ("$n", name), ("$t", Now())));
     }
 
+    /// <summary>Every bucket with its creation time, by name (#203).</summary>
+    public IReadOnlyList<(string Name, DateTimeOffset CreatedAt)> ListBuckets()
+    {
+        using var conn = Open();
+        using var r = Query(conn, "SELECT name, created_at FROM buckets ORDER BY name").ExecuteReader();
+        var buckets = new List<(string, DateTimeOffset)>();
+        while (r.Read())
+        {
+            buckets.Add((r.GetString(0), DateTimeOffset.Parse(r.GetString(1))));
+        }
+
+        return buckets;
+    }
+
     /// <summary>Returns false if the bucket is non-empty.</summary>
     public bool DeleteBucket(string name)
     {
@@ -580,8 +594,13 @@ public sealed partial class GatewayMetadataStore
 
         if (!string.IsNullOrEmpty(prefix))
         {
-            sql.Append(" AND key LIKE $prefix ESCAPE '\\'");
-            cmd.Parameters.AddWithValue("$prefix", EscapeLike(prefix) + "%");
+            // A key range rather than LIKE (#203): it stays on the (bucket, key) index, and it's
+            // case-sensitive, where SQLite's LIKE folds ASCII case (prefix "A" matched "a..." keys).
+            // U+10FFFF is the highest code point, so every key starting with the prefix sorts below
+            // prefix + U+10FFFF except one continuing with U+10FFFF itself; the substr check keeps it exact.
+            sql.Append(" AND key >= $prefix AND key <= $prefixEnd AND substr(key, 1, length($prefix)) = $prefix");
+            cmd.Parameters.AddWithValue("$prefix", prefix);
+            cmd.Parameters.AddWithValue("$prefixEnd", prefix + char.ConvertFromUtf32(0x10FFFF) + char.ConvertFromUtf32(0x10FFFF));
         }
 
         if (!string.IsNullOrEmpty(continuationToken))
@@ -618,9 +637,6 @@ public sealed partial class GatewayMetadataStore
 
     private static string[] SplitNodeIds(string raw) =>
         raw.Length == 0 ? [] : raw.Split(',');
-
-    private static string EscapeLike(string value) =>
-        value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
     private static string Now() => DateTimeOffset.UtcNow.ToString("O");
 

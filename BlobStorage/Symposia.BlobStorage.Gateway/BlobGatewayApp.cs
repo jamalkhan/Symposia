@@ -46,6 +46,7 @@ public static class BlobGatewayApp
 
         // Repair / resilience services.
         builder.Services.AddSingleton<RepairQueue>();
+        builder.Services.AddSingleton<Objects.ObjectService>();
         builder.Services.AddSingleton<NodeReconciler>();
         builder.Services.AddHostedService<GcWorker>();
         builder.Services.AddHostedService<MultipartReaper>();
