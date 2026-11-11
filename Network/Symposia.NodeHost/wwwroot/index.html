@@ -12,6 +12,8 @@
     <span id="node-address" class="mono"></span>
     <nav id="nav" hidden>
       <button data-view="diagnostics" class="tab active">Diagnostics</button>
+      <button data-view="logs" class="tab">Logs</button>
+      <button data-view="dashboard" class="tab">Network Dashboard</button>
       <button data-view="network" class="tab">Network</button>
       <button data-view="services" class="tab">Node Services</button>
       <button data-view="ledger" class="tab">Ledger</button>
@@ -19,6 +21,7 @@
       <button id="logout" class="link">Log out</button>
     </nav>
   </header>
+  <div id="alerts-banner" hidden></div>
 
   <main>
     <section id="view-setup" class="card narrow" hidden>
@@ -56,11 +59,26 @@
         <div class="card"><h2>Network</h2><dl id="network"></dl></div>
         <div class="card"><h2>On-chain registration</h2><dl id="registration"></dl></div>
         <div class="card" id="rewards-card" hidden><h2>Rewards epoch</h2><dl id="rewards"></dl></div>
+        <div class="card" id="capacity-card" hidden><h2>Storage capacity</h2><dl id="capacity"></dl></div>
         <div class="card" id="blobgateway-card" hidden><h2>Blob gateway (S3)</h2><dl id="blobgateway"></dl></div>
       </div>
       <div class="card"><h2>Peers <small>(handshake results)</small></h2><table id="peers"></table></div>
       <div class="card"><h2>Registry members</h2><table id="members"></table></div>
-      <div class="card"><h2>Recent log</h2><pre id="logs" class="logs"></pre></div>
+    </section>
+
+    <section id="view-logs" hidden>
+      <div class="card"><h2>Log</h2><pre id="logs" class="logs"></pre></div>
+    </section>
+
+    <section id="view-dashboard" hidden>
+      <div class="card">
+        <h2>Symposia Storage Network <small id="dash-asof"></small></h2>
+        <p id="dash-error" class="error" hidden></p>
+        <dl id="dash-storage"></dl>
+        <h3>Storage node versions</h3>
+        <table id="dash-versions"></table>
+        <p id="dash-notes" class="hint"></p>
+      </div>
     </section>
 
     <section id="view-network" hidden>
@@ -187,6 +205,20 @@
           <h2>Discovery</h2>
           <label>Interval (seconds) <input type="number" name="Discovery.IntervalSeconds" min="1"></label>
           <label>Seed peers (comma separated) <input name="Discovery.SeedPeers"></label>
+        </div>
+
+        <div class="card">
+          <h2>Operator Alerts</h2>
+          <p class="hint">Alerts (low disk space, read-only storage) always show at the top of this page. Enter an address to also get them by email: one when an alert starts, changes or clears, and a daily reminder while an error lasts.</p>
+          <label>Alert email address <input type="email" name="Alerts.Email" placeholder="not set (alerts are not emailed)" autocomplete="off"></label>
+          <label>SMTP server <input name="Alerts.SmtpHost" placeholder="smtp.example.com"></label>
+          <label>SMTP port <input type="number" name="Alerts.SmtpPort" min="1" max="65535"></label>
+          <label>Security <select name="Alerts.Security"><option value="StartTls">STARTTLS</option><option value="Tls">TLS</option><option value="None">None</option></select></label>
+          <label>Username <input name="Alerts.Username" autocomplete="off"></label>
+          <label>Password <input type="password" name="smtpPassword" autocomplete="new-password" placeholder="not set"></label>
+          <label class="inline"><input type="checkbox" name="clearSmtpPassword"> Clear the saved password</label>
+          <label>From address <input type="email" name="Alerts.From" placeholder="the alert address"></label>
+          <p><button type="button" id="alerts-test">Send test email</button> <span id="alerts-test-result" class="hint"></span></p>
         </div>
 
         <div class="card">

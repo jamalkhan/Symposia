@@ -23,6 +23,9 @@ public sealed record NetworkNodeRow(string Node, string? Endpoint, string? Host,
     public IReadOnlyList<string> Warnings { get; init; } = [];
 }
 
+/// <summary>One crawl of the registry and every node's self-reported health, shared by the Network tab and the dashboard (#198).</summary>
+public sealed record NetworkCrawl(NodeHealthReport Self, IReadOnlyList<NetworkNodeRow> Rows, ProtocolSchedule Schedule, string? Error, DateTimeOffset At);
+
 /// <summary>A scheduled protocol activation and how many storage nodes advertise the feature (#145 FR6.2).</summary>
 public sealed record ActivationReadiness(string Name, long ActivatesAt, bool InEffect, int Ready, int Total);
 
@@ -50,29 +53,57 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
         Converters = { new JsonStringEnumConverter() },
     };
 
+    /// <summary>Requests in flight at once when polling nodes (#198).</summary>
+    public const int MaxConcurrency = 16;
+
+    private readonly SemaphoreSlim _crawlGate = new(1, 1);
+
     public async Task<object> SnapshotAsync()
+    {
+        var crawl = await CrawlAsync();
+        return Result(crawl.Self, [..crawl.Rows], crawl.Schedule, crawl.Error);
+    }
+
+    /// <summary>
+    /// The registry plus each node's health and services document, cached for 5 s and built by one
+    /// caller at a time, so open tabs (Network and Dashboard) share a single round of requests.
+    /// </summary>
+    public async Task<NetworkCrawl> CrawlAsync()
     {
         var network = supervisor.Context.Network;
         var key = network is null ? "network|none" : $"network|{network.GatewayUrl}|{network.ChainId}|{network.NodeRegistryAddress}";
-        if (cache.TryGetValue(key, out object? hit) && hit is not null)
+        if (cache.TryGetValue(key, out NetworkCrawl? hit) && hit is not null)
         {
             logger.LogTrace("Network overview served from cache ({Key})", key);
             return hit;
         }
 
-        var value = await LoadAsync();
-        cache.Set(key, value, CacheFor);
-        return value;
+        await _crawlGate.WaitAsync();
+        try
+        {
+            if (cache.TryGetValue(key, out hit) && hit is not null)
+            {
+                return hit;
+            }
+
+            var value = await LoadAsync();
+            cache.Set(key, value, CacheFor);
+            return value;
+        }
+        finally
+        {
+            _crawlGate.Release();
+        }
     }
 
-    private async Task<object> LoadAsync()
+    private async Task<NetworkCrawl> LoadAsync()
     {
         var self = health.Local();
         var client = supervisor.Network.Services?.GetService<INodeRegistryClient>();
         if (client is null)
         {
             logger.LogDebug("Network overview: network component is {Status}; showing this node only", supervisor.Network.Status);
-            return Result(self, [], ProtocolSchedule.None, "This node isn't connected to a network yet. Choose one in Settings.");
+            return new NetworkCrawl(self, [], ProtocolSchedule.None, "This node isn't connected to a network yet. Choose one in Settings.", DateTimeOffset.UtcNow);
         }
 
         IReadOnlyList<RegisteredNode> members;
@@ -85,24 +116,26 @@ public sealed class NetworkOverview(ComponentSupervisor supervisor, NodeHealth h
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Network overview: could not list registered nodes from the gateway");
-                return Result(self, [], ProtocolSchedule.None, $"Gateway unavailable: {ex.Message}");
+                return new NetworkCrawl(self, [], ProtocolSchedule.None, $"Gateway unavailable: {ex.Message}", DateTimeOffset.UtcNow);
             }
         }
 
         logger.LogDebug("Network overview: registry has {Count} node(s); polling their health", members.Count);
         var started = System.Diagnostics.Stopwatch.StartNew();
         var scheduleTask = ScheduleAsync(supervisor.Context.Network!.GatewayUrl);
-        var rows = (await Task.WhenAll(members.Select(m => RowAsync(m, self)))).ToList();
+        var rows = new NetworkNodeRow[members.Count];
+        await Parallel.ForEachAsync(Enumerable.Range(0, members.Count), new ParallelOptions { MaxDegreeOfParallelism = MaxConcurrency },
+            async (i, _) => rows[i] = await RowAsync(members[i], self));
         var schedule = await scheduleTask;
-        rows = rows.Select(r => r with { Warnings = Unready(r.Services, schedule) }).ToList();
-        var unreachable = rows.Count(r => r.Storage.Level == HealthLevel.Unknown);
+        var withWarnings = rows.Select(r => r with { Warnings = Unready(r.Services, schedule) }).ToList();
+        var unreachable = withWarnings.Count(r => r.Storage.Level == HealthLevel.Unknown);
         if (unreachable > 0)
         {
-            logger.LogWarning("Network overview: {Unreachable} of {Count} node(s) did not report health", unreachable, rows.Count);
+            logger.LogWarning("Network overview: {Unreachable} of {Count} node(s) did not report health", unreachable, withWarnings.Count);
         }
 
         logger.LogDebug("Network overview built in {ElapsedMs} ms", started.ElapsedMilliseconds);
-        return Result(self, rows, schedule, null);
+        return new NetworkCrawl(self, withWarnings, schedule, null, DateTimeOffset.UtcNow);
     }
 
     private async Task<ProtocolSchedule> ScheduleAsync(string gatewayUrl)

@@ -18,22 +18,27 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
 {
     private const int ChunkSizeBytes = 64 * 1024;
 
+
     private readonly LocalBlobStore _blobStore;
     private readonly ManifestStore _manifestStore;
     private readonly NodeIdentity _nodeIdentity;
-    private readonly StorageNodeOptions _options;
+    private readonly StorageCapacityMonitor _capacity;
 
     public StorageNodeGrpcService(
         LocalBlobStore blobStore,
         ManifestStore manifestStore,
         NodeIdentity nodeIdentity,
-        IOptions<StorageNodeOptions> options)
+        StorageCapacityMonitor capacity)
     {
         _blobStore = blobStore;
         _manifestStore = manifestStore;
         _nodeIdentity = nodeIdentity;
-        _options = options.Value;
+        _capacity = capacity;
     }
+
+    private static RpcException ReadOnly() =>
+        new(new Status(StatusCode.ResourceExhausted, "node is read-only: insufficient disk"),
+            new Metadata { { StorageNodeErrors.ReasonTrailer, StorageNodeErrors.ReadOnly } });
 
     public override async Task<WriteBlobResponse> WriteBlob(
         IAsyncStreamReader<WriteBlobChunk> requestStream, ServerCallContext context)
@@ -46,48 +51,100 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
 
         var header = requestStream.Current.Header;
 
-        // A Pipe lets us stream gRPC chunks straight to disk without buffering the full blob in memory.
-        var pipe = new Pipe();
-        var writeTask = _blobStore.WriteAsync(pipe.Reader.AsStream(), context.CancellationToken);
+        // Admission (#199): refuse up front while read-only or when the stated size can't fit; a body
+        // of unknown size reserves as it streams.
+        var reserved = Math.Max(0, header.ExpectedSizeBytes);
+        if (!_capacity.TryReserve(reserved))
+        {
+            throw ReadOnly();
+        }
 
-        Exception? pumpError = null;
+        long received = 0;
+        long stored = 0;
         try
         {
-            while (await requestStream.MoveNext(context.CancellationToken))
-            {
-                var chunk = requestStream.Current;
-                if (chunk.PayloadCase != WriteBlobChunk.PayloadOneofCase.Data)
-                {
-                    throw new RpcException(new Status(StatusCode.InvalidArgument, "Only the first message may be a header."));
-                }
+            // A Pipe lets us stream gRPC chunks straight to disk without buffering the full blob in memory.
+            var pipe = new Pipe();
+            var writeTask = _blobStore.WriteAsync(pipe.Reader.AsStream(), context.CancellationToken);
 
-                await pipe.Writer.WriteAsync(chunk.Data.Memory, context.CancellationToken);
+            Exception? pumpError = null;
+            try
+            {
+                while (await requestStream.MoveNext(context.CancellationToken))
+                {
+                    var chunk = requestStream.Current;
+                    if (chunk.PayloadCase != WriteBlobChunk.PayloadOneofCase.Data)
+                    {
+                        throw new RpcException(new Status(StatusCode.InvalidArgument, "Only the first message may be a header."));
+                    }
+
+                    received += chunk.Data.Length;
+                    if (received > reserved)
+                    {
+                        var more = received - reserved;
+                        if (!_capacity.TryReserve(more))
+                        {
+                            throw ReadOnly();
+                        }
+
+                        reserved += more;
+                    }
+
+                    await pipe.Writer.WriteAsync(chunk.Data.Memory, context.CancellationToken);
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            pumpError = ex;
+            catch (Exception ex)
+            {
+                pumpError = ex;
+            }
+            finally
+            {
+                await pipe.Writer.CompleteAsync(pumpError);
+            }
+
+            (Cid Cid, long SizeBytes) written;
+            try
+            {
+                written = await writeTask;
+            }
+            catch (IOException ex) when (IsDiskFull(ex))
+            {
+                // Something else filled the volume: re-measure now so the node goes read-only at once.
+                _capacity.Evaluate();
+                throw ReadOnly();
+            }
+
+            if (pumpError is RpcException { StatusCode: StatusCode.ResourceExhausted } refused)
+            {
+                throw refused;
+            }
+
+            var (cid, sizeBytes) = written;
+            stored = sizeBytes;
+
+            _manifestStore.Upsert(new BlobRecord(
+                cid,
+                sizeBytes,
+                header.TenantId,
+                header.Bucket,
+                header.Key,
+                header.RegionTags.ToArray(),
+                DateTimeOffset.UtcNow,
+                ChecksumVerifiedAt: null,
+                BlobStatus.Active));
+
+            return new WriteBlobResponse { Cid = cid.Value, SizeBytes = sizeBytes };
         }
         finally
         {
-            await pipe.Writer.CompleteAsync(pumpError);
+            _capacity.Release(reserved, stored);
         }
-
-        var (cid, sizeBytes) = await writeTask;
-
-        _manifestStore.Upsert(new BlobRecord(
-            cid,
-            sizeBytes,
-            header.TenantId,
-            header.Bucket,
-            header.Key,
-            header.RegionTags.ToArray(),
-            DateTimeOffset.UtcNow,
-            ChecksumVerifiedAt: null,
-            BlobStatus.Active));
-
-        return new WriteBlobResponse { Cid = cid.Value, SizeBytes = sizeBytes };
     }
+
+    // ENOSPC is errno 28 on Linux and macOS (HResult is the raw errno there); Windows uses
+    // ERROR_DISK_FULL (112) and ERROR_HANDLE_DISK_FULL (39), which mean other things as errnos.
+    public static bool IsDiskFull(IOException ex) =>
+        OperatingSystem.IsWindows() ? (ex.HResult & 0xFFFF) is 112 or 39 : ex.HResult == 28;
 
     public override async Task ReadBlob(
         ReadBlobRequest request, IServerStreamWriter<ReadBlobChunk> responseStream, ServerCallContext context)
@@ -127,16 +184,19 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
 
     public override Task<ProbeResponse> Probe(ProbeRequest request, ServerCallContext context)
     {
-        var usedBytes = _manifestStore.SumSizeBytes();
-        var availableBytes = Math.Max(0, _options.MaxCapacityBytes - usedBytes);
-
+        // One capacity computation for Probe, heartbeats and health (#199 FR10).
+        var capacity = _capacity.Current;
         return Task.FromResult(new ProbeResponse
         {
             NodeId = _nodeIdentity.NodeId,
-            UsedStorageBytes = usedBytes,
-            AvailableStorageBytes = availableBytes,
+            UsedStorageBytes = capacity.Used,
+            AvailableStorageBytes = capacity.Available,
             BlobCount = _manifestStore.CountBlobs(),
-            Healthy = true,
+            // Critical: below the reserve, so the network repairs this node's data elsewhere (FR11).
+            Healthy = capacity.Mode != StorageMode.Critical,
+            ReadOnly = capacity.ReadOnly,
+            VolumeFreeBytes = capacity.Free,
+            ReserveBytes = capacity.Reserve,
         });
     }
 

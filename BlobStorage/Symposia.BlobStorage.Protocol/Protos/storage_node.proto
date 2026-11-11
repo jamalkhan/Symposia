@@ -37,6 +37,8 @@ message WriteBlobHeader {
   string bucket = 2;
   string key = 3;
   repeated string region_tags = 4;
+  // Body size when the gateway knows it (#199); 0 = unknown. Lets a node refuse up front.
+  int64 expected_size_bytes = 5;
 }
 
 message WriteBlobResponse {
@@ -71,6 +73,10 @@ message ProbeResponse {
   int64 available_storage_bytes = 3;
   int64 blob_count = 4;
   bool healthy = 5;
+  // #199: the node refuses new writes because its disk can't cover its allocation; reads still work.
+  bool read_only = 6;
+  int64 volume_free_bytes = 7;
+  int64 reserve_bytes = 8;
 }
 
 message IntegrityChallengeRequest {

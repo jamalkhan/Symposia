@@ -524,6 +524,8 @@ internal sealed class NodeFactory
             {
                 ["StorageNode:StorageRoot"] = Path.Combine(_dataDir, "blobs"),
                 ["StorageNode:ManifestDbPath"] = Path.Combine(_dataDir, "manifest.db"),
+                // A small allocation, so the test node is writable however full the host disk is (#199 read-only mode).
+                ["StorageNode:MaxCapacityBytes"] = "1073741824",
                 ["StorageNode:NodeIdentityKeyPath"] = Path.Combine(_dataDir, "node-identity.pem"),
             }));
     }

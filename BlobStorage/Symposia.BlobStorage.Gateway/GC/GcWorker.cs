@@ -79,7 +79,7 @@ public sealed class GcWorker : BackgroundService
             var node = _nodes.All.FirstOrDefault(n =>
                 n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
-            if (node is null || !node.IsHealthy)
+            if (node is null || !node.IsReachable)
             {
                 // Node unknown or offline — leave in queue for later.
                 _store.IncrementGcAttempt(id);

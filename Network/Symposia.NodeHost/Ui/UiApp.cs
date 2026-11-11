@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.FileProviders;
 using Symposia.Network.Node;
+using Symposia.NodeHost.Alerts;
 using Symposia.NodeHost.Components;
 using Symposia.NodeHost.Diagnostics;
 using Symposia.NodeHost.Settings;
@@ -15,7 +16,11 @@ namespace Symposia.NodeHost.Ui;
 
 public sealed record PasswordRequest(string? Password, string? SetupToken = null);
 
-public sealed record SettingsUpdate(HostSettings? Settings, string? RelayerKey, string? BlobGatewaySecret = null);
+/// <param name="SmtpPassword">Operator Alerts SMTP password (#196): null keeps the stored one, "" clears it.</param>
+public sealed record SettingsUpdate(HostSettings? Settings, string? RelayerKey, string? BlobGatewaySecret = null, string? SmtpPassword = null);
+
+/// <summary>A test send from the Operator Alerts form (#196); a null password uses the stored one.</summary>
+public sealed record AlertTestRequest(AlertSettings? Alerts, string? SmtpPassword);
 
 /// <summary>
 /// Password-protected configuration and diagnostics UI (issue #133 FR-E).
@@ -55,7 +60,14 @@ public static class UiApp
         builder.Services.AddMemoryCache();
         builder.Services.AddSingleton(supervisor.Context.Health ?? new NodeHealth(supervisor, nodeAddress));
         builder.Services.AddSingleton<NetworkOverview>();
+        builder.Services.AddSingleton<IStorageHistorySource, ChainStorageHistorySource>();
+        builder.Services.AddSingleton<NetworkDashboard>();
         builder.Services.AddSingleton(_ => CreateLedger(context, nodeAddress));
+        builder.Services.AddSingleton<IAlertMailTransport, SmtpAlertMailTransport>();
+        builder.Services.AddHostedService(sp => new AlertNotifier(
+            context.Alerts, () => settings.Effective, secrets, sp.GetRequiredService<IAlertMailTransport>(), nodeAddress,
+            () => LanAddress.Detect() is { } lan ? $"http://{lan}:{port}" : null,
+            context.CreateLogger("alerts", "Symposia.NodeHost.Alerts")));
         builder.Services.AddSingleton(sp => new StatusService(supervisor, nodeAddress, sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(), sp.GetRequiredService<NodeHealth>()));
 
         // Session cookies survive host restarts: data-protection keys live in an
@@ -168,6 +180,7 @@ public static class UiApp
             lockedKeys = settings.LockedKeys,
             relayerKeySet = secrets.HasRelayerKey,
             blobGatewaySecretSet = secrets.HasBlobGatewaySecret,
+            smtpPasswordSet = secrets.HasSmtpPassword,
             lanAddress = LanAddress.Detect(),
             presets = ChainPresets.All.Select(p => new { name = p.Key, p.Value.Description, deployed = p.Value.IsDeployed }),
             localGatewayFound = settings.Effective.Network.Mode == NetworkMode.Unconfigured
@@ -192,6 +205,11 @@ public static class UiApp
                 secrets.SetRelayerKey(update.RelayerKey);
             }
 
+            if (update.SmtpPassword is not null)
+            {
+                secrets.SetSmtpPassword(update.SmtpPassword);
+            }
+
             var secretChanged = !string.IsNullOrWhiteSpace(update.BlobGatewaySecret);
             if (secretChanged)
             {
@@ -207,9 +225,71 @@ public static class UiApp
             return Results.Ok();
         });
 
+        // Operator Alerts test email (#196): one per 10 s host-wide, to the single address in the form.
+        var lastTest = DateTimeOffset.MinValue;
+        var testGate = new SemaphoreSlim(1, 1);
+        api.MapPost("/alerts/test", async (AlertTestRequest req, IAlertMailTransport transport, CancellationToken ct) =>
+        {
+            var alerts = req.Alerts;
+            if (alerts is null || string.IsNullOrEmpty(alerts.Email))
+            {
+                return Results.BadRequest(new { errors = new[] { "Enter an alert email address first." } });
+            }
+
+            var errors = AlertMail.Validate(alerts);
+            if (errors.Count > 0)
+            {
+                return Results.BadRequest(new { errors });
+            }
+
+            if (!await testGate.WaitAsync(0, ct))
+            {
+                return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+            }
+
+            // The saved password is only ever sent to the saved server: otherwise a session could point the
+            // test at its own SMTP server and capture the credential.
+            var saved = settings.Effective.Alerts;
+            var sameServer = string.Equals(alerts.SmtpHost, saved.SmtpHost, StringComparison.OrdinalIgnoreCase)
+                && alerts.SmtpPort == saved.SmtpPort && alerts.Security == saved.Security && alerts.Username == saved.Username;
+            if (string.IsNullOrEmpty(req.SmtpPassword) && !sameServer && !string.IsNullOrEmpty(alerts.Username) && secrets.HasSmtpPassword)
+            {
+                testGate.Release();
+                return Results.BadRequest(new { errors = new[] { "Enter the SMTP password to test a server other than the saved one." } });
+            }
+
+            var password = string.IsNullOrEmpty(req.SmtpPassword) ? (sameServer ? secrets.SmtpPassword : null) : req.SmtpPassword;
+            try
+            {
+                if (DateTimeOffset.UtcNow - lastTest < TimeSpan.FromSeconds(10))
+                {
+                    return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+                }
+
+                lastTest = DateTimeOffset.UtcNow;
+                await transport.SendAsync(new AlertMailMessage(
+                    alerts.Email,
+                    string.IsNullOrEmpty(alerts.From) ? alerts.Email : alerts.From,
+                    $"[Symposia {AlertMail.ShortAddress(nodeAddress)}] Test alert",
+                    $"This is a test of Operator Alerts from node {nodeAddress} on {Environment.MachineName}.\n"), alerts, password, ct);
+                return Results.Ok(new { sent = true });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                return Results.Ok(new { sent = false, error = AlertMail.Scrub(ex.Message, password) });
+            }
+            finally
+            {
+                testGate.Release();
+            }
+        });
+
         api.MapGet("/status", async (StatusService status, CancellationToken ct) => Results.Ok(await status.SnapshotAsync(ct)));
 
         api.MapGet("/network", async (NetworkOverview overview) => Results.Ok(await overview.SnapshotAsync()));
+
+        // Network Dashboard, Symposia Storage Network section (#198).
+        api.MapGet("/dashboard/storage", async (NetworkDashboard dashboard, CancellationToken ct) => Results.Ok(await dashboard.StorageAsync(ct)));
 
         // Stake, reward and penalty transactions of this node, per Node Service (issue #161).
         api.MapGet("/ledger", async (Ledger.LedgerService ledger, string? category, string? service, int? limit, CancellationToken ct) =>
@@ -310,6 +390,8 @@ public static class UiApp
         errors.AddRange(ports.Where(p => p.Port is < 1 or > 65535).Select(p => $"{p.Name} port {p.Port} is out of range."));
         errors.AddRange(ports.GroupBy(p => p.Port).Where(g => g.Count() > 1)
             .Select(g => $"Port {g.Key} is used by both {string.Join(" and ", g.Select(p => p.Name))}."));
+
+        errors.AddRange(AlertMail.Validate(s.Alerts));
 
         if (s.Discovery.IntervalSeconds < 1)
         {

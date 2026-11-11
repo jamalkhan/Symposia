@@ -16,6 +16,9 @@ public sealed record HostPaths(string DataDir)
     /// <summary>One-shot request to redeploy the LocalDev rewards contracts on the next chain start (#181).</summary>
     public string ResetRewardsFlag => Path.Combine(DataDir, "reset-rewards.flag");
 
+    /// <summary>Operator Alerts observed and emailed state (issue #196).</summary>
+    public string AlertsState => Path.Combine(DataDir, "alerts-state.json");
+
     public string NeonStub => Path.Combine(DataDir, "neon-stub");
 
     public string Component(string name) => Path.Combine(DataDir, name);

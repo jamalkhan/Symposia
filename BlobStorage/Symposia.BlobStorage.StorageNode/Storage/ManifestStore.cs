@@ -12,6 +12,11 @@ public sealed class ManifestStore
 {
     private readonly string _connectionString;
 
+    // Writes are serialised so the used-bytes counter (#197) applies each record's exact delta.
+    private readonly object _writeGate = new();
+    private long _usedBytes;
+    private long _writeSeq;
+
     public ManifestStore(IOptions<StorageNodeOptions> options)
     {
         var dbPath = Path.GetFullPath(options.Value.ManifestDbPath);
@@ -40,6 +45,29 @@ public sealed class ManifestStore
             );
             """;
         command.ExecuteNonQuery();
+        ReconcileUsedBytes();
+    }
+
+    /// <summary>
+    /// Bytes recorded in the manifest, kept in memory (issue #197) so Probe, heartbeats and the
+    /// capacity monitor don't each run a SUM over the whole table. Seeded at <see cref="Initialize"/>
+    /// and corrected by <see cref="ReconcileUsedBytes"/>.
+    /// </summary>
+    public long UsedBytes => Interlocked.Read(ref _usedBytes);
+
+    /// <summary>
+    /// Recomputes <see cref="UsedBytes"/> from the table; returns the drift it corrected. The SUM runs
+    /// outside the write lock so writes aren't stalled by a full scan; if a write lands meanwhile, the
+    /// counter (already exact for that write) is kept and the next reconcile tries again.
+    /// </summary>
+    public long ReconcileUsedBytes()
+    {
+        var seq = Interlocked.Read(ref _writeSeq);
+        var actual = SumSizeBytes();
+        lock (_writeGate)
+        {
+            return _writeSeq != seq ? 0 : actual - Interlocked.Exchange(ref _usedBytes, actual);
+        }
     }
 
     public bool IsAccessible()
@@ -60,7 +88,26 @@ public sealed class ManifestStore
 
     public void Upsert(BlobRecord record)
     {
-        using var connection = OpenConnection();
+        lock (_writeGate)
+        {
+            using var connection = OpenConnection();
+            var previous = SizeOf(connection, record.Cid);
+            UpsertRow(connection, record);
+            Interlocked.Add(ref _usedBytes, record.SizeBytes - (previous ?? 0));
+            Interlocked.Increment(ref _writeSeq);
+        }
+    }
+
+    private static long? SizeOf(SqliteConnection connection, Cid cid)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT size_bytes FROM blob_manifest WHERE cid = $cid";
+        command.Parameters.AddWithValue("$cid", cid.Value);
+        return command.ExecuteScalar() is long size ? size : null;
+    }
+
+    private static void UpsertRow(SqliteConnection connection, BlobRecord record)
+    {
         using var command = connection.CreateCommand();
         command.CommandText =
             """
@@ -112,11 +159,22 @@ public sealed class ManifestStore
 
     public bool Delete(Cid cid)
     {
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM blob_manifest WHERE cid = $cid";
-        command.Parameters.AddWithValue("$cid", cid.Value);
-        return command.ExecuteNonQuery() > 0;
+        lock (_writeGate)
+        {
+            using var connection = OpenConnection();
+            var previous = SizeOf(connection, cid);
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM blob_manifest WHERE cid = $cid";
+            command.Parameters.AddWithValue("$cid", cid.Value);
+            var deleted = command.ExecuteNonQuery() > 0;
+            if (deleted)
+            {
+                Interlocked.Add(ref _usedBytes, -(previous ?? 0));
+                Interlocked.Increment(ref _writeSeq);
+            }
+
+            return deleted;
+        }
     }
 
     public long CountBlobs()

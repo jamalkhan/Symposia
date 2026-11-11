@@ -23,7 +23,7 @@ async function api(method, path, body) {
 }
 
 // Views that live behind the login get a #hash so refresh and back/forward keep the page.
-const NAV_VIEWS = ['diagnostics', 'network', 'services', 'ledger', 'settings'];
+const NAV_VIEWS = ['diagnostics', 'logs', 'dashboard', 'network', 'services', 'ledger', 'settings'];
 const hashView = () => (NAV_VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : null);
 
 function show(view) {
@@ -32,6 +32,8 @@ function show(view) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === view));
   clearInterval(pollTimer);
   if (view === 'diagnostics') { refresh(); pollTimer = setInterval(refresh, 5000); }
+  if (view === 'logs') { refreshLogs(); pollTimer = setInterval(refreshLogs, 5000); }
+  if (view === 'dashboard') { refreshDashboard(); pollTimer = setInterval(refreshDashboard, 60000); }
   if (view === 'network') { refreshNetwork(); pollTimer = setInterval(refreshNetwork, 5000); }
   if (view === 'settings') loadSettings();
   if (view === 'services') { loadSettings(); loadServices(); }
@@ -82,11 +84,42 @@ function setTitle(node, chainId) {
   $('header h1').textContent = title;
 }
 
+// Parts of /api/status every polled tab renders (header, alert banner), so one poll per tab keeps them current.
+function applyStatus(s) {
+  $('#node-address').textContent = s.node;
+  renderAlerts(s.activeAlerts || []);
+}
+
+// ---------- operator alerts (#196) ----------
+function renderAlerts(alerts) {
+  const banner = $('#alerts-banner');
+  banner.hidden = alerts.length === 0;
+  banner.innerHTML = alerts.map((a) => `<div class="alert ${a.severity === 'Error' ? 'bad' : 'warn'}"><b>${esc(a.title)}</b> ${esc(a.detail)}</div>`).join('');
+}
+
+// Tabs that don't poll /api/status still keep the banner current.
+setInterval(async () => {
+  const view = hashView();
+  if ($('#nav').hidden || view === 'diagnostics' || view === 'logs') return;
+  try { renderAlerts((await api('GET', '/status')).activeAlerts || []); } catch { /* next tick */ }
+}, 15000);
+
+$('#alerts-test').addEventListener('click', async () => {
+  const out = $('#alerts-test-result'), form = $('#settings-form');
+  const alerts = {};
+  $$('[name^="Alerts."]', form).forEach((el) => (alerts[el.name.slice(7)] = el.type === 'number' ? Number(el.value) : el.value));
+  out.textContent = 'Sending…';
+  try {
+    const r = await api('POST', '/alerts/test', { alerts, smtpPassword: $('[name="smtpPassword"]', form).value || null });
+    out.textContent = r.sent ? `Sent to ${alerts.Email}.` : `Failed: ${r.error}`;
+  } catch (ex) { out.textContent = ex.message; }
+});
+
 async function refresh() {
   let s;
   try { s = await api('GET', '/status'); $('#stale').hidden = true; }
   catch (ex) { $('#stale').hidden = false; $('#stale').textContent = `Status unavailable (${ex.message}) — showing last known data.`; return; }
-  $('#node-address').textContent = s.node;
+  applyStatus(s);
   $('#unconfigured').hidden = s.mode !== 'Unconfigured';
   $('#components').innerHTML = table(['Component', 'Status', 'Detail'], s.components.map((c) =>
     `<tr><td>${esc(c.name)}</td><td class="status ${esc(c.status)}">${esc(c.status)}</td><td>${esc(c.reason)}</td></tr>`));
@@ -116,6 +149,15 @@ async function refresh() {
     ['Last accepted', t?.configured ? beat(t.lastAccepted) : ''], ['Last rejected', t?.configured ? beat(t.lastRejected) : '']]);
   $('#rewards-stale').hidden = !s.rewardsStale;
   if (s.rewardsStale) $('[data-reason]', $('#rewards-stale')).textContent = s.rewardsStale.reason;
+  const c = s.storageCapacity, gb = (b) => `${(b / GB).toFixed(1)} GB`;
+  $('#capacity-card').hidden = !c;
+  if (c) {
+    $('#capacity').innerHTML = dl([['Allocated', gb(c.allocated)], ['Used', gb(c.used)], ['Unused allocated', gb(c.unused)],
+      ['Free on disk', `${gb(c.free)} (${c.volumeRoot}, ${gb(c.reserve)} kept in reserve)`],
+      ['Disk space', c.diskLow === 'Ok' ? 'OK' : `${c.diskLow}: warning below ${gb(c.warnBelow)}, error below ${gb(c.errorBelow)}`],
+      ['Mode', c.mode === 'Writable' ? 'Accepting writes' : c.mode === 'ReadOnly' ? `Read-only until ${gb(c.exitAbove)} free` : 'Critical: below reserve, reporting unhealthy'],
+      ['Reported', `${gb(c.available)} available of ${gb(c.total)}`]]);
+  }
   const g = s.blobGateway;
   $('#blobgateway-card').hidden = !g || !g.configured;
   if (g && g.configured) {
@@ -124,9 +166,45 @@ async function refresh() {
       ['Storage nodes', g.storageNodes != null ? `${g.healthyStorageNodes} reachable of ${g.storageNodes}` : ''],
       ['Waiting for another copy', g.underReplicated]]);
   }
-  const logs = $('#logs'), atBottom = logs.scrollTop + logs.clientHeight >= logs.scrollHeight - 4;
+}
+
+// ---------- network dashboard (#198) ----------
+const bytes = (b) => {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let v = b, u = 0;
+  while (Math.abs(v) >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return u === 0 ? `${b} B` : `${v.toFixed(1)} ${units[u]}`;
+};
+async function refreshDashboard() {
+  let d;
+  try { d = await api('GET', '/dashboard/storage'); $('#dash-error').hidden = true; }
+  catch (ex) { $('#dash-error').hidden = false; $('#dash-error').textContent = `Dashboard unavailable (${ex.message}).`; return; }
+  const p = d.population;
+  $('#dash-asof').textContent = `as of ${new Date(d.asOf).toLocaleTimeString()}`;
+  $('#dash-error').hidden = !d.error;
+  if (d.error) $('#dash-error').textContent = d.error;
+  $('#dash-storage').innerHTML = dl([
+    ['Total storage used', bytes(d.usedBytes)],
+    ['Total storage available', bytes(d.availableBytes)],
+    ['Available nodes', `${p.available} available · ${p.readOnly} read-only · ${p.unhealthy} unhealthy/unreachable of ${p.registered} registered`],
+    ['Average uptime (30 days)', d.meanUptimePercent == null ? 'no telemetry yet' : `${d.meanUptimePercent.toFixed(1)}%`]]);
+  $('#dash-versions').innerHTML = table(['Version', 'Nodes', 'Share of network'],
+    d.versions.map((v) => `<tr><td>${esc(v.version)}</td><td class="num">${v.count}</td><td class="num">${v.percent.toFixed(1)}%</td></tr>`));
+  const notes = [];
+  if (d.fromCheckpoint) notes.push(`${d.fromCheckpoint} unreachable node(s) counted from their last on-chain checkpoint.`);
+  if (d.usedUnknown) notes.push(`Used storage excludes ${d.usedUnknown} node(s) that don't report it.`);
+  if (d.uptimeNodesWithoutData) notes.push(`Uptime averages ${d.uptimeNodes} node(s); ${d.uptimeNodesWithoutData} have no checkpoints in the window.`);
+  $('#dash-notes').textContent = notes.join(' ');
+}
+
+// ---------- logs (#195) ----------
+async function refreshLogs() {
+  let s;
+  try { s = await api('GET', '/status'); } catch { return; }
+  applyStatus(s);
+  const logs = $('#logs'), first = !logs.textContent, atBottom = logs.scrollTop + logs.clientHeight >= logs.scrollHeight - 4;
   logs.textContent = s.logs.map((l) => `${new Date(l.time).toLocaleTimeString()} [${l.component}] ${l.level}: ${l.message}`).join('\n');
-  if (atBottom) logs.scrollTop = logs.scrollHeight;
+  if (first || atBottom) logs.scrollTop = logs.scrollHeight;
 }
 
 $('#reset-rewards').addEventListener('click', async () => {
@@ -227,6 +305,8 @@ async function loadSettings() {
   settingsFields().forEach((el) => {
     const name = el.name;
     if (name === 'blobGatewaySecret') { el.value = ''; el.placeholder = data.blobGatewaySecretSet ? '•••••••• (set — enter a new secret to replace)' : 'not set'; return; }
+    if (name === 'smtpPassword') { el.value = ''; el.placeholder = data.smtpPasswordSet ? '•••••••• (set — enter a new password to replace)' : 'not set'; return; }
+    if (name === 'clearSmtpPassword') { el.checked = false; el.disabled = !data.smtpPasswordSet; return; }
     if (name === 'relayerKey') { el.value = ''; el.placeholder = data.relayerKeySet ? '•••••••• (set — enter a new key to replace)' : 'not set'; return; }
     let value = name === 'Storage.MaxCapacityGb' ? Math.round(get(current, 'Storage.MaxCapacityBytes') / GB) : get(current, name);
     if (el.type === 'radio') el.checked = el.value === value;
@@ -258,11 +338,13 @@ $('#use-join').addEventListener('click', () => {
 settingsForms().forEach((f) => f.addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target, next = structuredClone(current), result = $('[data-save-result]', form);
-  let relayerKey = null, blobGatewaySecret = null;
+  let relayerKey = null, blobGatewaySecret = null, smtpPassword = null;
   $$('[name]', form).forEach((el) => {
     if (el.disabled || el.hasAttribute('data-dup') && el.closest('[hidden]')) return;
     if (el.name === 'relayerKey') { if (el.value) relayerKey = el.value; return; }
     if (el.name === 'blobGatewaySecret') { if (el.value) blobGatewaySecret = el.value; return; }
+    if (el.name === 'smtpPassword') { if (el.value) smtpPassword = el.value; return; }
+    if (el.name === 'clearSmtpPassword') { if (el.checked && smtpPassword === null) smtpPassword = ''; return; }
     if (el.type === 'radio') { if (el.checked) set(next, el.name, el.value); return; }
     if (el.closest('[data-mode][hidden]')) return;
     let v = el.type === 'checkbox' ? el.checked : el.value;
@@ -275,7 +357,7 @@ settingsForms().forEach((f) => f.addEventListener('submit', async (e) => {
   });
   result.textContent = 'Applying…';
   try {
-    await api('PUT', '/settings', { settings: next, relayerKey, blobGatewaySecret });
+    await api('PUT', '/settings', { settings: next, relayerKey, blobGatewaySecret, smtpPassword });
     result.textContent = 'Saved. Components restarted as needed.';
     await loadSettings();
   } catch (ex) { result.textContent = ex.message; }

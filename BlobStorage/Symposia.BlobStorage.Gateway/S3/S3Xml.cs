@@ -34,6 +34,15 @@ internal static class S3Xml
         ErrorXml(503, "ServiceUnavailable",
             "Write quorum was not reached. Not enough storage nodes confirmed the write.");
 
+    /// <summary>
+    /// Write quorum not reached (#199): too few storage nodes took the write, typically because some
+    /// are read-only for disk space. SlowDown tells S3 clients to back off and retry; a retry skips
+    /// the nodes that refused.
+    /// </summary>
+    internal static IResult SlowDown() =>
+        ErrorXml(503, "SlowDown",
+            "Write quorum was not reached: not enough storage nodes accepted the write. Retry shortly.");
+
     internal static IResult BadRequest(string message) =>
         ErrorXml(400, "BadRequest", message);
 

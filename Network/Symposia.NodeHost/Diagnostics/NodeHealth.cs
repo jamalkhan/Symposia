@@ -17,7 +17,17 @@ public enum HealthLevel
     Unknown,
 }
 
-public sealed record StorageHealth(bool Configured, HealthLevel Level, long? CapacityBytes, long? FreeBytes, string? Detail);
+public sealed record StorageHealth(bool Configured, HealthLevel Level, long? CapacityBytes, long? FreeBytes, string? Detail)
+{
+    /// <summary>Bytes stored (#198); null from nodes predating #199.</summary>
+    public long? UsedBytes { get; init; }
+
+    /// <summary>Refusing new writes for disk space (#199); null from older nodes.</summary>
+    public bool? ReadOnly { get; init; }
+
+    /// <summary>Writable, ReadOnly or Critical (#199); null from older nodes.</summary>
+    public string? Mode { get; init; }
+}
 
 public sealed record ComputeHealth(bool Configured, HealthLevel Level, double? CpuPercent, string? Detail);
 
@@ -66,6 +76,7 @@ public sealed class NodeHealth(ComponentSupervisor supervisor, string nodeAddres
 
         var all = nodes.All.Count;
         var healthy = nodes.All.Count(n => n.IsHealthy);
+        var readOnly = nodes.All.Count(n => n.IsHealthy && !n.IsWritable);
         long? shortCopies = null;
         try
         {
@@ -88,11 +99,13 @@ public sealed class NodeHealth(ComponentSupervisor supervisor, string nodeAddres
         }
 
         var level = healthy == 0 ? HealthLevel.Bad
-            : healthy < settings.MinCopies || shortCopies > 0 ? HealthLevel.Warn
+            : healthy < settings.MinCopies || shortCopies > 0 || healthy - readOnly < settings.WriteQuorum ? HealthLevel.Warn
             : HealthLevel.Ok;
         var detail = healthy == 0 ? "No reachable storage nodes"
             : healthy < settings.MinCopies ? $"Only {healthy} storage node(s) reachable; objects can't reach {settings.MinCopies} copies"
+            : healthy == readOnly ? $"Insufficient writable nodes: all {readOnly} reachable storage node(s) are read-only"
             : shortCopies > 0 ? $"{shortCopies} object(s) waiting for another copy"
+            : readOnly > 0 ? $"{healthy} storage node(s) reachable, {readOnly} read-only"
             : null;
         return new GatewayHealth(true, level, all, healthy, shortCopies, settings.Port, detail);
     }
@@ -106,26 +119,34 @@ public sealed class NodeHealth(ComponentSupervisor supervisor, string nodeAddres
         }
 
         var component = supervisor.Storage;
-        var manifest = component.Services?.GetService<ManifestStore>();
-        if (component.Status != ComponentStatus.Running || manifest is null)
+        var capacity = StorageCapacity();
+        if (component.Status != ComponentStatus.Running || capacity is null)
         {
             return new StorageHealth(true, HealthLevel.Bad, settings.MaxCapacityBytes, null, $"Storage is {component.Status}");
         }
 
-        // Free is the smaller of the unused quota and what the disk actually has left.
-        var capacity = settings.MaxCapacityBytes;
-        var free = Math.Max(0, capacity - manifest.SumSizeBytes());
-        try
+        // Free is what the node can back: min(unused quota, free disk − reserve) (#199).
+        var free = capacity.Available;
+        var (level, detail) = capacity.Mode switch
         {
-            free = Math.Min(free, new DriveInfo(supervisor.Context.RoleDataDir("storage")).AvailableFreeSpace);
-        }
-        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
+            StorageMode.Critical => (HealthLevel.Bad, "Critical: free disk is below the reserve"),
+            StorageMode.ReadOnly => (HealthLevel.Warn, "Read-only: disk can't cover allocation"),
+            _ => (StorageLevel(free, capacity.Allocated), (string?)null),
+        };
+        // Capacity is what the node can back (used + available), not the allocation it can't (#199 FR10).
+        return new StorageHealth(true, level, capacity.Total, free, detail)
         {
-            // Quota-only figure is still meaningful.
-        }
-
-        return new StorageHealth(true, StorageLevel(free, capacity), capacity, free, null);
+            UsedBytes = capacity.Used,
+            ReadOnly = capacity.ReadOnly,
+            Mode = capacity.Mode.ToString(),
+        };
     }
+
+    /// <summary>The running storage role's latest capacity measurement (#197); null when it isn't running.</summary>
+    public StorageCapacitySnapshot? StorageCapacity() =>
+        supervisor.Storage.Status == ComponentStatus.Running
+            ? supervisor.Storage.Services?.GetService<StorageCapacityMonitor>()?.Current
+            : null;
 
     private ComputeHealth Compute()
     {
