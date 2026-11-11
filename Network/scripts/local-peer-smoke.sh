@@ -17,7 +17,8 @@ trap cleanup EXIT
 
 mkdir -p "$WORK"
 echo "work dir: $WORK"
-"$FOUNDRY/anvil" --port $RPC_PORT --silent & PIDS+=($!)
+# #210: --prune-history, since cleanup() kills anvil and a killed anvil leaks history snapshots.
+"$FOUNDRY/anvil" --port $RPC_PORT --prune-history 64 --silent & PIDS+=($!)
 until curl -s -o /dev/null -X POST -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' http://127.0.0.1:$RPC_PORT; do sleep 0.2; done
 

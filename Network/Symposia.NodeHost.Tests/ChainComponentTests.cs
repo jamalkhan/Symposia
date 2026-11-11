@@ -1,3 +1,8 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
 using Symposia.NodeHost.Components;
 using Symposia.NodeHost.Diagnostics;
 using Symposia.NodeHost.Settings;
@@ -16,64 +21,139 @@ public sealed class ChainComponentTests : IDisposable
     private HostContext Context(HostSettings settings) =>
         new(new HostPaths(_dir.Path), new SecretStore(new HostPaths(_dir.Path)), new LogBuffer()) { Settings = settings };
 
-    // #193: with no transactions at all, LocalDev's anvil still mines, so the chain clock (and the epoch) moves.
-    [Fact]
-    public async Task LocalDevAnvil_MinesWithoutTransactions()
+    private static string FoundryBin => Environment.GetEnvironmentVariable("FOUNDRY_BIN")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
+
+    private static int FreePort()
     {
-        var foundry = Environment.GetEnvironmentVariable("FOUNDRY_BIN")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
-        using var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        using var probe = new TcpListener(IPAddress.Loopback, 0);
         probe.Start();
-        var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
-        probe.Stop();
-        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(foundry, "anvil")) { UseShellExecute = false };
-        foreach (var arg in ChainComponent.AnvilArguments(port, Path.Combine(_dir.Path, "anvil.json")))
+        return ((IPEndPoint)probe.LocalEndpoint).Port;
+    }
+
+    /// <summary>Starts anvil exactly as LocalDev does (plus <paramref name="extra"/>) and waits until it answers.</summary>
+    private static async Task<Process> StartLocalDevAnvilAsync(HttpClient http, int port, string statePath, params string[] extra)
+    {
+        var start = new ProcessStartInfo(Path.Combine(FoundryBin, "anvil")) { UseShellExecute = false };
+        foreach (var arg in ChainComponent.AnvilArguments(port, statePath).Concat(extra))
         {
             start.ArgumentList.Add(arg);
         }
 
-        using var anvil = System.Diagnostics.Process.Start(start)!;
+        var anvil = Process.Start(start)!;
+        for (var i = 0; i < 100; i++)
+        {
+            if (await RpcAsync(http, port, "eth_blockNumber", "[]") is not null)
+            {
+                return anvil;
+            }
+
+            await Task.Delay(100);
+        }
+
+        await StopAsync(anvil);
+        throw new Xunit.Sdk.XunitException($"anvil never answered on port {port}");
+    }
+
+    /// <summary>The JSON-RPC result, or null if anvil isn't listening.</summary>
+    private static async Task<JsonElement?> RpcAsync(HttpClient http, int port, string method, string parameters)
+    {
         try
         {
-            using var http = new HttpClient();
-            async Task<(long Number, long Timestamp)?> HeadAsync()
-            {
-                try
-                {
-                    using var response = await http.PostAsync($"http://127.0.0.1:{port}", new StringContent(
-                        """{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}""",
-                        System.Text.Encoding.UTF8, "application/json"));
-                    var block = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("result");
-                    return (Convert.ToInt64(block.GetProperty("number").GetString(), 16), Convert.ToInt64(block.GetProperty("timestamp").GetString(), 16));
-                }
-                catch (HttpRequestException)
-                {
-                    return null;
-                }
-            }
-
-            (long Number, long Timestamp)? first = null;
-            for (var i = 0; i < 100 && first is null; i++)
-            {
-                first = await HeadAsync();
-                if (first is null)
-                {
-                    await Task.Delay(100);
-                }
-            }
-
-            Assert.NotNull(first);
-            await Task.Delay(TimeSpan.FromSeconds(5));
-            var later = await HeadAsync();
-
-            Assert.NotNull(later);
-            Assert.True(later.Value.Number >= first.Value.Number + 2, $"anvil mined {later.Value.Number - first.Value.Number} blocks in 5 s");
-            Assert.True(later.Value.Timestamp >= first.Value.Timestamp + 4, "the chain clock did not advance");
+            using var response = await http.PostAsync($"http://127.0.0.1:{port}", new StringContent(
+                $$"""{"jsonrpc":"2.0","id":1,"method":"{{method}}","params":{{parameters}}}""", Encoding.UTF8, "application/json"));
+            return JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("result").Clone();
         }
-        finally
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task StopAsync(Process anvil)
+    {
+        if (!anvil.HasExited)
         {
             anvil.Kill(entireProcessTree: true);
             await anvil.WaitForExitAsync();
+        }
+
+        anvil.Dispose();
+    }
+
+    // #193: with no transactions at all, LocalDev's anvil still mines, so the chain clock (and the epoch) moves.
+    [Fact]
+    public async Task LocalDevAnvil_MinesWithoutTransactions()
+    {
+        using var http = new HttpClient();
+        var port = FreePort();
+        var anvil = await StartLocalDevAnvilAsync(http, port, Path.Combine(_dir.Path, "anvil.json"));
+        try
+        {
+            async Task<(long Number, long Timestamp)> HeadAsync()
+            {
+                var block = await RpcAsync(http, port, "eth_getBlockByNumber", """["latest",false]""");
+                Assert.NotNull(block);
+                return (Convert.ToInt64(block.Value.GetProperty("number").GetString(), 16), Convert.ToInt64(block.Value.GetProperty("timestamp").GetString(), 16));
+            }
+
+            var first = await HeadAsync();
+            await Task.Delay(TimeSpan.FromSeconds(5));
+            var later = await HeadAsync();
+
+            Assert.True(later.Number >= first.Number + 2, $"anvil mined {later.Number - first.Number} blocks in 5 s");
+            Assert.True(later.Timestamp >= first.Timestamp + 4, "the chain clock did not advance");
+        }
+        finally
+        {
+            await StopAsync(anvil);
+        }
+    }
+
+    // #210: with --prune-history, a burst of blocks spills no history snapshots, and --state still carries the
+    // chain across a restart. --cache-path isolates this anvil's snapshot dir from every other anvil on the machine.
+    [Fact]
+    public async Task LocalDevAnvil_PrunesHistoryAndKeepsStateAcrossRestart()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return; // No SIGINT to request the --state dump on exit.
+        }
+
+        const string address = "0x00000000000000000000000000000000000d2100";
+        using var http = new HttpClient();
+        var port = FreePort();
+        var statePath = Path.Combine(_dir.Path, "anvil.json");
+        var cache = Path.Combine(_dir.Path, "anvil-cache");
+        string[] Snapshots() => Directory.Exists(cache) ? Directory.GetFileSystemEntries(cache, "*", SearchOption.AllDirectories) : [];
+
+        var anvil = await StartLocalDevAnvilAsync(http, port, statePath, "--cache-path", cache);
+        try
+        {
+            Assert.NotNull(await RpcAsync(http, port, "anvil_setCode", $"""["{address}","0x6001"]"""));
+            Assert.NotNull(await RpcAsync(http, port, "anvil_mine", """["0x7d0"]"""));
+            var height = Convert.ToInt64((await RpcAsync(http, port, "eth_blockNumber", "[]"))?.GetString(), 16);
+            Assert.True(height >= 2000, $"only {height} blocks mined");
+            Assert.Empty(Snapshots());
+
+            // Clean exit, as ChainComponent.OnStopAsync does, so anvil dumps --state.
+            using (var signal = Process.Start("kill", ["-INT", anvil.Id.ToString()]))
+            {
+                await signal.WaitForExitAsync();
+            }
+
+            using (var wait = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            {
+                await anvil.WaitForExitAsync(wait.Token);
+            }
+
+            await StopAsync(anvil);
+            anvil = await StartLocalDevAnvilAsync(http, port, statePath, "--cache-path", cache);
+            Assert.Equal("0x6001", (await RpcAsync(http, port, "eth_getCode", $"""["{address}","latest"]"""))?.GetString());
+        }
+        finally
+        {
+            await StopAsync(anvil);
         }
     }
 
