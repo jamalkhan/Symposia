@@ -1,11 +1,5 @@
-using System.Security.Cryptography;
-using Google.Protobuf;
-using Grpc.Core;
 using Symposia.BlobStorage.Gateway.Metadata;
-using Symposia.BlobStorage.Gateway.Nodes;
-using Symposia.BlobStorage.Gateway.Quorum;
-using Symposia.BlobStorage.Gateway.Repair;
-using Symposia.BlobStorage.Protocol;
+using Symposia.BlobStorage.Gateway.Objects;
 
 namespace Symposia.BlobStorage.Gateway.S3;
 
@@ -30,15 +24,15 @@ internal static class ObjectEndpoints
 
     private static async Task<IResult> PutOrCopy(
         string bucket, string key, HttpContext ctx,
-        GatewayMetadataStore store, QuorumWriter writer)
+        GatewayMetadataStore store, ObjectService objects)
     {
-        if (!TenantId(ctx, out var tenantId)) return S3Xml.AccessDenied();
+        if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
         if (MultipartEndpoints.IsPartUpload(ctx.Request)) return await MultipartEndpoints.UploadPartAsync(bucket, key, ctx);
 
         // x-amz-copy-source header triggers CopyObject semantics.
         var copySource = ctx.Request.Headers["x-amz-copy-source"].FirstOrDefault();
         if (copySource is not null)
-            return CopyObject(bucket, key, copySource, store);
+            return CopyObject(bucket, key, copySource, objects, ctx);
 
         if (!store.BucketExists(bucket))
             return S3Xml.NoSuchBucket(bucket);
@@ -53,7 +47,7 @@ internal static class ObjectEndpoints
         try
         {
             body = UploadBody.Open(ctx);
-            record = await writer.WriteAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted);
+            record = await objects.PutAsync(ctx, bucket, key, contentType, body);
         }
         catch (InvalidDataException ex)
         {
@@ -83,7 +77,7 @@ internal static class ObjectEndpoints
     // We simply copy the metadata pointer (the CID is identical if content is identical,
     // which is the expected semantics). Different key → new metadata entry, same CID.
     private static IResult CopyObject(
-        string destBucket, string destKey, string copySource, GatewayMetadataStore store)
+        string destBucket, string destKey, string copySource, ObjectService objects, HttpContext ctx)
     {
         // copy-source format: /bucket/key or bucket/key (AWS SDK v4 percent-encodes slashes)
         // URL-decode first so %2F-encoded slashes become real separators before we split.
@@ -94,11 +88,8 @@ internal static class ObjectEndpoints
         var srcBucket = path[..slash];
         var srcKey = path[(slash + 1)..];
 
-        var src = store.GetObject(srcBucket, srcKey);
-        if (src is null) return S3Xml.NoSuchKey(srcKey);
-
-        var dest = src with { Bucket = destBucket, Key = destKey, LastModified = DateTimeOffset.UtcNow };
-        store.PutObject(dest);
+        var dest = objects.Copy(ctx, srcBucket, srcKey, destBucket, destKey);
+        if (dest is null) return S3Xml.NoSuchKey(srcKey);
 
         return S3Xml.CopyObjectResponse(dest.ETag, dest.LastModified);
     }
@@ -106,119 +97,17 @@ internal static class ObjectEndpoints
     // ── GetObject ─────────────────────────────────────────────────────────────
 
     private static async Task<IResult> GetObject(
-        string bucket, string key, HttpContext ctx,
-        GatewayMetadataStore store, INodeRegistry nodes,
-        ILogger<Program> logger,
-        RepairQueue repairQueue)
+        string bucket, string key, HttpContext ctx, ObjectService objects)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
         if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.ListParts(bucket, key, ctx);
 
-        var record = store.GetObject(bucket, key);
-        if (record is null) return S3Xml.NoSuchKey(key);
-
-        // Parse Range header: "bytes=start-end"
-        long offset = 0;
-        long length = 0;
-        var isRange = false;
-        if (ctx.Request.Headers.Range.FirstOrDefault() is { } rangeHeader)
+        return await objects.GetAsync(ctx, bucket, key) switch
         {
-            isRange = TryParseRange(rangeHeader, record.SizeBytes, out offset, out length);
-        }
-
-        var request = new ReadBlobRequest
-        {
-            Cid = record.Cid,
-            Offset = offset,
-            Length = isRange ? length : 0,
+            ServeOutcome.NotFound => S3Xml.NoSuchKey(key),
+            ServeOutcome.NoReplica => S3Xml.ServiceUnavailable(),
+            _ => Results.Empty,
         };
-
-        // Try each replica (healthy ones first) until one starts streaming (#135); shared with Complete (#5).
-        var opened = await ReplicaReader.OpenAsync(ReplicaReader.Order(nodes, record.NodeIds), request, logger, ctx.RequestAborted,
-            onNotFound: missing => repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes));
-        var node = opened?.Node;
-        var call = opened?.Call;
-        var hasFirst = opened?.HasFirst ?? false;
-
-        if (node is null || call is null)
-        {
-            logger.LogWarning("No replica of {Bucket}/{Key} (CID {Cid}) could be read.", bucket, key, record.Cid);
-            return S3Xml.ServiceUnavailable();
-        }
-
-        using var activeCall = call;
-        ctx.Response.ContentType = record.ContentType;
-        ctx.Response.Headers.ETag = $"\"{record.ETag}\"";
-        ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
-
-        if (isRange)
-        {
-            ctx.Response.StatusCode = 206;
-            ctx.Response.Headers.ContentRange =
-                $"bytes {offset}-{offset + length - 1}/{record.SizeBytes}";
-            ctx.Response.ContentLength = length;
-        }
-        else
-        {
-            ctx.Response.ContentLength = record.SizeBytes;
-        }
-
-
-        // Stream to client while computing SHA-256 for CID verification.
-        // Per Requirements/BlobStorage/redundancy-and-data-integrity.md: a read returning data
-        // that doesn't match the stored CID fails immediately and triggers read repair.
-        // We can only detect the mismatch at end-of-stream; at that point we abort the connection
-        // so the client SDK sees a broken transfer and retries. The corrupt replica is then
-        // flagged for removal and re-replication.
-        using var hasher = isRange ? null : IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-
-        try
-        {
-            var more = hasFirst;
-            while (more)
-            {
-                var chunk = call.ResponseStream.Current;
-                hasher?.AppendData(chunk.Data.Span);
-                await ctx.Response.Body.WriteAsync(chunk.Data.Memory, ctx.RequestAborted);
-                more = await call.ResponseStream.MoveNext(ctx.RequestAborted);
-            }
-        }
-        catch (RpcException ex) when (ex.StatusCode != StatusCode.NotFound && !ctx.RequestAborted.IsCancellationRequested)
-        {
-            // Headers are already sent: the client gets a broken transfer and retries.
-            logger.LogWarning("Read of CID {Cid} from {Url} failed mid-stream ({Status}); aborting.", record.Cid, node.Url, ex.StatusCode);
-            node.MarkUnhealthy();
-            ctx.Abort();
-            return Results.Empty;
-        }
-        catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
-        {
-            // Node claims it doesn't have the blob — it's missing from this replica.
-            logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair.", node.Url, record.Cid);
-            repairQueue.EnqueueMissingReplica(record, node.Id, store, nodes);
-            ctx.Abort();
-            return Results.Empty;
-        }
-
-        // Full-object CID verification (skipped for range requests; partial hash is meaningless).
-        if (hasher is not null)
-        {
-            var actualHex = Convert.ToHexStringLower(hasher.GetHashAndReset());
-            if (!actualHex.Equals(record.Cid, StringComparison.Ordinal))
-            {
-                logger.LogError(
-                    "CID mismatch on GET {Bucket}/{Key}: expected {Expected}, got {Actual}. " +
-                    "Aborting connection and flagging node {Url} for repair.",
-                    bucket, key, record.Cid, actualHex, node.Url);
-
-                repairQueue.EnqueueCorruptReplica(record, node.Id, store, nodes);
-                // Abort the underlying connection — the client receives a broken transfer and must retry.
-                ctx.Abort();
-                return Results.Empty;
-            }
-        }
-
-        return Results.Empty;
     }
 
     // ── HeadObject ────────────────────────────────────────────────────────────
@@ -240,52 +129,15 @@ internal static class ObjectEndpoints
 
     // ── DeleteObject ──────────────────────────────────────────────────────────
 
-    private static async Task<IResult> DeleteObject(
-        string bucket, string key, HttpContext ctx,
-        GatewayMetadataStore store, INodeRegistry nodes, ILogger<Program> logger)
+    private static IResult DeleteObject(string bucket, string key, HttpContext ctx, ObjectService objects)
     {
         if (!TenantId(ctx, out _)) return S3Xml.AccessDenied();
         if (MultipartEndpoints.HasUploadId(ctx.Request)) return MultipartEndpoints.Abort(bucket, key, ctx);
 
-        var record = store.GetObject(bucket, key);
-
-        // Remove from metadata immediately (makes object invisible to LIST/GET).
-        store.DeleteObject(bucket, key);
-
-        if (record is not null && !store.IsCidReferenced(record.Cid))
-        {
-            // No other object shares this CID — attempt to delete the blob from each node.
-            // Fire-and-forget: failures are queued in gc_queue for retry by GcWorker.
-            foreach (var nodeUrl in record.NodeIds)
-            {
-                var node = nodes.All.FirstOrDefault(n =>
-                    n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
-
-                if (node is not null)
-                    _ = DeleteFromNodeAsync(node, record.Cid, store, logger);
-                else
-                    store.EnqueueNodeDeletion(record.Cid, nodeUrl);
-            }
-        }
+        objects.Delete(ctx, bucket, key);
 
         // S3 DeleteObject is always 204, even if the key did not exist.
         return Results.StatusCode(204);
-    }
-
-    private static async Task DeleteFromNodeAsync(
-        NodeConnection node, string cid, GatewayMetadataStore store, ILogger logger)
-    {
-        try
-        {
-            await node.Client.DeleteBlobAsync(new DeleteBlobRequest { Cid = cid });
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(
-                "Failed to delete blob {Cid} from node {Url}: {Message}. Queued for retry.",
-                cid, node.Url, ex.Message);
-            store.EnqueueNodeDeletion(cid, node.Id);
-        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -294,25 +146,5 @@ internal static class ObjectEndpoints
     {
         tenantId = ctx.Items["TenantId"] as string ?? "";
         return tenantId.Length > 0;
-    }
-
-    private static bool TryParseRange(string header, long totalBytes, out long offset, out long length)
-    {
-        offset = 0;
-        length = 0;
-        // Expect: "bytes=start-end"
-        if (!header.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase)) return false;
-        var parts = header["bytes=".Length..].Split('-');
-        if (parts.Length != 2) return false;
-
-        long start = 0, end = totalBytes - 1;
-        if (!string.IsNullOrEmpty(parts[0]) && !long.TryParse(parts[0], out start)) return false;
-        if (!string.IsNullOrEmpty(parts[1]) && !long.TryParse(parts[1], out end)) return false;
-
-        if (start > end || end >= totalBytes) return false;
-
-        offset = start;
-        length = end - start + 1;
-        return true;
     }
 }

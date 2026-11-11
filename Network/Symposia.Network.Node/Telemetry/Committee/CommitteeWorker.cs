@@ -70,12 +70,15 @@ public sealed class CommitteeWorker(
         var schedule = await chain.ScheduleAsync(ct);
         var now = await chain.NowAsync(ct);
         var current = schedule.EpochAt(now);
+        // Propose well inside the chain's self-checkpoint grace (#201): past it, every node's fallback
+        // treats the window as missed. LocalDev's 300 s grace would otherwise always beat a 600 s settle.
+        var settle = Math.Min(_options.SettleDelaySeconds, await chain.SelfCheckpointGraceAsync(ct) / 2);
         foreach (var epoch in current == 0 ? [0UL] : new[] { current - 1, current })
         {
             var deadline = await chain.TelemetryDeadlineAsync(epoch, ct);
             if (now <= deadline)
             {
-                await CheckpointWindowsAsync(schedule, epoch, now, sorted, threshold, ct);
+                await CheckpointWindowsAsync(schedule, epoch, now, settle, sorted, threshold, ct);
             }
             else
             {
@@ -86,12 +89,12 @@ public sealed class CommitteeWorker(
         gossip.Committee.PruneBefore(current == 0 ? 0 : current - 1);
     }
 
-    private async Task CheckpointWindowsAsync(TelemetrySchedule schedule, ulong epoch, long now, IReadOnlyList<string> members,
+    private async Task CheckpointWindowsAsync(TelemetrySchedule schedule, ulong epoch, long now, long settle, IReadOnlyList<string> members,
         int threshold, CancellationToken ct)
     {
         for (ushort k = 0; k < schedule.CheckpointsPerEpoch; k++)
         {
-            var settled = WindowEnd(schedule, epoch, k) + _options.SettleDelaySeconds;
+            var settled = WindowEnd(schedule, epoch, k) + settle;
             if (now < settled || await chain.CheckpointAsync(epoch, k, ct) is not null)
             {
                 continue;

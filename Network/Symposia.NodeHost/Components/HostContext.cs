@@ -37,6 +37,8 @@ public enum RpcSource
 public sealed class HostContext
 {
     private readonly ILogger _hostLogger;
+    private readonly object _stakingLock = new();
+    private LocalDevStaking? _staking;
 
     public HostContext(HostPaths paths, SecretStore secrets, LogBuffer logs)
     {
@@ -74,6 +76,32 @@ public sealed class HostContext
 
     /// <summary>Heartbeat acceptance, shared with the storage role (#181 FR5).</summary>
     public Symposia.Network.Node.Telemetry.TelemetryDiagnostics Telemetry { get; } = new();
+
+    /// <summary>
+    /// This host's LocalDev self-staking for the current network (#200), shared by every role; null
+    /// when the network isn't LocalDev. A new network (switch or redeploy) gets a fresh one.
+    /// </summary>
+    public LocalDevStaking? LocalDevStaking
+    {
+        get
+        {
+            lock (_stakingLock)
+            {
+                if (Network is not { } network)
+                {
+                    return null;
+                }
+
+                if (_staking?.Network != network)
+                {
+                    _staking?.Dispose();
+                    _staking = Components.LocalDevStaking.For(network, this);
+                }
+
+                return _staking;
+            }
+        }
+    }
 
     /// <summary>Health summary served to peers by the role apps; set once the supervisor exists.</summary>
     public NodeHealth? Health { get; set; }

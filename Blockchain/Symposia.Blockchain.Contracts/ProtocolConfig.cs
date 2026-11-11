@@ -11,3 +11,6 @@ public sealed class ConfigFunction : FunctionMessage;
 
 [Function("getUint", "uint256")]
 public sealed class GetUintFunction : FunctionMessage { [Parameter("bytes32", "key", 1)] public byte[] Key { get; set; } = []; }
+
+[Function("getAddress", "address")]
+public sealed class GetAddressFunction : FunctionMessage { [Parameter("bytes32", "key", 1)] public byte[] Key { get; set; } = []; }

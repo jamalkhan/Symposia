@@ -56,6 +56,12 @@ public sealed class GatewayOptions
     public string PublicBaseUrl { get; set; } = "";
 
     public RpcProxyOptions RpcProxy { get; set; } = new();
+
+    /// <summary>
+    /// LocalDev funding and verification for self-staking (#200). Only the Node Host's LocalDev gateway
+    /// turns it on, and the endpoints answer only while the chain is anvil (31337).
+    /// </summary>
+    public DevFundingOptions DevFunding { get; set; } = new();
 }
 
 /// <summary>
@@ -74,4 +80,15 @@ public sealed class EpochSealerOptions
 
     /// <summary>First block searched for metric-report logs (the rewards deployment block).</summary>
     public ulong FromBlock { get; set; }
+}
+
+public sealed class DevFundingOptions
+{
+    public bool Enabled { get; set; }
+
+    /// <summary>Gas a funded node is topped up to.</summary>
+    public decimal GasEther { get; set; } = 1m;
+
+    /// <summary>Most SYM one fund request can mint (whole SYM).</summary>
+    public long MaxGrantSym { get; set; } = 1_000_000;
 }

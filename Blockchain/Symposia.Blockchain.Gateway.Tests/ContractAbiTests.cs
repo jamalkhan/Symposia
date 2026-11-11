@@ -14,7 +14,7 @@ namespace Symposia.Blockchain.Gateway.Tests;
 public sealed class ContractAbiTests
 {
     private static readonly string[] Contracts =
-        ["RewardDistributor", "StakingNodeRegistry", "TelemetryCheckpointRegistry", "EpochController", "MockProtocolConfig"];
+        ["RewardDistributor", "StakingNodeRegistry", "TelemetryCheckpointRegistry", "EpochController", "MockProtocolConfig", "SYMToken"];
 
     private static readonly Lazy<List<JsonElement>> Abi = new(LoadAbi);
 

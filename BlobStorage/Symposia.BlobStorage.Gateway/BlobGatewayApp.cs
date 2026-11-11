@@ -1,3 +1,5 @@
+using Symposia.BlobStorage.Gateway.History;
+using Symposia.BlobStorage.Gateway.Api;
 using Symposia.BlobStorage.Gateway;
 using Symposia.BlobStorage.Gateway.Admin;
 using Symposia.BlobStorage.Gateway.Auth;
@@ -34,6 +36,19 @@ public static class BlobGatewayApp
         builder.Services.AddSingleton<SigV4Verifier>();
         builder.Services.AddSingleton<GatewayMetadataStore>();
 
+        // Operation history (#204): its own DB file beside the metadata DB, written off the request path.
+        var gatewayConfig = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
+        var trustedProxies = gatewayConfig.TrustedProxies.Select(p => Symposia.Network.Node.ClientAddress.TryParseNetwork(p, out var n)
+            ? n : throw new InvalidOperationException($"Gateway:TrustedProxies has an invalid entry: '{p}'.")).ToList();
+        builder.Services.AddSingleton(sp =>
+        {
+            var o = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value;
+            return new History.HistoryStore(o.History.DbPath.Length > 0 ? o.History.DbPath
+                : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(o.MetadataDbPath)) ?? ".", "gateway-history.db"));
+        });
+        builder.Services.AddSingleton<History.HistoryRecorder>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<History.HistoryRecorder>());
+
         // NodeRegistry: INodeRegistry + IHostedService (background health probing).
         // The IHostedService delegate resolves NodeRegistry, so NodeRegistry must stay registered.
         // INodeRegistry is separately registered so QuorumWriter, endpoints, and background services
@@ -46,6 +61,7 @@ public static class BlobGatewayApp
 
         // Repair / resilience services.
         builder.Services.AddSingleton<RepairQueue>();
+        builder.Services.AddScoped<Objects.ObjectService>(); // scoped: it uses the scoped QuorumWriter
         builder.Services.AddSingleton<NodeReconciler>();
         builder.Services.AddHostedService<GcWorker>();
         builder.Services.AddHostedService<MultipartReaper>();
@@ -131,12 +147,15 @@ public static class BlobGatewayApp
 
         // ── SigV4 middleware ──────────────────────────────────────────────────────────
 
-        // Runs before routing. Exempt health and admin endpoints.
+        app.UseRequestIds();
+
+        // Runs before routing. Exempt health and admin endpoints, and the /v1 API's OpenAPI document.
         app.Use(async (ctx, next) =>
         {
             var path = ctx.Request.Path.Value ?? "";
             if (path.StartsWith("/healthz/", StringComparison.Ordinal) ||
-                path.StartsWith("/admin/", StringComparison.Ordinal))
+                path.StartsWith("/admin/", StringComparison.Ordinal) ||
+                path == BlobApiEndpoints.OpenApiPath)
             {
                 await next();
                 return;
@@ -145,6 +164,12 @@ public static class BlobGatewayApp
             var verifier = ctx.RequestServices.GetRequiredService<SigV4Verifier>();
             var sigv4 = verifier.Authenticate(ctx.Request);
             var tenantId = sigv4?.TenantId;
+            if (tenantId is null && ctx.Request.Path.StartsWithSegments(BlobApiEndpoints.Prefix))
+            {
+                await BlobApiEndpoints.Error(401, "AccessDenied", "Missing or invalid AWS Signature V4.").ExecuteAsync(ctx);
+                return;
+            }
+
             if (tenantId is null)
             {
                 ctx.Response.StatusCode = 403;
@@ -158,6 +183,9 @@ public static class BlobGatewayApp
             ctx.Items[nameof(SigV4Context)] = sigv4;
             await next();
         });
+
+        // After auth, so each recorded operation carries its caller (#204).
+        app.UseHistoryCapture(trustedProxies);
 
         // ── Health endpoints ──────────────────────────────────────────────────────────
 
@@ -176,6 +204,11 @@ public static class BlobGatewayApp
         AdminEndpoints.Map(app);
 
         // ── S3 routes ─────────────────────────────────────────────────────────────────
+
+        // ── Symposia-native API (#203) ────────────────────────────────────────────────
+
+        // The literal /v1 segment outranks S3's {bucket} parameter; registered first for clarity.
+        BlobApiEndpoints.Map(app);
 
         // Object routes must be registered before bucket routes so /{bucket}/{**key}
         // takes priority over /{bucket} when a key is present.

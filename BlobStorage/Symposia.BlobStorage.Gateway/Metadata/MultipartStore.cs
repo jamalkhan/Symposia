@@ -164,7 +164,12 @@ public sealed partial class GatewayMetadataStore
     /// part rows and queues any part blob nothing else references. Nothing is written unless all succeed.
     /// </summary>
     public CompleteOutcome CompleteUpload(string uploadId, ObjectRecord record, string finalEtag, string committedPartsJson, bool ifNoneMatch)
+        => CompleteUpload(uploadId, record, finalEtag, committedPartsJson, ifNoneMatch, out _);
+
+    /// <summary>As above; <paramref name="replaced"/> is whether the commit replaced an existing object (#204).</summary>
+    public CompleteOutcome CompleteUpload(string uploadId, ObjectRecord record, string finalEtag, string committedPartsJson, bool ifNoneMatch, out bool replaced)
     {
+        replaced = false;
         using var conn = Open();
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
         using (var status = Query(conn, "SELECT status FROM multipart_uploads WHERE upload_id = $id", ("$id", uploadId)))
@@ -199,7 +204,7 @@ public sealed partial class GatewayMetadataStore
             }
         }
 
-        UpsertObject(conn, tx, record with { EtagOverride = finalEtag });
+        replaced = UpsertObject(conn, tx, record with { EtagOverride = finalEtag });
         Run(conn, tx, """
             UPDATE multipart_uploads SET status = 'Completed', completing_since = NULL, completed_at = $at, final_cid = $cid,
                 final_etag = $etag, committed_parts_json = $parts WHERE upload_id = $id AND status = 'Completing'

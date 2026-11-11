@@ -109,6 +109,24 @@ public sealed class CommitteeProtocolTests : IDisposable
         Assert.Equal(1, _h.Chain.CheckpointCommits); // racing submitters don't double-commit
     }
 
+    // #201: with a grace shorter than the settle delay (LocalDev: 300 s vs 600 s), the committee still
+    // commits before the fallback opens, so nodes neither self-checkpoint nor report a missed window.
+    [Fact]
+    public async Task ShortGrace_CommitteeCommitsBeforeTheFallbackOpens()
+    {
+        _h.Chain.Grace = 300;
+        await _h.EmitWindowAsync(0, gossipVia: 1);
+        await _h.NodeStore.PublishAsync(_h.Beat(_h.Node, 0));
+
+        _h.Chain.Now = CommitteeHarness.WindowEnd(0) + 150;
+        await _h.RoundsAsync(3);
+        _h.Chain.Now = CommitteeHarness.WindowEnd(0) + 300;
+        await _h.NodeFallback.RunOnceAsync(default);
+
+        Assert.True(_h.Chain.Checkpoints.ContainsKey((0, 0)));
+        Assert.Equal(0, _h.NodeFallback.SelfCheckpoints);
+    }
+
     [Fact]
     public async Task CensoringProposerIsRoutedAround()
     {
@@ -385,7 +403,9 @@ internal sealed class FakeTelemetryChain(List<string> members, int threshold, Te
 
     public Task<long> TelemetryDeadlineAsync(ulong epoch, CancellationToken ct) => Task.FromResult(Deadline(epoch));
 
-    public Task<long> SelfCheckpointGraceAsync(CancellationToken ct) => Task.FromResult(CommitteeHarness.Grace);
+    public long Grace { get; set; } = CommitteeHarness.Grace;
+
+    public Task<long> SelfCheckpointGraceAsync(CancellationToken ct) => Task.FromResult(Grace);
 
     public Task<CommittedCheckpoint?> CheckpointAsync(ulong epoch, ushort checkpoint, CancellationToken ct) =>
         Task.FromResult(Checkpoints.GetValueOrDefault((epoch, checkpoint)));

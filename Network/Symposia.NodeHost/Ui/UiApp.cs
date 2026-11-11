@@ -50,8 +50,7 @@ public static class UiApp
         builder.Logging.AddFilter("Microsoft.AspNetCore.DataProtection", LogLevel.Error);
         builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-        builder.Services.ConfigureHttpJsonOptions(json =>
-            json.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
+        builder.Services.ConfigureHttpJsonOptions(json => ConfigureJson(json.SerializerOptions));
         builder.Services.AddSingleton(supervisor);
         builder.Services.AddMemoryCache();
         builder.Services.AddSingleton(supervisor.Context.Health ?? new NodeHealth(supervisor, nodeAddress));
@@ -321,6 +320,13 @@ public static class UiApp
     }
 
     /// <summary>The ledger reads whatever network the chain component resolved; a new network resets it.</summary>
+    /// <summary>The API's JSON settings: enums by name, and wei amounts as decimal strings (#202).</summary>
+    internal static void ConfigureJson(System.Text.Json.JsonSerializerOptions options)
+    {
+        options.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+        options.Converters.Add(new BigIntegerStringConverter());
+    }
+
     private static Ledger.LedgerService CreateLedger(HostContext context, string nodeAddress)
     {
         (NetworkInfo Network, Ledger.ILedgerLogSource Source)? current = null;
