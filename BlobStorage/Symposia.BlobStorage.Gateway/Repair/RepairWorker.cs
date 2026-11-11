@@ -86,7 +86,7 @@ public sealed class RepairWorker : BackgroundService
         }
 
         // 3. Find a healthy target node not already in the replica set.
-        var targetNode = _nodes.Healthy
+        var targetNode = _nodes.Writable(record.SizeBytes)
             .Where(n => !currentNodeIds.Contains(n.Id, StringComparer.OrdinalIgnoreCase))
             .FirstOrDefault();
 

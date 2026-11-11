@@ -48,7 +48,8 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         // Labelled from a pre-read only in case the write fails; a commit relabels it from the truth.
         var written = History.HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? History.HistoryOperation.Insert : History.HistoryOperation.Update,
             bucket, key, History.HistoryCapture.ApiOf(ctx));
-        var (record, replaced) = await writer.WriteObjectAsync(ctx.Items["TenantId"] as string ?? "", bucket, key, contentType, body, ctx.RequestAborted);
+        var (record, replaced) = await writer.WriteObjectAsync(ctx.Items["TenantId"] as string ?? "", bucket, key, contentType, body, ctx.RequestAborted,
+            S3.UploadBody.ExpectedLength(ctx.Request));
         if (record is not null)
         {
             Fill(written, record, replaced);

@@ -37,6 +37,8 @@ public sealed class StorageListenerOverlapTests : IAsyncLifetime
             ["StorageNode:GrpcTlsPort"] = grpcTlsPort.ToString(),
             ["StorageNode:StorageRoot"] = Path.Combine(dir, "blobs"),
             ["StorageNode:ManifestDbPath"] = Path.Combine(dir, "manifest.db"),
+            // A small allocation, so the test node is writable however full the host disk is (#199 read-only mode).
+            ["StorageNode:MaxCapacityBytes"] = "1073741824",
             ["StorageNode:NodeIdentityKeyPath"] = Path.Combine(dir, "node.key"),
             ["StorageNode:AdvertisedEndpoint"] = $"http://127.0.0.1:{http}",
             ["StorageNode:EnableRegistration"] = "false",

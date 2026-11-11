@@ -47,6 +47,7 @@ public sealed class HostContext
         Logs = logs;
         Logging = new HostLogging(paths, () => Settings.Logging);
         _hostLogger = CreateLogger("host", "Symposia.NodeHost.Host");
+        Alerts = new Alerts.OperatorAlerts(paths.AlertsState, CreateLogger("alerts", "Symposia.NodeHost.Alerts"));
     }
 
     public HostPaths Paths { get; }
@@ -54,6 +55,9 @@ public sealed class HostContext
     public SecretStore Secrets { get; }
 
     public LogBuffer Logs { get; }
+
+    /// <summary>Operator Alerts every role raises into (issue #196).</summary>
+    public Alerts.OperatorAlerts Alerts { get; }
 
     /// <summary>Per-service log levels and files (node / storage / compute).</summary>
     public HostLogging Logging { get; }

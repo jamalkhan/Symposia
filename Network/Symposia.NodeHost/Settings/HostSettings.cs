@@ -31,6 +31,8 @@ public sealed class HostSettings
 
     public BlobGatewaySettings BlobGateway { get; set; } = new();
 
+    public AlertSettings Alerts { get; set; } = new();
+
     public static HostSettings Defaults(int portOffset) => new()
     {
         Network = new NetworkSettings
@@ -183,4 +185,31 @@ public sealed class LoggingSettings
     public Microsoft.Extensions.Logging.LogLevel Storage { get; set; } = Microsoft.Extensions.Logging.LogLevel.Information;
 
     public Microsoft.Extensions.Logging.LogLevel Compute { get; set; } = Microsoft.Extensions.Logging.LogLevel.Information;
+}
+
+public enum SmtpSecurity
+{
+    StartTls,
+    Tls,
+    None,
+}
+
+/// <summary>
+/// Operator Alerts email (issue #196). Empty <see cref="Email"/> means alerts are shown in the UI
+/// only. The SMTP password lives in the secret store, never here.
+/// </summary>
+public sealed class AlertSettings
+{
+    public string Email { get; set; } = "";
+
+    public string SmtpHost { get; set; } = "";
+
+    public int SmtpPort { get; set; } = 587;
+
+    public SmtpSecurity Security { get; set; } = SmtpSecurity.StartTls;
+
+    public string Username { get; set; } = "";
+
+    /// <summary>Sender address; the alert address when empty.</summary>
+    public string From { get; set; } = "";
 }

@@ -67,7 +67,7 @@ internal static class ObjectEndpoints
         }
 
         if (record is null)
-            return S3Xml.ServiceUnavailable();
+            return S3Xml.SlowDown();
 
         ctx.Response.Headers.ETag = $"\"{record.Cid}\"";
         return Results.Ok();
