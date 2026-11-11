@@ -23,7 +23,7 @@ async function api(method, path, body) {
 }
 
 // Views that live behind the login get a #hash so refresh and back/forward keep the page.
-const NAV_VIEWS = ['diagnostics', 'logs', 'network', 'services', 'ledger', 'settings'];
+const NAV_VIEWS = ['diagnostics', 'logs', 'dashboard', 'network', 'services', 'ledger', 'settings'];
 const hashView = () => (NAV_VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : null);
 
 function show(view) {
@@ -33,6 +33,7 @@ function show(view) {
   clearInterval(pollTimer);
   if (view === 'diagnostics') { refresh(); pollTimer = setInterval(refresh, 5000); }
   if (view === 'logs') { refreshLogs(); pollTimer = setInterval(refreshLogs, 5000); }
+  if (view === 'dashboard') { refreshDashboard(); pollTimer = setInterval(refreshDashboard, 60000); }
   if (view === 'network') { refreshNetwork(); pollTimer = setInterval(refreshNetwork, 5000); }
   if (view === 'settings') loadSettings();
   if (view === 'services') { loadSettings(); loadServices(); }
@@ -165,6 +166,35 @@ async function refresh() {
       ['Storage nodes', g.storageNodes != null ? `${g.healthyStorageNodes} reachable of ${g.storageNodes}` : ''],
       ['Waiting for another copy', g.underReplicated]]);
   }
+}
+
+// ---------- network dashboard (#198) ----------
+const bytes = (b) => {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let v = b, u = 0;
+  while (Math.abs(v) >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return u === 0 ? `${b} B` : `${v.toFixed(1)} ${units[u]}`;
+};
+async function refreshDashboard() {
+  let d;
+  try { d = await api('GET', '/dashboard/storage'); $('#dash-error').hidden = true; }
+  catch (ex) { $('#dash-error').hidden = false; $('#dash-error').textContent = `Dashboard unavailable (${ex.message}).`; return; }
+  const p = d.population;
+  $('#dash-asof').textContent = `as of ${new Date(d.asOf).toLocaleTimeString()}`;
+  $('#dash-error').hidden = !d.error;
+  if (d.error) $('#dash-error').textContent = d.error;
+  $('#dash-storage').innerHTML = dl([
+    ['Total storage used', bytes(d.usedBytes)],
+    ['Total storage available', bytes(d.availableBytes)],
+    ['Available nodes', `${p.available} available · ${p.readOnly} read-only · ${p.unhealthy} unhealthy/unreachable of ${p.registered} registered`],
+    ['Average uptime (30 days)', d.meanUptimePercent == null ? 'no telemetry yet' : `${d.meanUptimePercent.toFixed(1)}%`]]);
+  $('#dash-versions').innerHTML = table(['Version', 'Nodes', 'Share of network'],
+    d.versions.map((v) => `<tr><td>${esc(v.version)}</td><td class="num">${v.count}</td><td class="num">${v.percent.toFixed(1)}%</td></tr>`));
+  const notes = [];
+  if (d.fromCheckpoint) notes.push(`${d.fromCheckpoint} unreachable node(s) counted from their last on-chain checkpoint.`);
+  if (d.usedUnknown) notes.push(`Used storage excludes ${d.usedUnknown} node(s) that don't report it.`);
+  if (d.uptimeNodesWithoutData) notes.push(`Uptime averages ${d.uptimeNodes} node(s); ${d.uptimeNodesWithoutData} have no checkpoints in the window.`);
+  $('#dash-notes').textContent = notes.join(' ');
 }
 
 // ---------- logs (#195) ----------

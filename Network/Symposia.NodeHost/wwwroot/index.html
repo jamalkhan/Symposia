@@ -13,6 +13,7 @@
     <nav id="nav" hidden>
       <button data-view="diagnostics" class="tab active">Diagnostics</button>
       <button data-view="logs" class="tab">Logs</button>
+      <button data-view="dashboard" class="tab">Network Dashboard</button>
       <button data-view="network" class="tab">Network</button>
       <button data-view="services" class="tab">Node Services</button>
       <button data-view="ledger" class="tab">Ledger</button>
@@ -67,6 +68,17 @@
 
     <section id="view-logs" hidden>
       <div class="card"><h2>Log</h2><pre id="logs" class="logs"></pre></div>
+    </section>
+
+    <section id="view-dashboard" hidden>
+      <div class="card">
+        <h2>Symposia Storage Network <small id="dash-asof"></small></h2>
+        <p id="dash-error" class="error" hidden></p>
+        <dl id="dash-storage"></dl>
+        <h3>Storage node versions</h3>
+        <table id="dash-versions"></table>
+        <p id="dash-notes" class="hint"></p>
+      </div>
     </section>
 
     <section id="view-network" hidden>

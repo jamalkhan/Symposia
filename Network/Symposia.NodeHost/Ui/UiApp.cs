@@ -60,6 +60,8 @@ public static class UiApp
         builder.Services.AddMemoryCache();
         builder.Services.AddSingleton(supervisor.Context.Health ?? new NodeHealth(supervisor, nodeAddress));
         builder.Services.AddSingleton<NetworkOverview>();
+        builder.Services.AddSingleton<IStorageHistorySource, ChainStorageHistorySource>();
+        builder.Services.AddSingleton<NetworkDashboard>();
         builder.Services.AddSingleton(_ => CreateLedger(context, nodeAddress));
         builder.Services.AddSingleton<IAlertMailTransport, SmtpAlertMailTransport>();
         builder.Services.AddHostedService(sp => new AlertNotifier(
@@ -274,6 +276,9 @@ public static class UiApp
         api.MapGet("/status", async (StatusService status, CancellationToken ct) => Results.Ok(await status.SnapshotAsync(ct)));
 
         api.MapGet("/network", async (NetworkOverview overview) => Results.Ok(await overview.SnapshotAsync()));
+
+        // Network Dashboard, Symposia Storage Network section (#198).
+        api.MapGet("/dashboard/storage", async (NetworkDashboard dashboard, CancellationToken ct) => Results.Ok(await dashboard.StorageAsync(ct)));
 
         // Stake, reward and penalty transactions of this node, per Node Service (issue #161).
         api.MapGet("/ledger", async (Ledger.LedgerService ledger, string? category, string? service, int? limit, CancellationToken ct) =>
