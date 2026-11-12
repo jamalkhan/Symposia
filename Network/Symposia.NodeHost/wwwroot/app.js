@@ -134,6 +134,9 @@ async function refresh() {
   const r = s.registry || {};
   $('#registration').innerHTML = r.error ? `<p class="error">${esc(r.error)}</p>` : dl([['Registered', s.registry ? (r.registered ? 'yes' : 'no') : ''],
     ['Endpoint on-chain', r.endpoint], ['Primary endpoint', s.primaryEndpoint], ['Nonce', r.nonce]]);
+  // #228: a loopback primary is only reachable on this machine; peers and the Verifier can't use it.
+  if (s.mode !== 'LocalDev' && /^https?:\/\/(127\.|localhost)/.test(s.primaryEndpoint || ''))
+    $('#registration').innerHTML += `<p class="error">The primary endpoint is ${esc(s.primaryEndpoint)}, which other nodes can't reach. Set an advertised endpoint for the role that serves it.</p>`;
   $('#peers').innerHTML = table(['Endpoint', 'Address', 'Status', 'Reason', 'Last attempt'], s.peers.map((p) =>
     `<tr><td class="mono">${esc(p.endpoint)}</td><td class="mono">${esc(p.address || p.expectedAddress)}</td><td class="status ${esc(p.status)}">${esc(p.status)}</td><td>${p.reason === 'None' ? '' : esc(p.reason)}</td><td>${esc(new Date(p.lastAttempt).toLocaleTimeString())}</td></tr>`));
   $('#members').innerHTML = table(['Address', 'Endpoint'], (r.members || []).map((m) =>

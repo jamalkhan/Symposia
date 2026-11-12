@@ -27,8 +27,11 @@ public abstract class WebAppComponent : HostComponent
     /// <summary>Roles keep their data in a per-network directory (<see cref="HostContext.RoleDataDir"/>).</summary>
     protected virtual bool UsesRoleDataDir => false;
 
-    /// <summary>Roles that publish this host's health summary for peers' Network tab.</summary>
-    protected virtual bool ServesNodeHealth => false;
+    /// <summary>
+    /// Roles that serve the primary endpoint's public paths: the health summary peers poll for their Network tab and
+    /// the signed service directory (#225/#228).
+    /// </summary>
+    protected virtual bool ServesNodeHealth(HostContext context) => false;
 
     /// <summary>Hook to add middleware to the built app before it starts (runs ahead of its endpoints).</summary>
     protected virtual void Secure(WebApplication app)
@@ -66,12 +69,12 @@ public abstract class WebAppComponent : HostComponent
         }, context);
 
         Secure(_app);
-        if (ServesNodeHealth && context.Network is { } network)
+        if (ServesNodeHealth(context) && context.Network is { } network)
         {
             MapServiceDirectory(_app, context, network);
         }
 
-        if (context.Health is { } health && ServesNodeHealth)
+        if (context.Health is { } health && ServesNodeHealth(context))
         {
             // Public, read-only health summary peers poll for their Network tab.
             var healthLogger = context.CreateLogger(Name, "Symposia.NodeHost.NodeHealth");

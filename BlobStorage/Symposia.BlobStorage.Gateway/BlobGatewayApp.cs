@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Symposia.BlobStorage.Gateway.History;
 using Symposia.BlobStorage.Gateway.Api;
 using Symposia.BlobStorage.Gateway;
@@ -120,6 +121,13 @@ public static class BlobGatewayApp
 
         builder.Services.AddHostedService<NodeSourceSyncService>();
 
+        // On a gateway-only NodeHost the gateway is the node's primary endpoint (#228): peer handshakes, signed with the node key.
+        var servesPrimary = builder.Configuration.GetValue("Gateway:ServesPrimary", false);
+        if (servesPrimary)
+        {
+            builder.Services.AddNodeNetwork(builder.Configuration.GetSection("GatewayNode"));
+        }
+
         AddServiceMetrics(builder, gatewayConfig);
 
         // ── Kestrel: HTTP/1.1 for S3 clients ─────────────────────────────────────────
@@ -150,6 +158,10 @@ public static class BlobGatewayApp
         // ── SigV4 middleware ──────────────────────────────────────────────────────────
 
         app.UseRequestIds();
+        if (servesPrimary)
+        {
+            app.UseNodeNetwork();
+        }
 
         // Runs before routing. Exempt health and admin endpoints, and the /v1 API's OpenAPI document.
         app.Use(async (ctx, next) =>
@@ -157,7 +169,8 @@ public static class BlobGatewayApp
             var path = ctx.Request.Path.Value ?? "";
             if (path.StartsWith("/healthz/", StringComparison.Ordinal) ||
                 path.StartsWith("/admin/", StringComparison.Ordinal) ||
-                path == BlobApiEndpoints.OpenApiPath)
+                path == BlobApiEndpoints.OpenApiPath ||
+                (servesPrimary && Symposia.Network.Node.PrimaryEndpointPaths.Contains(path)))
             {
                 await next();
                 return;
@@ -240,7 +253,7 @@ public static class BlobGatewayApp
         var o = gateway.ServiceMetrics;
         if (!string.IsNullOrWhiteSpace(gateway.NodeIdentityKeyPath))
         {
-            builder.Services.AddSingleton(_ =>
+            builder.Services.TryAddSingleton(_ =>
             {
                 var identity = new NodeIdentity(Microsoft.Extensions.Options.Options.Create(new NodeNetworkOptions { NodeIdentityKeyPath = gateway.NodeIdentityKeyPath }));
                 identity.LoadExisting();

@@ -140,10 +140,25 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         var affected = new List<HostComponent>();
         var storageChanged = Changed(previous.Storage, next.Storage);
         var computeChanged = Changed(previous.Compute, next.Compute);
-        if (HostContext.PrimaryEndpointFor(previous) != HostContext.PrimaryEndpointFor(next) || Changed(previous.Discovery, next.Discovery))
+        var secret = context.Secrets.HasBlobGatewaySecret;
+        if (HostContext.PrimaryEndpointFor(previous, secret) != HostContext.PrimaryEndpointFor(next, secret) || Changed(previous.Discovery, next.Discovery))
         {
             // Only these change what the network component registers or how it discovers.
             affected.Add(Network);
+        }
+
+        // The primary role serves the handshake, health and service directory (#228): when it moves, both the old and
+        // the new primary restart, so the paths move with it.
+        var (was, now) = (HostContext.PrimaryRoleFor(previous, secret), HostContext.PrimaryRoleFor(next, secret));
+        if (was != now)
+        {
+            foreach (var role in new[] { was, now })
+            {
+                if (RoleComponent(role) is { } component && !affected.Contains(component))
+                {
+                    affected.Add(component);
+                }
+            }
         }
 
         if (storageChanged)
@@ -174,8 +189,16 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
             affected.Add(Verifier);
         }
 
-        return affected;
+        return [.. affected.Distinct()];
     }
+
+    private HostComponent? RoleComponent(PrimaryRole role) => role switch
+    {
+        PrimaryRole.Storage => Storage,
+        PrimaryRole.Compute => Compute,
+        PrimaryRole.BlobGateway => BlobGateway,
+        _ => null,
+    };
 
     private static bool Changed<T>(T a, T b) =>
         System.Text.Json.JsonSerializer.Serialize(a, SecureFile.Json) != System.Text.Json.JsonSerializer.Serialize(b, SecureFile.Json);

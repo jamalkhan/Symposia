@@ -126,12 +126,27 @@ public sealed class HostContext
         string.IsNullOrWhiteSpace(advertised) ? $"http://127.0.0.1:{port}" : advertised;
 
     /// <summary>The single endpoint registered on-chain: storage's if enabled, else compute's (FR-D3).</summary>
-    public string? PrimaryEndpoint => PrimaryEndpointFor(Settings);
+    public string? PrimaryEndpoint => PrimaryEndpointFor(Settings, Secrets.HasBlobGatewaySecret);
 
-    public static string? PrimaryEndpointFor(HostSettings settings) =>
-        settings.Storage.Enabled ? EndpointFor(settings.Storage.AdvertisedEndpoint, settings.Storage.Port)
-        : settings.Compute.Enabled ? EndpointFor(settings.Compute.AdvertisedEndpoint, settings.Compute.Port)
-        : null;
+    public PrimaryRole Primary => PrimaryRoleFor(Settings, Secrets.HasBlobGatewaySecret);
+
+    /// <summary>
+    /// The role whose endpoint the registry holds (#228): storage, else compute, else a Blob Gateway that can actually
+    /// start (an access key and secret), so a gateway-only host registers and can be measured and paid.
+    /// </summary>
+    public static PrimaryRole PrimaryRoleFor(HostSettings settings, bool hasGatewaySecret) =>
+        settings.Storage.Enabled ? PrimaryRole.Storage
+        : settings.Compute.Enabled ? PrimaryRole.Compute
+        : settings.BlobGateway.Enabled && !string.IsNullOrWhiteSpace(settings.BlobGateway.AccessKeyId) && hasGatewaySecret ? PrimaryRole.BlobGateway
+        : PrimaryRole.None;
+
+    public static string? PrimaryEndpointFor(HostSettings settings, bool hasGatewaySecret) => PrimaryRoleFor(settings, hasGatewaySecret) switch
+    {
+        PrimaryRole.Storage => EndpointFor(settings.Storage.AdvertisedEndpoint, settings.Storage.Port),
+        PrimaryRole.Compute => EndpointFor(settings.Compute.AdvertisedEndpoint, settings.Compute.Port),
+        PrimaryRole.BlobGateway => EndpointFor(settings.BlobGateway.AdvertisedEndpoint, settings.BlobGateway.Port),
+        _ => null,
+    };
 
     /// <summary>
     /// A role's data directory, scoped to the network it belongs to, so switching
@@ -144,4 +159,13 @@ public sealed class HostContext
         var registry = network.NodeRegistryAddress.Length >= 10 ? network.NodeRegistryAddress[2..10].ToLowerInvariant() : "unknown";
         return Path.Combine(Paths.Component(role), $"{network.ChainId}-{registry}");
     }
+}
+
+/// <summary>Which role serves the node's registered endpoint (#228).</summary>
+public enum PrimaryRole
+{
+    None,
+    Storage,
+    Compute,
+    BlobGateway,
 }

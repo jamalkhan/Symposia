@@ -32,7 +32,7 @@ public sealed class StorageRoleComponent : WebAppComponent
 
     protected override bool UsesRoleDataDir => true;
 
-    protected override bool ServesNodeHealth => true;
+    protected override bool ServesNodeHealth(HostContext context) => true;
 
     protected override bool BindsOwnPort => true;
 
@@ -107,7 +107,7 @@ public sealed class ComputeRoleComponent : WebAppComponent
 
     protected override bool UsesRoleDataDir => true;
 
-    protected override bool ServesNodeHealth => true;
+    protected override bool ServesNodeHealth(HostContext context) => true;
 
     protected override string? SkipReason(HostContext context) =>
         !context.Settings.Compute.Enabled ? "Compute service is turned off" : base.SkipReason(context);
@@ -137,8 +137,7 @@ public sealed class ComputeRoleComponent : WebAppComponent
         app.Use(async (http, next) =>
         {
             var remote = http.Connection.RemoteIpAddress;
-            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && http.Request.Path != "/v1/peer/handshake" && http.Request.Path != NodeHealth.Path
-                && http.Request.Path != Symposia.Network.Node.Discovery.ServiceDirectory.Path)
+            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && !Symposia.Network.Node.PrimaryEndpointPaths.Contains(http.Request.Path))
             {
                 http.Response.StatusCode = StatusCodes.Status404NotFound;
                 return;
@@ -219,6 +218,9 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
 
     protected override (byte Service, long Capacity)? StakedService(HostContext context) => (8, 0);
 
+    /// <summary>Only on a gateway-only host is the gateway the primary endpoint (#228).</summary>
+    protected override bool ServesNodeHealth(HostContext context) => context.Primary == PrimaryRole.BlobGateway;
+
     protected override IDictionary<string, string?> Configuration(HostContext context)
     {
         var gateway = context.Settings.BlobGateway;
@@ -247,6 +249,12 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:Credentials:0:TenantId"] = "dev",
         };
         AddServiceMetrics(config, network);
+        if (context.Primary == PrimaryRole.BlobGateway)
+        {
+            // The registry holds this gateway's URL (#228): it answers peer handshakes with the node key, like storage and compute.
+            config["Gateway:ServesPrimary"] = "true";
+            RoleNetwork.Add(config, "GatewayNode", context, HostContext.EndpointFor(gateway.AdvertisedEndpoint, gateway.Port));
+        }
         return config;
     }
 
