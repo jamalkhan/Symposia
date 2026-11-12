@@ -23,47 +23,17 @@ public sealed class RewardsChainFixture : IAsyncLifetime
     /// </summary>
     public static readonly SemaphoreSlim ForgeGate = new(1, 1);
 
-    private Process? _anvil;
-    private readonly int _port = FreePort();
+    private AnvilProcess? _anvil;
     // Foundry's fs_permissions only allow the script to write under bootstrap-chain/deployments.
     private readonly string _out = Path.Combine(BootstrapChainDir(), "deployments", $"test-{Guid.NewGuid():N}.json");
 
-    public string RpcUrl => $"http://127.0.0.1:{_port}";
+    public string RpcUrl => _anvil?.RpcUrl ?? throw new InvalidOperationException("anvil has not started.");
 
     public IReadOnlyDictionary<string, string> Addresses { get; private set; } = new Dictionary<string, string>();
 
     public async Task InitializeAsync()
     {
-        _anvil = Process.Start(new ProcessStartInfo(Path.Combine(FoundryBin, "anvil"), AnvilArgs.Fixture(_port))
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        }) ?? throw new InvalidOperationException("Failed to start anvil.");
-
-        // Bounded (#174): anvil gets 10 s to answer, whether it errors or never listens.
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-        for (var i = 0; ; i++)
-        {
-            try
-            {
-                var rpc = await http.PostAsync(RpcUrl, new StringContent("""{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}""",
-                    System.Text.Encoding.UTF8, "application/json"));
-                if (rpc.IsSuccessStatusCode)
-                {
-                    break;
-                }
-            }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-            {
-            }
-
-            if (i >= 100)
-            {
-                throw new InvalidOperationException($"anvil did not answer on {RpcUrl} within 10 seconds.");
-            }
-
-            await Task.Delay(100);
-        }
+        _anvil = await AnvilProcess.StartAsync();
 
         var deploy = new ProcessStartInfo(Path.Combine(FoundryBin, "forge"),
             $"script script/DeployRewards.s.sol:DeployRewards --rpc-url {RpcUrl} --private-key {DeployerKey} --broadcast")
@@ -117,13 +87,11 @@ public sealed class RewardsChainFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_anvil is { HasExited: false })
+        if (_anvil is not null)
         {
-            _anvil.Kill(entireProcessTree: true);
-            await _anvil.WaitForExitAsync();
+            await _anvil.DisposeAsync();
         }
 
-        _anvil?.Dispose();
         File.Delete(_out);
     }
 
@@ -140,10 +108,4 @@ public sealed class RewardsChainFixture : IAsyncLifetime
             : Path.Combine(dir, "Blockchain", "bootstrap-chain");
     }
 
-    private static int FreePort()
-    {
-        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-        listener.Start();
-        return ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
-    }
 }

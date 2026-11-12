@@ -22,10 +22,9 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
     private const string DeployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     public const ulong ChainId = 31337;
 
-    private Process? _anvil;
-    private readonly int _port = GetFreePort();
+    private AnvilProcess? _anvil;
 
-    public string RpcUrl => $"http://127.0.0.1:{_port}";
+    public string RpcUrl => _anvil?.RpcUrl ?? throw new InvalidOperationException("anvil has not started.");
     public string NodeRegistryAddress { get; private set; } = "";
     public string EpochRootRegistryAddress { get; private set; } = "";
     public string ProtocolActivationsAddress { get; private set; } = "";
@@ -47,29 +46,11 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
         return Path.Combine(dir, "Blockchain", "bootstrap-chain");
     }
 
-    private static int GetFreePort()
-    {
-        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
-
     public async Task InitializeAsync()
     {
         var foundryBin = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
 
-        _anvil = Process.Start(new ProcessStartInfo
-        {
-            FileName = Path.Combine(foundryBin, "anvil"),
-            Arguments = string.Join(' ', AnvilArgs.Fixture(_port)),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        }) ?? throw new InvalidOperationException("Failed to start anvil.");
-
-        await WaitForRpcAsync();
+        _anvil = await AnvilProcess.StartAsync();
 
         // Same process-wide gate as RewardsChainFixture: concurrent forge runs over one project can stall (#176).
         await RewardsChainFixture.ForgeGate.WaitAsync();
@@ -116,32 +97,6 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
             : throw new InvalidOperationException($"Could not find {label} address in forge output:\n{output}");
     }
 
-    private async Task WaitForRpcAsync()
-    {
-        using var http = new HttpClient();
-        for (var i = 0; i < 100; i++)
-        {
-            try
-            {
-                var resp = await http.PostAsync(RpcUrl,
-                    new StringContent("""{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}""",
-                        System.Text.Encoding.UTF8, "application/json"));
-                if (resp.IsSuccessStatusCode)
-                {
-                    return;
-                }
-            }
-            catch
-            {
-                // anvil not up yet, retry.
-            }
-
-            await Task.Delay(100);
-        }
-
-        throw new InvalidOperationException("anvil did not become reachable in time.");
-    }
-
     protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
     {
         builder.ConfigureAppConfiguration((_, config) =>
@@ -159,13 +114,11 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
 
     async Task IAsyncLifetime.DisposeAsync()
     {
-        if (_anvil is { HasExited: false })
+        if (_anvil is not null)
         {
-            _anvil.Kill(entireProcessTree: true);
-            await _anvil.WaitForExitAsync();
+            await _anvil.DisposeAsync();
         }
 
-        _anvil?.Dispose();
         await base.DisposeAsync();
     }
 }
