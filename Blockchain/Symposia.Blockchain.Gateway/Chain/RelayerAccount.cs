@@ -3,6 +3,7 @@ using Nethereum.RPC.NonceServices;
 using Nethereum.Contracts;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
+using Symposia.Blockchain.Contracts;
 
 namespace Symposia.Blockchain.Gateway.Chain;
 
@@ -14,7 +15,9 @@ namespace Symposia.Blockchain.Gateway.Chain;
 /// back to back and mine together instead of queueing a block apart. At most
 /// <see cref="MaxInFlight"/> transactions wait at once, so a stuck nonce can't pile up hundreds.
 /// After a failed broadcast the nonce is re-read from the chain so a dropped transaction can't wedge
-/// later ones. Reads use <see cref="Web3"/> directly and never wait on the gate.
+/// later ones. Reads use <see cref="Web3"/> directly and never wait on the gate. Contract writes carry
+/// <see cref="GasHeadroom"/> over the estimate, so gas that grows between estimate and inclusion can't
+/// run them out (#216).
 /// </summary>
 public sealed class RelayerAccount
 {
@@ -73,7 +76,8 @@ public sealed class RelayerAccount
             await _gate.WaitAsync(ct);
             try
             {
-                hash = await Web3.Eth.GetContractTransactionHandler<TFunction>().SendRequestAsync(contract, function);
+                var handler = Web3.Eth.GetContractTransactionHandler<TFunction>();
+                hash = await handler.WithHeadroomAsync(contract, function, () => handler.SendRequestAsync(contract, function));
             }
             catch
             {

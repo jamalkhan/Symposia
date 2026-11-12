@@ -145,7 +145,8 @@ public sealed class NodeServiceStaker(NodeIdentity identity, ulong chainId, stri
         Nethereum.RPC.Eth.DTOs.TransactionReceipt receipt;
         try
         {
-            receipt = await web3.Eth.GetContractTransactionHandler<TFunction>().SendRequestAndWaitForReceiptAsync(contract, function, ct);
+            var handler = web3.Eth.GetContractTransactionHandler<TFunction>();
+            receipt = await handler.WithHeadroomAsync(contract, function, () => handler.SendRequestAndWaitForReceiptAsync(contract, function, ct));
         }
         catch (Nethereum.Contracts.SmartContractCustomErrorRevertException ex)
         {
