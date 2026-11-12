@@ -2,4 +2,7 @@
   <Project Path="Symposia.Identity.Domain/Symposia.Identity.Domain.csproj" />
   <Project Path="Symposia.Identity.Gateway/Symposia.Identity.Gateway.csproj" />
   <Project Path="Symposia.Identity.Gateway.Tests/Symposia.Identity.Gateway.Tests.csproj" />
+  <Folder Name="/Shared/">
+    <Project Path="../Blockchain/Symposia.Blockchain.Contracts/Symposia.Blockchain.Contracts.csproj" />
+  </Folder>
 </Solution>

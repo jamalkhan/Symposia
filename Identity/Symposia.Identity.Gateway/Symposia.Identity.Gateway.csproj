@@ -2,11 +2,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Symposia.Identity.Domain\Symposia.Identity.Domain.csproj" />
+    <!-- GasHeadroom (#216/#219): the gas limit every Symposia .NET chain write sends. -->
+    <ProjectReference Include="..\..\Blockchain\Symposia.Blockchain.Contracts\Symposia.Blockchain.Contracts.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Nethereum.Web3" Version="4.29.0" />
-  </ItemGroup>
+  <!-- Nethereum.Web3 comes through Symposia.Blockchain.Contracts, so the two can't drift apart. -->
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
