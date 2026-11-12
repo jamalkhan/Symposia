@@ -15,6 +15,8 @@ public sealed class VerifierRoleComponent : HostComponent
 {
     private VerifierEngine? _engine;
     private HttpClient? _http;
+    private HttpClient? _gateway;
+    private HttpClient? _targets;
 
     public override string Name => "verifier";
 
@@ -67,11 +69,12 @@ public sealed class VerifierRoleComponent : HostComponent
             DataDir = context.RoleDataDir(Name),
         };
 
-        _http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) }; // the relay waits for a receipt
-        var gateway = new HttpClient { BaseAddress = new Uri(network.GatewayUrl), Timeout = TimeSpan.FromMinutes(3) };
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        _gateway = new HttpClient { BaseAddress = new Uri(network.GatewayUrl), Timeout = TimeSpan.FromMinutes(3) }; // the relay waits for a receipt
+        _targets = TargetHttp.Create(options); // probes and directories: no redirects, connect-time address checks off LocalDev
         var logger = context.CreateLogger(Name, "Symposia.Network.Verifier");
         _engine = new VerifierEngine(options, new VerifierStore(Path.Combine(options.DataDir, "verifier.db")),
-            new NethereumVerifierChain(options, new NodeRegistryClient(gateway)), new HttpReportRelay(gateway), _http, logger);
+            new NethereumVerifierChain(options, new NodeRegistryClient(_gateway)), new HttpReportRelay(_gateway), _http, logger, targetHttp: _targets);
         _engine.Start();
         return Task.CompletedTask;
     }
@@ -84,8 +87,12 @@ public sealed class VerifierRoleComponent : HostComponent
             await engine.DisposeAsync();
         }
 
-        _http?.Dispose();
-        _http = null;
+        foreach (var client in new[] { _http, _gateway, _targets })
+        {
+            client?.Dispose();
+        }
+
+        (_http, _gateway, _targets) = (null, null, null);
     }
 
     private static string KeyPath(HostContext context) =>

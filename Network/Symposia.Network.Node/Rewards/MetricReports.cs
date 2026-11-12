@@ -72,11 +72,15 @@ public sealed class LocalKeyMetricAttestor : IMetricAttestor
 
     public string Address => _key.GetPublicAddress();
 
-    /// <summary>Signs any digest with the eth-signed-message prefix: probe challenges use the same key (#225).</summary>
-    public string SignDigest(byte[] digest) => new EthereumMessageSigner().Sign(digest, _key);
+    /// <summary>
+    /// Signs a probe challenge (#225): the only other thing this key signs, so a gateway can give the network's metric
+    /// signer a reserved lane. Domain-separated from metric reports, so it can never be reused as one.
+    /// </summary>
+    public string SignProbe(string gateway, long unixSeconds, byte[] nonce) =>
+        new EthereumMessageSigner().Sign(ProbeChallenge.Digest(gateway, unixSeconds, nonce), _key);
 
     public Task<MetricAttestation> AttestAsync(MetricReport report, CancellationToken ct) =>
-        Task.FromResult(new MetricAttestation(SignDigest(MetricReportDigest.Hash(report)), Address));
+        Task.FromResult(new MetricAttestation(new EthereumMessageSigner().Sign(MetricReportDigest.Hash(report), _key), Address));
 
     public override string ToString() => $"LocalKeyMetricAttestor({Address})";
 

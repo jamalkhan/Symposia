@@ -274,20 +274,25 @@ public sealed class HistoryStore
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {MeasurementColumns} FROM epoch_measurement ORDER BY measured_ms DESC LIMIT 1";
+        cmd.CommandText = $"SELECT {MeasurementColumns} FROM epoch_measurement ORDER BY measured_ms DESC LIMIT 1"; // a few hundred rows at most (see SaveMeasurement)
         using var r = cmd.ExecuteReader();
         return r.Read() ? ReadMeasurement(r) : null;
     }
 
-    /// <summary>Stores a measurement once; a second save for the same epoch is ignored (measurements are immutable).</summary>
+    /// <summary>
+    /// Stores a measurement once; a second save for the same epoch is ignored (measurements are immutable). Keeps
+    /// <see cref="MeasurementRetention"/>: long past any report window, and enough for the Verifier's figure fetches.
+    /// </summary>
     public void SaveMeasurement(EpochMeasurement m)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             INSERT OR IGNORE INTO epoch_measurement (distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms)
-            VALUES ($dist, $epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $at)
+            VALUES ($dist, $epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $at);
+            DELETE FROM epoch_measurement WHERE measured_ms < $at - $keep;
             """;
+        cmd.Parameters.AddWithValue("$keep", (long)MeasurementRetention.TotalMilliseconds);
         object[] values = [m.Distributor.ToLowerInvariant(), (long)m.Epoch, m.StartMs, m.EndMs, (long)m.Factors.UptimeBps, (long)m.Factors.SuccessBps,
             m.Factors.P95Ms, m.Factors.BytesServed, m.Factors.Requests, m.MeasuredMs];
         string[] names = ["$dist", "$epoch", "$s", "$e", "$up", "$ok", "$p95", "$bytes", "$n", "$at"];
@@ -308,6 +313,8 @@ public sealed class HistoryStore
         cmd.Parameters.AddWithValue("$cutoff", cutoff.ToUnixTimeMilliseconds());
         return cmd.ExecuteNonQuery();
     }
+
+    public static readonly TimeSpan MeasurementRetention = TimeSpan.FromDays(30);
 
     private const string MeasurementColumns =
         "distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms";

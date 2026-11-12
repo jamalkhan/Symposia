@@ -124,6 +124,26 @@ public sealed class ProbeEndpointTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ReplayedSignerHeader_DoesNotGetTheSignerLane()
+    {
+        Assert.True(await WriteCanaryAsync());
+        var client = _gateway.CreateClient();
+        var nonce = ProbeChallenge.NewNonce();
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(Probe(_signer, nonce, ts))).StatusCode);
+
+        // Replays of the one captured header fall to the shared per-IP lane, which runs out.
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 8; i++)
+        {
+            statuses.Add((await client.SendAsync(Probe(_signer, nonce, ts))).StatusCode);
+        }
+
+        Assert.Contains(HttpStatusCode.TooManyRequests, statuses);
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(Probe(_signer, ProbeChallenge.NewNonce()))).StatusCode); // a fresh one still does
+    }
+
+    [Fact]
     public async Task Canary_IsInvisibleToTenants_AndKeptOutOfHistory()
     {
         Assert.True(await WriteCanaryAsync());

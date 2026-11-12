@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Threading.RateLimiting;
+using Microsoft.Extensions.Caching.Memory;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Gateway.Nodes;
 using Symposia.BlobStorage.Gateway.S3;
@@ -38,7 +39,8 @@ public static class ProbeEndpoints
                 return Results.BadRequest($"Send {ProbeChallenge.Header}: <unix seconds>.<nonce hex>.<signature hex>.");
             }
 
-            var signer = Math.Abs(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - ts) <= ProbeChallenge.MaxSkew.TotalSeconds
+            // Cheap checks first: a stale or replayed challenge never gets the signer's lane, nor costs an ecrecover.
+            var signer = Math.Abs(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - ts) <= ProbeChallenge.MaxSkew.TotalSeconds && limits.FirstUse(nonce)
                 ? ProbeChallenge.Recover(identity.NodeId, ts, nonce, signature) : "";
             using var lease = await limits.AcquireAsync(signer, ClientIp(ctx, trustedProxies), ct);
             if (!lease.IsAcquired)
@@ -144,7 +146,25 @@ public sealed class ProbeLimiter(IServiceMetricsChain? chain, ILogger<ProbeLimit
     private readonly PartitionedRateLimiter<string> _reports = PartitionedRateLimiter.Create<string, string>(ip =>
         RateLimitPartition.GetFixedWindowLimiter(ip, _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true }));
 
-    private (string Signer, DateTimeOffset At)? _metricSigner;
+    private readonly SemaphoreSlim _signerRefresh = new(1, 1);
+    private readonly Microsoft.Extensions.Caching.Memory.MemoryCache _nonces = new(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 100_000 });
+    private volatile Tuple<string, DateTimeOffset>? _metricSigner;
+
+    /// <summary>
+    /// True the first time a nonce is seen within twice the allowed skew: a captured signed header can't be replayed
+    /// to drain the signer's lane and 429 the real Verifier.
+    /// </summary>
+    public bool FirstUse(byte[] nonce)
+    {
+        var key = Convert.ToHexString(nonce);
+        if (_nonces.TryGetValue(key, out _))
+        {
+            return false;
+        }
+
+        _nonces.Set(key, true, new Microsoft.Extensions.Caching.Memory.MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = 2 * ProbeChallenge.MaxSkew });
+        return true;
+    }
 
     /// <summary>A lease from the signer's lane when <paramref name="signer"/> is the on-chain metric signer, else the shared lane.</summary>
     public async ValueTask<RateLimitLease> AcquireAsync(string signer, string ip, CancellationToken ct)
@@ -173,22 +193,32 @@ public sealed class ProbeLimiter(IServiceMetricsChain? chain, ILogger<ProbeLimit
             return "";
         }
 
-        if (_metricSigner is { } cached && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(5))
+        if (_metricSigner is { } cached && DateTimeOffset.UtcNow - cached.Item2 < TimeSpan.FromMinutes(5))
         {
-            return cached.Signer;
+            return cached.Item1;
+        }
+
+        // One refresh at a time: when the cache expires under load, the rest use the stale value (or "") meanwhile.
+        if (!await _signerRefresh.WaitAsync(0, ct))
+        {
+            return _metricSigner?.Item1 ?? "";
         }
 
         try
         {
             var signer = await chain.MetricSignerAsync(ct);
-            _metricSigner = (signer, DateTimeOffset.UtcNow);
+            _metricSigner = Tuple.Create(signer, DateTimeOffset.UtcNow);
             return signer;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning("Probe: couldn't read the metric signer; the reserved lane is closed until it can: {Reason}", ex.Message);
-            _metricSigner = ("", DateTimeOffset.UtcNow - TimeSpan.FromMinutes(4)); // retry in a minute
+            _metricSigner = Tuple.Create("", DateTimeOffset.UtcNow - TimeSpan.FromMinutes(4)); // retry in a minute
             return "";
+        }
+        finally
+        {
+            _signerRefresh.Release();
         }
     }
 
@@ -199,5 +229,7 @@ public sealed class ProbeLimiter(IServiceMetricsChain? chain, ILogger<ProbeLimit
         _signerRate.Dispose();
         _signerSlots.Dispose();
         _reports.Dispose();
+        _nonces.Dispose();
+        _signerRefresh.Dispose();
     }
 }

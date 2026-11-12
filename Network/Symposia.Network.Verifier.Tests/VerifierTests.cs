@@ -61,17 +61,34 @@ public sealed class VerifierTests : IDisposable
         new HttpClient(_net), NullLogger.Instance, _time, new Random(7));
 
     /// <summary>Ticks every 5 s through epoch 0, as the real loop does, then moves past the measuring grace and the figure wait.</summary>
-    private async Task RunEpoch0Async(VerifierEngine engine)
+    private async Task RunEpoch0Async(VerifierEngine engine, Func<DateTimeOffset, Task>? each = null)
     {
-        for (var t = Genesis.AddSeconds(1); t < Genesis.AddSeconds(EpochSeconds); t = t.AddSeconds(5))
+        for (var t = Genesis.AddSeconds(1); t < Genesis.AddSeconds(EpochSeconds + 10); t = t.AddSeconds(5))
         {
             _time.Now = t;
-            _chain.Current = 0;
-            await engine.ProbeTickAsync(default);
+            _chain.Current = t < Genesis.AddSeconds(EpochSeconds) ? 0UL : 1UL;
+            if (each is not null)
+            {
+                await each(t);
+            }
+
+            await TickAsync(engine, t);
         }
 
         _chain.Current = 1;
         _time.Now = Genesis.AddSeconds(EpochSeconds) + VerifierEngine.FigureWait + TimeSpan.FromSeconds(1);
+    }
+
+    /// <summary>One 5 s step of the real loops: health, discovery once a minute, probes.</summary>
+    private static async Task TickAsync(VerifierEngine engine, DateTimeOffset t)
+    {
+        await engine.HealthTickAsync(default);
+        if (t.ToUnixTimeSeconds() % 60 < 5 || t <= Genesis.AddSeconds(5))
+        {
+            await engine.DiscoveryTickAsync(default);
+        }
+
+        await engine.ProbeTickAsync(default);
     }
 
     private FakeGateway AddGateway(EthECKey? key = null, long bytes = 5000)
@@ -177,17 +194,97 @@ public sealed class VerifierTests : IDisposable
     // ---------- end to end ----------
 
     [Fact]
-    public async Task SchedulerStall_DiscardsTheMinute()
+    public async Task SchedulerStall_DiscardsEveryMinuteItSpanned()
     {
         AddGateway();
         await using var engine = Engine(Options());
+        _time.Now = Genesis.AddSeconds(50);
+        await TickAsync(engine, _time.Now);
+        _time.Now = Genesis.AddSeconds(150); // 100 s asleep: minutes 0, 1 and 2 are all suspect
+
+        await engine.ProbeTickAsync(default);
+
+        var store = new VerifierStore(Path.Combine(_dir, "verifier.db"));
+        Assert.Equal(3, store.DiscardedMinutes(Genesis.ToUnixTimeMilliseconds(), Genesis.AddMinutes(3).ToUnixTimeMilliseconds()));
+    }
+
+    [Fact]
+    public async Task SlowGateways_DontTripTheStallDetector()
+    {
+        // A pass that takes long because probes time out isn't a stall: the gap is measured from the pass's end.
+        for (var i = 0; i < 5; i++)
+        {
+            AddGateway().ProbeDelay = TimeSpan.FromSeconds(20);
+        }
+
+        await using var engine = Engine(Options());
         _time.Now = Genesis.AddSeconds(1);
+        await TickAsync(engine, _time.Now);
+        _time.Now = Genesis.AddSeconds(6);
         await engine.ProbeTickAsync(default);
-        _time.Now = Genesis.AddSeconds(90); // 89 s between ticks: a sleeping laptop, say
 
-        await engine.ProbeTickAsync(default);
+        Assert.Equal(0, engine.Snapshot().DiscardedMinutes);
+    }
 
-        Assert.Equal(1, (await engine.SnapshotAsync(default)).DiscardedMinutes);
+    [Fact]
+    public async Task ManyTargets_ProbedConcurrently_AllRecorded()
+    {
+        for (var i = 0; i < 64; i++)
+        {
+            AddGateway();
+        }
+
+        await using var engine = Engine(Options());
+        _time.Now = Genesis.AddSeconds(1);
+        await TickAsync(engine, _time.Now);
+
+        Assert.Equal(64, new VerifierStore(Path.Combine(_dir, "verifier.db")).TargetsIn(8, 0).Count);
+        Assert.All(engine.Snapshot().Targets, t => Assert.Equal(ProbeOutcome.Ok, t.LastOutcome));
+    }
+
+    [Fact]
+    public async Task GatewayDeactivatedAtTheBoundary_StillGetsItsFigure()
+    {
+        var gw = AddGateway(bytes: 7777);
+        await using var engine = Engine(Options());
+        await RunEpoch0Async(engine);
+        _chain.Active.Clear();
+        await engine.DiscoveryTickAsync(default);
+
+        await engine.AttestTickAsync(default);
+
+        Assert.Equal("7777", Assert.Single(_relay.Sent).Values[3]);
+        Assert.Equal(gw.Node, _relay.Sent[0].Node, ignoreCase: true);
+    }
+
+    [Fact]
+    public async Task ZeroHealthySamples_IsMeasuredOnce_AsNoSamples()
+    {
+        AddGateway();
+        await using var engine = Engine(Options());
+        _net.ReferencesDown = true; // every minute discarded
+        await RunEpoch0Async(engine);
+        _net.ReferencesDown = false;
+
+        await engine.AttestTickAsync(default);
+        var fetches = _net.FigureFetches;
+        await engine.AttestTickAsync(default);
+
+        Assert.Empty(_relay.Sent);
+        Assert.Equal(fetches, _net.FigureFetches); // not re-examined every tick
+        Assert.Equal("NoSamples", Assert.Single(engine.Snapshot().Reports).LastError);
+    }
+
+    [Fact]
+    public void ReportState_NeverMovesBack()
+    {
+        var store = new VerifierStore(Path.Combine(_dir, "cas.db"));
+        var row = new VerifierReport(Distributor, 8, "0x1", 0, [1, 2, 3, 4], 1, null, ReportFlags.None, ReportState.Submitted, null, null, "0xtx", null, 1, 1);
+        store.SaveReport(row);
+
+        store.SaveReport(row with { State = ReportState.Signed, TxHash = null });
+
+        Assert.Equal((ReportState.Submitted, "0xtx"), (store.GetReport(Distributor, 8, "0x1", 0)!.State, store.GetReport(Distributor, 8, "0x1", 0)!.TxHash));
     }
 
     [Fact]
@@ -235,7 +332,7 @@ public sealed class VerifierTests : IDisposable
         await engine.AttestTickAsync(default);
 
         Assert.Empty(_relay.Sent);
-        var snapshot = await engine.SnapshotAsync(default);
+        var snapshot = engine.Snapshot();
         Assert.Equal(VerifierMode.ObserveOnly, snapshot.Mode);
         Assert.Equal(ReportState.ObservedOnly, Assert.Single(snapshot.Reports).State);
     }
@@ -246,17 +343,13 @@ public sealed class VerifierTests : IDisposable
         AddGateway();
         await using var engine = Engine(Options(chainId: 84532));
         _chain.ChainIdValue = 84532;
-        for (var t = Genesis.AddSeconds(1); t < Genesis.AddSeconds(EpochSeconds); t = t.AddSeconds(5))
+        await RunEpoch0Async(engine, t =>
         {
-            _time.Now = t;
             var outage = t < Genesis.AddMinutes(10);
             _net.ReferencesDown = outage;
             _net.GatewaysDown = outage; // the monitor's own connectivity, not the gateway's fault
-            await engine.ProbeTickAsync(default);
-        }
-
-        _chain.Current = 1;
-        _time.Now = Genesis.AddSeconds(EpochSeconds) + VerifierEngine.FigureWait + TimeSpan.FromSeconds(1);
+            return Task.CompletedTask;
+        });
         await engine.AttestTickAsync(default);
 
         Assert.Equal("10000", Assert.Single(_relay.Sent).Values[0]);
@@ -338,7 +431,7 @@ public sealed class VerifierTests : IDisposable
 
         await engine.AttestTickAsync(default);
 
-        var report = Assert.Single((await engine.SnapshotAsync(default)).Reports);
+        var report = Assert.Single(engine.Snapshot().Reports);
         Assert.Equal((ReportState.Terminal, "NotSigner"), (report.State, report.LastError));
     }
 
@@ -408,6 +501,7 @@ public sealed class VerifierTests : IDisposable
         public bool WrongAnswer { get; set; }
         public bool SignFigure { get; set; } = true;
         public bool ServeDirectory { get; set; } = true;
+        public TimeSpan ProbeDelay { get; set; }
     }
 
     /// <summary>Plays the Blockchain Gateway, the external references, and each gateway's directory, probe and figure.</summary>
@@ -416,6 +510,7 @@ public sealed class VerifierTests : IDisposable
         public List<FakeGateway> Gateways { get; } = [];
         public bool ReferencesDown { get; set; }
         public bool GatewaysDown { get; set; }
+        public int FigureFetches;
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -445,6 +540,12 @@ public sealed class VerifierTests : IDisposable
 
             if (uri.AbsolutePath == ProbeChallenge.Path)
             {
+                if (gw.ProbeDelay > TimeSpan.Zero)
+                {
+                    time.Now += gw.ProbeDelay; // a slow gateway: the probe pass takes this long on the clock
+                    return Json(HttpStatusCode.GatewayTimeout, new { });
+                }
+
                 if (gw.ProbeStatus != HttpStatusCode.OK)
                 {
                     return Json(gw.ProbeStatus, new { });
@@ -457,6 +558,7 @@ public sealed class VerifierTests : IDisposable
 
             if (uri.AbsolutePath.StartsWith(EpochReportSignature.PathPrefix))
             {
+                Interlocked.Increment(ref FigureFetches);
                 var epoch = ulong.Parse(uri.AbsolutePath[EpochReportSignature.PathPrefix.Length..]);
                 var report = EpochReportSignature.Sign(gw.SignFigure ? gw.Key : EthECKey.GenerateKey(), chain.ChainIdValue, Distributor, epoch, gw.Bytes, 10) with { Node = gw.Node };
                 return Json(HttpStatusCode.OK, report);

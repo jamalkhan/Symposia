@@ -51,9 +51,14 @@ public sealed record VerifierSnapshot(
 }
 
 /// <summary>
-/// The Verifier role's engine (#225): one probe loop (monitor health, discovery, jittered per-target probes) and one
-/// attest loop (measure finished epochs, cap bytes, sign, submit, sweep). Both persist everything they decide, so
-/// a restart neither loses nor repeats a report. Blob Gateway is the only measured service for now.
+/// The Verifier role's engine (#225). Four loops, so none can hold up another:
+/// <list type="bullet">
+/// <item><b>health</b>: checks the references at each minute's start and end; a failure discards that minute for every gateway;</item>
+/// <item><b>discovery</b>: the epoch, the Active targets and their node-signed URLs, once a minute;</item>
+/// <item><b>probe</b>: due targets, each persisted as it completes; a scheduler stall discards the minutes it spanned;</item>
+/// <item><b>attest</b>: measures each finished epoch once (after its samples are all in), caps bytes, signs, submits, sweeps.</item>
+/// </list>
+/// Everything decided is persisted, so a restart neither loses nor repeats a report.
 /// </summary>
 public sealed class VerifierEngine : IAsyncDisposable
 {
@@ -65,34 +70,40 @@ public sealed class VerifierEngine : IAsyncDisposable
     /// <summary>How long after the epoch ends gateways' signed figures are waited for before missing ones count as 0.</summary>
     public static readonly TimeSpan FigureWait = TimeSpan.FromSeconds(120);
 
-    private const byte Service = BlobGatewayProbe.Service;
+    /// <summary>A probe loop that didn't run for this long was stalled (sleep, GC, starvation): its probes can't be trusted.</summary>
+    public static readonly TimeSpan StallAfter = TimeSpan.FromSeconds(15);
+
     private const int MaxConcurrentProbes = 32;
 
     private readonly VerifierOptions _options;
     private readonly VerifierStore _store;
     private readonly IVerifierChain _chain;
     private readonly IReportRelay _relay;
-    private readonly BlobGatewayProbe _probe;
+    private readonly IServiceProbe _probe;
     private readonly MonitorHealthGuard _health;
     private readonly TargetDirectory _directory;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
     private readonly string _vantage;
     private readonly ConcurrentDictionary<string, (ProbeOutcome Outcome, long LatencyMs, long AtMs)> _last = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, long> _due = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _due = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<(ulong, string), byte> _warned = new();
     private readonly Random _jitter;
-    private readonly HashSet<(ulong, string)> _warned = [];
-    private IReadOnlyList<ProbeTarget> _targets = [];
-    private (ulong Epoch, long StartMs, long NextStartMs)? _epoch;
+    private View _view = new(null, []);
     private long _checkedStartMinute = -1;
     private long _checkedEndMinute = -1;
-    private long _lastTickMs;
-    private long _targetsRefreshedMs;
+    private long _lastProbeEndMs;
+    private long _samplesThroughMs;
     private CancellationTokenSource? _stop;
     private Task? _loops;
 
+    /// <summary>What the probe and attest loops share, swapped whole: never read half-updated.</summary>
+    private sealed record View((ulong Epoch, long StartMs, long NextStartMs)? Epoch, IReadOnlyList<ProbeTarget> Targets);
+
+    /// <param name="http">References, directories and the relay's client.</param>
+    /// <param name="targetHttp">Probes and figures: no redirects, connect-time address checks (<see cref="TargetHttp"/>). Defaults to <paramref name="http"/>.</param>
     public VerifierEngine(VerifierOptions options, VerifierStore store, IVerifierChain chain, IReportRelay relay, HttpClient http, ILogger logger,
-        TimeProvider? time = null, Random? jitter = null)
+        TimeProvider? time = null, Random? jitter = null, HttpClient? targetHttp = null, IServiceProbe? probe = null)
     {
         _options = options;
         _store = store;
@@ -102,19 +113,25 @@ public sealed class VerifierEngine : IAsyncDisposable
         _time = time ?? TimeProvider.System;
         _jitter = jitter ?? Random.Shared;
         _vantage = options.NodeAddress.ToLowerInvariant();
-        _probe = new BlobGatewayProbe(http);
+        _probe = probe ?? new BlobGatewayProbe(targetHttp ?? http);
         _health = new MonitorHealthGuard(http, options);
-        _directory = new TargetDirectory(chain, store, http, options, logger, _time);
+        _directory = new TargetDirectory(chain, store, targetHttp ?? http, options, logger, _time);
         Authority = new VerifierAuthority(chain, options, logger, _time);
     }
 
     public VerifierAuthority Authority { get; }
 
+    private byte Service => _probe.Service;
+
     public void Start()
     {
         _stop = new CancellationTokenSource();
         var ct = _stop.Token;
-        _loops = Task.WhenAll(Loop(TimeSpan.FromSeconds(5), ProbeTickAsync, ct), Loop(TimeSpan.FromSeconds(15), AttestTickAsync, ct));
+        _loops = Task.WhenAll(
+            Loop(TimeSpan.FromSeconds(5), HealthTickAsync, ct),
+            Loop(TimeSpan.FromSeconds(60), DiscoveryTickAsync, ct),
+            Loop(TimeSpan.FromSeconds(5), ProbeTickAsync, ct),
+            Loop(TimeSpan.FromSeconds(15), AttestTickAsync, ct));
     }
 
     public async ValueTask DisposeAsync()
@@ -155,59 +172,75 @@ public sealed class VerifierEngine : IAsyncDisposable
         while (await timer.WaitForNextTickAsync(ct));
     }
 
-    /// <summary>One probe pass: health checks at each minute's start and end, discovery each minute, due probes. Public for tests.</summary>
-    public async Task ProbeTickAsync(CancellationToken ct)
+    /// <summary>Checks the references at each minute's start and again in its last 10 s. Public for tests.</summary>
+    public async Task HealthTickAsync(CancellationToken ct)
     {
         var now = _time.GetUtcNow().ToUnixTimeMilliseconds();
         var minute = now / 60_000 * 60_000;
-
-        // A stalled scheduler (sleep, GC, starvation) makes probes look like timeouts: discard that minute.
-        if (_lastTickMs > 0 && now - _lastTickMs > 15_000)
-        {
-            _store.RecordMinute(minute, false, "stall");
-        }
-
-        _lastTickMs = now;
-        if (_checkedStartMinute != minute || (now - minute >= 50_000 && _checkedEndMinute != minute))
-        {
-            var problem = await _health.CheckAsync(ct);
-            _store.RecordMinute(minute, problem is null, problem);
-            if (_checkedStartMinute != minute)
-            {
-                _checkedStartMinute = minute;
-            }
-            else
-            {
-                _checkedEndMinute = minute;
-            }
-
-            if (problem is not null)
-            {
-                _logger.LogWarning("Verifier: minute discarded for every gateway: {Problem}.", problem);
-            }
-        }
-
-        if (_epoch is not { } epoch || now >= epoch.NextStartMs || now - _targetsRefreshedMs >= 60_000)
-        {
-            var current = await _chain.CurrentEpochAsync(ct);
-            _epoch = epoch = (current, await _chain.EpochStartAsync(current, ct) * 1000, await _chain.EpochStartAsync(current + 1, ct) * 1000);
-            _targets = await _directory.TargetsAsync(Service, current, ct);
-            _targetsRefreshedMs = now;
-        }
-
-        var due = _targets.Where(t => !_due.TryGetValue(t.Node, out var at) || now >= at).ToList();
-        if (due.Count == 0)
+        var start = _checkedStartMinute != minute;
+        if (!start && (now - minute < 50_000 || _checkedEndMinute == minute))
         {
             return;
         }
 
+        var problem = await _health.CheckAsync(ct);
+        _store.RecordMinute(minute, problem is null, problem);
+        (_checkedStartMinute, _checkedEndMinute) = start ? (minute, _checkedEndMinute) : (_checkedStartMinute, minute);
+        if (problem is not null)
+        {
+            _logger.LogWarning("Verifier: minute discarded for every gateway: {Problem}.", problem);
+        }
+    }
+
+    /// <summary>The current epoch and its targets. Public for tests.</summary>
+    public async Task DiscoveryTickAsync(CancellationToken ct)
+    {
+        var current = await _chain.CurrentEpochAsync(ct);
+        var epoch = (current, await _chain.EpochStartAsync(current, ct) * 1000, await _chain.EpochStartAsync(current + 1, ct) * 1000);
+        var targets = await _directory.TargetsAsync(Service, current, ct);
+        Volatile.Write(ref _view, new View(epoch, targets));
+        foreach (var gone in _due.Keys.Where(k => !targets.Any(t => string.Equals(t.Node, k, StringComparison.OrdinalIgnoreCase))))
+        {
+            _due.TryRemove(gone, out _);
+        }
+    }
+
+    /// <summary>Probes due targets, persisting each sample as it completes. Public for tests.</summary>
+    public async Task ProbeTickAsync(CancellationToken ct)
+    {
+        var view = Volatile.Read(ref _view);
+        var now = _time.GetUtcNow().ToUnixTimeMilliseconds();
+
+        // The loop wakes every 5 s; a gap since the last pass ended means the host didn't run us (sleep, GC,
+        // starvation), and probes around it look like timeouts. Discard every minute the gap touched.
+        if (_lastProbeEndMs > 0 && now - _lastProbeEndMs > StallAfter.TotalMilliseconds)
+        {
+            for (var m = _lastProbeEndMs / 60_000 * 60_000; m <= now; m += 60_000)
+            {
+                _store.RecordMinute(m, false, "stall");
+            }
+        }
+
+        if (view.Epoch is not { } epoch)
+        {
+            _lastProbeEndMs = _time.GetUtcNow().ToUnixTimeMilliseconds();
+            return;
+        }
+
+        var minute = now / 60_000 * 60_000;
+        var due = view.Targets.Where(t => !_due.TryGetValue(t.Node, out var at) || now >= at).ToList();
         var key = Authority.Key;
-        var samples = new ConcurrentBag<ProbeSample>();
         await Parallel.ForEachAsync(due, new ParallelOptions { MaxDegreeOfParallelism = MaxConcurrentProbes, CancellationToken = ct }, async (target, token) =>
         {
             var at = _time.GetUtcNow().ToUnixTimeMilliseconds();
+            var sampleEpoch = at >= epoch.NextStartMs ? epoch.Epoch + 1 : epoch.Epoch;
             var (outcome, latency) = await _probe.ProbeAsync(target, key, token);
-            samples.Add(new ProbeSample(Service, target.Node, at, at >= epoch.NextStartMs ? epoch.Epoch + 1 : epoch.Epoch, _vantage, outcome, latency));
+            _store.AddSamples([new ProbeSample(Service, target.Node, at, sampleEpoch, _vantage, outcome, latency)]);
+            if (target.Url is { } url)
+            {
+                _store.RememberUrl(Service, target.Node, sampleEpoch, url);
+            }
+
             _last[target.Node] = (outcome, latency, at);
             if (outcome is ProbeOutcome.ConnectFailed or ProbeOutcome.Timeout)
             {
@@ -217,14 +250,14 @@ public sealed class VerifierEngine : IAsyncDisposable
             {
                 _directory.Succeeded(target.Node);
             }
-        });
-        _store.AddSamples([.. samples]);
 
-        // Once a minute per target, at a random second, so a gateway can't time good behaviour to the probe.
-        foreach (var target in due)
-        {
+            // Once a minute per target, at a random second, so a gateway can't time good behaviour to the probe.
             _due[target.Node] = minute + 60_000 + _jitter.NextInt64(0, 60_000);
-        }
+        });
+
+        // Every probe started before `now` is persisted: the attest loop measures an epoch only once this passes its end.
+        Volatile.Write(ref _samplesThroughMs, now);
+        _lastProbeEndMs = _time.GetUtcNow().ToUnixTimeMilliseconds();
     }
 
     /// <summary>One attest pass over the last <see cref="Lookback"/> finished epochs. Public for tests.</summary>
@@ -243,12 +276,17 @@ public sealed class VerifierEngine : IAsyncDisposable
             }
 
             var open = await _chain.AcceptsReportsAsync(epoch, ct);
-            if (open)
+            if (open && Volatile.Read(ref _samplesThroughMs) >= endMs)
             {
                 await MeasureAsync(epoch, startMs, endMs, mode, now, ct);
             }
 
             await AdvanceAsync(epoch, open, ct);
+        }
+
+        foreach (var key in _warned.Keys.Where(k => k.Item1 + Lookback < current))
+        {
+            _warned.TryRemove(key, out _);
         }
 
         if (current > Lookback + 2)
@@ -258,42 +296,50 @@ public sealed class VerifierEngine : IAsyncDisposable
         }
     }
 
-    /// <summary>Phase 1: every probed target gets a report row, once all signed figures are in (or the wait is over).</summary>
+    /// <summary>
+    /// Phase 1, once per epoch: every probed target gets a row in one pass, after all signed figures are in (or the
+    /// wait is over), so the whole epoch shares one bytes cap. A target with no healthy samples gets a Terminal
+    /// "NoSamples" row, never submitted, so it isn't re-examined every tick.
+    /// </summary>
     private async Task MeasureAsync(ulong epoch, long startMs, long endMs, VerifierMode mode, DateTimeOffset now, CancellationToken ct)
     {
         var distributor = _options.RewardDistributorAddress;
-        var pending = _store.TargetsIn(Service, epoch).Where(t => _store.GetReport(distributor, Service, t.Target, epoch) is null).ToList();
+        var pending = _store.UnreportedTargets(distributor, Service, epoch);
         if (pending.Count == 0)
         {
             return;
         }
 
-        // The cap needs every gateway's figure, so the whole epoch is fetched together.
-        var urls = _targets.ToDictionary(t => t.Node, StringComparer.OrdinalIgnoreCase);
-        var all = _store.TargetsIn(Service, epoch);
         var figures = new ConcurrentDictionary<string, (long? Bytes, ReportFlags Flag)>(StringComparer.OrdinalIgnoreCase);
-        await Parallel.ForEachAsync(all, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (t, token) =>
+        await Parallel.ForEachAsync(_store.TargetsIn(Service, epoch), new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (t, token) =>
         {
-            var target = urls.GetValueOrDefault(t.Target) ?? new ProbeTarget(t.Target, null, "not currently discoverable");
+            // The URL it was probed at that epoch: a gateway deactivated or moved since still gets its figure fetched.
+            var target = new ProbeTarget(t.Target, _store.UrlIn(Service, t.Target, epoch), null);
             var figure = await _probe.FigureAsync(target, epoch, token);
             figures[t.Target] = figure is null ? (null, ReportFlags.BytesMissing)
                 : EpochReportSignature.IsValid(figure, _options.ChainId, distributor, t.Target, epoch) ? (figure.BytesServed, ReportFlags.None)
                 : (null, ReportFlags.BytesBadSignature);
         });
 
-        var waited = now >= DateTimeOffset.FromUnixTimeMilliseconds(endMs) + FigureWait;
-        if (!waited && figures.Values.Any(f => f.Flag == ReportFlags.BytesMissing))
+        if (now < DateTimeOffset.FromUnixTimeMilliseconds(endMs) + FigureWait && figures.Values.Any(f => f.Flag == ReportFlags.BytesMissing))
         {
             return; // a gateway measures its own epoch 45 s after it ends: give it until FigureWait
         }
 
         var cap = FactorMath.Cap([.. figures.Values.Where(f => f.Bytes is not null).Select(f => f.Bytes!.Value)], _options.BytesServedFloor);
+        var (state, why) = mode switch
+        {
+            VerifierMode.Attesting => (ReportState.Measured, (string?)null),
+            VerifierMode.ObserveOnly => (ReportState.ObservedOnly, "NotSigner"),
+            _ => (ReportState.ObservedOnly, "AuthorityUnknown"),
+        };
         foreach (var (target, firstMs) in pending)
         {
             var samples = _store.HealthySamples(Service, target, startMs, endMs, _vantage);
             if (samples.Count == 0)
             {
-                continue; // zero samples: no report, which settles "No metric report"
+                Save(new VerifierReport(distributor, Service, target, epoch, [], 0, null, ReportFlags.None, ReportState.Terminal, null, null, null, "NoSamples", 0, 0));
+                continue; // no healthy samples: no report, which settles "No metric report"
             }
 
             var expected = _store.HealthyMinutes(Math.Max(startMs, firstMs / 60_000 * 60_000), endMs);
@@ -308,14 +354,14 @@ public sealed class VerifierEngine : IAsyncDisposable
             }
 
             Save(new VerifierReport(distributor, Service, target, epoch, [factors.UptimeBps, factors.SuccessBps, factors.P95Ms, bytes], factors.UptimeBps,
-                claimed, flags, mode == VerifierMode.Attesting ? ReportState.Measured : ReportState.ObservedOnly, null, null, null, null, 0, 0));
+                claimed, flags, state, null, null, null, why, 0, 0));
         }
     }
 
     /// <summary>Phase 2: sign what's measured and submit what's signed, checking authority fresh before each.</summary>
     private async Task AdvanceAsync(ulong epoch, bool open, CancellationToken ct)
     {
-        var rows = _store.OpenReports(_options.RewardDistributorAddress).Where(r => r.Epoch == epoch).ToList();
+        var rows = _store.OpenReports(_options.RewardDistributorAddress, epoch).ToList();
         if (rows.Count == 0)
         {
             return;
@@ -325,7 +371,8 @@ public sealed class VerifierEngine : IAsyncDisposable
         {
             foreach (var r in rows)
             {
-                Save(r with { State = ReportState.Terminal, LastError = r.State == ReportState.ObservedOnly ? "NotSigner" : "FinalityWindowElapsed" });
+                // Observed-only rows keep why they weren't signed (NotSigner / AuthorityUnknown).
+                Save(r with { State = ReportState.Terminal, LastError = r.State == ReportState.ObservedOnly ? r.LastError ?? "NotSigner" : "FinalityWindowElapsed" });
             }
 
             _logger.LogWarning("Verifier: epoch {Epoch}'s window closed with {Count} report(s) unsent.", epoch, rows.Count);
@@ -342,7 +389,7 @@ public sealed class VerifierEngine : IAsyncDisposable
             if (rows[i].State != ReportState.Signed || !string.Equals(rows[i].Signer, key.Address, StringComparison.OrdinalIgnoreCase))
             {
                 var attestation = await key.AttestAsync(ReportOf(rows[i]), ct);
-                rows[i] = Save(rows[i] with { State = ReportState.Signed, Signer = attestation.Signer, Signature = attestation.Signature });
+                rows[i] = Save(rows[i] with { State = ReportState.Signed, Signer = attestation.Signer, Signature = attestation.Signature, LastError = null });
             }
         }
 
@@ -353,6 +400,8 @@ public sealed class VerifierEngine : IAsyncDisposable
 
         await Parallel.ForEachAsync(rows, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (row, token) =>
         {
+            // The relay answers 200 without sending when the epoch already has this report on chain (#221), so a
+            // resend after a lost response lands as Submitted, never as a refusal.
             var outcome = await _relay.SubmitAsync(Wire.Request.From(ReportOf(row), new MetricAttestation(row.Signature!, row.Signer!)), token);
             if (outcome.Submitted)
             {
@@ -366,12 +415,9 @@ public sealed class VerifierEngine : IAsyncDisposable
             }
             else
             {
-                lock (_warned)
+                if (_warned.TryAdd((epoch, row.Target), 0))
                 {
-                    if (_warned.Add((epoch, row.Target)))
-                    {
-                        _logger.LogWarning("Verifier: {Target} epoch {Epoch} didn't go through, retrying until the window closes: {Error}.", row.Target, epoch, outcome.Error);
-                    }
+                    _logger.LogWarning("Verifier: {Target} epoch {Epoch} didn't go through, retrying until the window closes: {Error}.", row.Target, epoch, outcome.Error);
                 }
 
                 Save(row with { LastError = outcome.Error, Attempts = row.Attempts + 1 });
@@ -379,17 +425,17 @@ public sealed class VerifierEngine : IAsyncDisposable
         });
     }
 
-    public async Task<VerifierSnapshot> SnapshotAsync(CancellationToken ct)
+    /// <summary>The card's data: in-memory state plus two primary-key reads.</summary>
+    public VerifierSnapshot Snapshot()
     {
         var (mode, reason) = Authority.Current;
-        var epoch = _epoch;
-        var discarded = epoch is { } e ? _store.DiscardedMinutes(e.StartMs, e.NextStartMs) : 0;
-        var targets = _targets.Select(t => _last.TryGetValue(t.Node, out var l)
+        var view = Volatile.Read(ref _view);
+        var discarded = view.Epoch is { } e ? _store.DiscardedMinutes(e.StartMs, e.NextStartMs) : 0;
+        var targets = view.Targets.Select(t => _last.TryGetValue(t.Node, out var l)
             ? new VerifierSnapshot.Target(t.Node, t.Url, t.Problem, l.Outcome, l.LatencyMs, l.AtMs)
             : new VerifierSnapshot.Target(t.Node, t.Url, t.Problem, null, null, null)).ToList();
-        var since = epoch is { Epoch: > Lookback } x ? x.Epoch - Lookback : 0;
-        await Task.CompletedTask;
-        return new VerifierSnapshot(mode, reason, epoch?.Epoch ?? 0, discarded, targets, _store.LatestReports(_options.RewardDistributorAddress, since));
+        var since = view.Epoch is { Epoch: > Lookback } x ? x.Epoch - Lookback : 0;
+        return new VerifierSnapshot(mode, reason, view.Epoch?.Epoch ?? 0, discarded, targets, _store.LatestReports(_options.RewardDistributorAddress, since));
     }
 
     private MetricReport ReportOf(VerifierReport r) => new(r.Distributor, r.Target, r.Service, r.Epoch, [.. r.Values.Select(v => new System.Numerics.BigInteger(v))], r.HeartbeatBps);

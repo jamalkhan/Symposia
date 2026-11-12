@@ -110,7 +110,16 @@ public sealed class VerifierStore
                 updated_ms    INTEGER NOT NULL,
                 PRIMARY KEY (distributor, service, target, epoch)
             ) WITHOUT ROWID;
-            CREATE INDEX IF NOT EXISTS idx_report_open ON verifier_report (state, epoch) WHERE state IN (0, 1, 2);
+            DROP INDEX IF EXISTS idx_report_open;
+            CREATE INDEX IF NOT EXISTS idx_report_open_by_epoch ON verifier_report (distributor, epoch) WHERE state IN (0, 1, 2);
+            -- Where each target was probed in each epoch, so a gateway deactivated since still gets its figure fetched.
+            CREATE TABLE IF NOT EXISTS verifier_target (
+                service INTEGER NOT NULL,
+                target  TEXT    NOT NULL,
+                epoch   INTEGER NOT NULL,
+                url     TEXT    NOT NULL,
+                PRIMARY KEY (service, target, epoch)
+            ) WITHOUT ROWID;
             -- The highest directory seq seen per node: a captured older directory can't roll a URL back.
             CREATE TABLE IF NOT EXISTS directory_seen (
                 node TEXT PRIMARY KEY,
@@ -233,6 +242,53 @@ public sealed class VerifierStore
         return targets;
     }
 
+    /// <summary>Targets probed in <paramref name="epoch"/> that have no report row yet: one anti-join, not a lookup per target.</summary>
+    public IReadOnlyList<(string Target, long FirstMs)> UnreportedTargets(string distributor, byte service, ulong epoch)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT s.target, MIN(s.ts_ms) FROM probe_sample s
+            WHERE s.epoch = $e AND s.service = $svc
+              AND NOT EXISTS (SELECT 1 FROM verifier_report r WHERE r.distributor = $d AND r.service = $svc AND r.target = s.target AND r.epoch = $e)
+            GROUP BY s.target
+            """;
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        cmd.Parameters.AddWithValue("$svc", (long)service);
+        cmd.Parameters.AddWithValue("$d", distributor.ToLowerInvariant());
+        using var r = cmd.ExecuteReader();
+        var targets = new List<(string, long)>();
+        while (r.Read())
+        {
+            targets.Add((r.GetString(0), r.GetInt64(1)));
+        }
+
+        return targets;
+    }
+
+    public void RememberUrl(byte service, string target, ulong epoch, string url)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO verifier_target (service, target, epoch, url) VALUES ($svc, $t, $e, $u) ON CONFLICT DO UPDATE SET url = $u";
+        cmd.Parameters.AddWithValue("$svc", (long)service);
+        cmd.Parameters.AddWithValue("$t", target.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        cmd.Parameters.AddWithValue("$u", url);
+        cmd.ExecuteNonQuery();
+    }
+
+    public string? UrlIn(byte service, string target, ulong epoch)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT url FROM verifier_target WHERE service = $svc AND target = $t AND epoch = $e";
+        cmd.Parameters.AddWithValue("$svc", (long)service);
+        cmd.Parameters.AddWithValue("$t", target.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        return cmd.ExecuteScalar() as string;
+    }
+
     public VerifierReport? GetReport(string distributor, byte service, string target, ulong epoch)
     {
         using var conn = Open();
@@ -246,13 +302,14 @@ public sealed class VerifierStore
         return r.Read() ? Read(r) : null;
     }
 
-    /// <summary>Reports still to sign or submit, oldest epoch first (the partial <c>idx_report_open</c>).</summary>
-    public IReadOnlyList<VerifierReport> OpenReports(string distributor)
+    /// <summary>One epoch's reports still to sign or submit (the partial <c>idx_report_open_by_epoch</c>).</summary>
+    public IReadOnlyList<VerifierReport> OpenReports(string distributor, ulong epoch)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {ReportColumns} FROM verifier_report WHERE state IN (0, 1, 2) AND distributor = $d ORDER BY epoch";
+        cmd.CommandText = $"SELECT {ReportColumns} FROM verifier_report WHERE distributor = $d AND epoch = $e AND state IN (0, 1, 2)";
         cmd.Parameters.AddWithValue("$d", distributor.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
         using var r = cmd.ExecuteReader();
         var reports = new List<VerifierReport>();
         while (r.Read())
@@ -281,7 +338,10 @@ public sealed class VerifierStore
         return [.. reports.GroupBy(x => (x.Service, x.Target)).Select(g => g.First())];
     }
 
-    /// <summary>Inserts a report, or updates its state; measured values are never overwritten.</summary>
+    /// <summary>
+    /// Inserts a report, or moves its state forward; measured values are never overwritten, and a state never moves back
+    /// (states are ordered), so a second writer can't revert Submitted or reopen Terminal.
+    /// </summary>
     public void SaveReport(VerifierReport r)
     {
         using var conn = Open();
@@ -291,6 +351,7 @@ public sealed class VerifierStore
             VALUES ($d, $svc, $t, $e, $vals, $hb, $bytes, $flags, $state, $signer, $sig, $tx, $err, $attempts, $updated)
             ON CONFLICT (distributor, service, target, epoch) DO UPDATE SET state = $state, signer = $signer, signature = $sig, tx_hash = $tx,
                 last_error = $err, attempts = $attempts, updated_ms = $updated
+            WHERE verifier_report.state <= $state AND verifier_report.state NOT IN (3, 4)
             """;
         object?[] values = [r.Distributor.ToLowerInvariant(), (long)r.Service, r.Target.ToLowerInvariant(), (long)r.Epoch, string.Join(',', r.Values),
             (long)r.HeartbeatBps, r.BytesClaimed, (long)r.Flags, (long)r.State, r.Signer, r.Signature, r.TxHash, r.LastError, r.Attempts, r.UpdatedMs];
@@ -322,16 +383,27 @@ public sealed class VerifierStore
         cmd.ExecuteNonQuery();
     }
 
-    /// <summary>Drops samples of epochs before <paramref name="epoch"/> and minutes before <paramref name="beforeMs"/>.</summary>
+    /// <summary>
+    /// Drops samples, target URLs and minutes before <paramref name="epoch"/>, and finished reports more than
+    /// <see cref="ReportRetentionEpochs"/> older (kept that long for the status card and #227).
+    /// </summary>
     public int Sweep(ulong epoch, long beforeMs)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM probe_sample WHERE epoch < $e; DELETE FROM monitor_minute WHERE minute_ms < $m;";
+        cmd.CommandText = """
+            DELETE FROM probe_sample WHERE epoch < $e;
+            DELETE FROM verifier_target WHERE epoch < $e;
+            DELETE FROM monitor_minute WHERE minute_ms < $m;
+            DELETE FROM verifier_report WHERE state IN (3, 4) AND epoch < $old;
+            """;
+        cmd.Parameters.AddWithValue("$old", (long)epoch - ReportRetentionEpochs);
         cmd.Parameters.AddWithValue("$e", (long)epoch);
         cmd.Parameters.AddWithValue("$m", beforeMs);
         return cmd.ExecuteNonQuery();
     }
+
+    public const int ReportRetentionEpochs = 720;
 
     private const string ReportColumns =
         "distributor, service, target, epoch, values_csv, heartbeat_bps, bytes_claimed, flags, state, signer, signature, tx_hash, last_error, attempts, updated_ms";

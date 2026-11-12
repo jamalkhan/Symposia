@@ -305,11 +305,11 @@ public static class UiApp
         });
 
         // The Verifier role's card (#225 FR7): mode, targets, last probes, recent reports. In-memory plus one small read.
-        api.MapGet("/verifier", async (CancellationToken ct) =>
+        api.MapGet("/verifier", () =>
         {
             var component = supervisor.Verifier;
             return component.Engine is { } engine
-                ? Results.Ok(new { status = component.Status.ToString(), reason = component.Reason, snapshot = await engine.SnapshotAsync(ct) })
+                ? Results.Ok(new { status = component.Status.ToString(), reason = component.Reason, snapshot = engine.Snapshot() })
                 : Results.Ok(new { status = component.Status.ToString(), reason = component.Reason, snapshot = (object?)null });
         });
 

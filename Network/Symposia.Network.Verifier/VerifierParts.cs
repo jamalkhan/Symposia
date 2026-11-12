@@ -28,11 +28,13 @@ public sealed class VerifierAuthority(IVerifierChain chain, VerifierOptions opti
 {
     private static readonly TimeSpan CacheFor = TimeSpan.FromMinutes(5);
 
-    private (VerifierMode Mode, string Reason, DateTimeOffset At)? _last;
+    private sealed record Checked(VerifierMode Mode, string Reason, DateTimeOffset At);
+
+    private Checked? _last; // a reference swapped whole, so the UI thread never reads it half-written
 
     public LocalKeyMetricAttestor? Key { get; private set; }
 
-    public (VerifierMode Mode, string Reason) Current => _last is { } l ? (l.Mode, l.Reason) : (VerifierMode.Unknown, "Not checked yet");
+    public (VerifierMode Mode, string Reason) Current => Volatile.Read(ref _last) is { } l ? (l.Mode, l.Reason) : (VerifierMode.Unknown, "Not checked yet");
 
     /// <summary>The mode, re-read when <paramref name="fresh"/> or the cache is older than 5 minutes.</summary>
     public async Task<(VerifierMode Mode, string Reason)> CheckAsync(bool fresh, CancellationToken ct)
@@ -48,7 +50,7 @@ public sealed class VerifierAuthority(IVerifierChain chain, VerifierOptions opti
             logger.LogInformation("Verifier: {Mode} ({Reason}).", result.Mode, result.Reason);
         }
 
-        _last = (result.Mode, result.Reason, time.GetUtcNow());
+        Volatile.Write(ref _last, new Checked(result.Mode, result.Reason, time.GetUtcNow()));
         return result;
     }
 
@@ -108,55 +110,47 @@ public sealed record ProbeTarget(string Node, string? Url, string? Problem);
 /// </summary>
 public sealed class TargetDirectory(IVerifierChain chain, VerifierStore store, HttpClient http, VerifierOptions options, ILogger logger, TimeProvider time)
 {
-    private readonly Dictionary<string, (string? Url, string? Problem, ulong Epoch, int Failures)> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string? Url, string? Problem, ulong Epoch, int Failures, long RetryAtMs)> _cache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A node with no usable directory isn't asked again for this long, so hung endpoints can't stall discovery.</summary>
+    public static readonly TimeSpan UnresolvedBackoff = TimeSpan.FromMinutes(5);
 
     public async Task<IReadOnlyList<ProbeTarget>> TargetsAsync(byte service, ulong epoch, CancellationToken ct)
     {
-        var active = await chain.ActiveAsync(service, ct);
-        var targets = new List<ProbeTarget>();
-        foreach (var node in active)
+        var now = time.GetUtcNow().ToUnixTimeMilliseconds();
+        var active = (await chain.ActiveAsync(service, ct)).DistinctBy(n => n.Node, StringComparer.OrdinalIgnoreCase)
+            .Where(n => options.IsLocalDev || !string.Equals(n.Node, options.NodeAddress, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // Resolved in parallel, each with its own timeout; unresolvable nodes back off instead of being retried every pass.
+        var stale = active.Where(n => !_cache.TryGetValue(n.Node, out var c)
+            || (c.Url is not null && (c.Epoch != epoch || c.Failures >= 3))
+            || (c.Url is null && now >= c.RetryAtMs)).ToList();
+        await Parallel.ForEachAsync(stale, new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = ct }, async (node, token) =>
         {
-            if (!options.IsLocalDev && string.Equals(node.Node, options.NodeAddress, StringComparison.OrdinalIgnoreCase))
+            var (url, problem) = await ResolveAsync(node.Node, node.Endpoint, service, token);
+            _cache[node.Node] = (url, problem, epoch, 0, url is null ? now + (long)UnresolvedBackoff.TotalMilliseconds : 0);
+            if (problem is not null)
             {
-                continue;
+                logger.LogDebug("Verifier: {Node} has no probe URL: {Problem}.", node.Node, problem);
             }
+        });
 
-            if (!_cache.TryGetValue(node.Node, out var cached) || cached.Epoch != epoch || cached.Failures >= 3 || cached.Url is null)
-            {
-                var (url, problem) = await ResolveAsync(node.Node, node.Endpoint, service, ct);
-                cached = (url, problem, epoch, 0);
-                _cache[node.Node] = cached;
-                if (problem is not null)
-                {
-                    logger.LogDebug("Verifier: {Node} has no probe URL: {Problem}.", node.Node, problem);
-                }
-            }
-
-            targets.Add(new ProbeTarget(node.Node, cached.Url, cached.Problem));
-        }
-
-        return targets;
+        return [.. active.Select(n => _cache.TryGetValue(n.Node, out var c) ? new ProbeTarget(n.Node, c.Url, c.Problem) : new ProbeTarget(n.Node, null, "not resolved yet"))];
     }
 
     /// <summary>Counts a connect failure: three in a row refetch the directory, so a moved gateway is found mid-epoch.</summary>
-    public void Failed(string node)
-    {
-        if (_cache.TryGetValue(node, out var c))
-        {
-            _cache[node] = c with { Failures = c.Failures + 1 };
-        }
-    }
+    public void Failed(string node) => _cache.AddOrUpdate(node, _ => (null, null, 0, 1, 0), (_, c) => c with { Failures = c.Failures + 1 });
 
-    public void Succeeded(string node)
-    {
-        if (_cache.TryGetValue(node, out var c) && c.Failures > 0)
-        {
-            _cache[node] = c with { Failures = 0 };
-        }
-    }
+    public void Succeeded(string node) => _cache.AddOrUpdate(node, _ => (null, null, 0, 0, 0), (_, c) => c with { Failures = 0 });
 
     private async Task<(string? Url, string? Problem)> ResolveAsync(string node, string primary, byte service, CancellationToken ct)
     {
+        if (!Uri.TryCreate(primary, UriKind.Absolute, out var primaryUri) || (!options.IsLocalDev && !await options.IsPublicTarget(primaryUri, ct)))
+        {
+            return (null, "the primary endpoint isn't a public URL");
+        }
+
         ServiceDirectory? directory;
         try
         {
@@ -166,7 +160,7 @@ public sealed class TargetDirectory(IVerifierChain chain, VerifierStore store, H
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            return (null, $"no service directory at {primary} ({ex.Message})");
+            return (null, $"no service directory at {primary} ({ex.GetType().Name})");
         }
 
         if (directory is null)
@@ -215,28 +209,45 @@ public sealed class TargetDirectory(IVerifierChain chain, VerifierStore store, H
             ip = ip.MapToIPv4();
         }
 
-        if (IPAddress.IsLoopback(ip) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Any) || ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6UniqueLocal)
+        if (IPAddress.IsLoopback(ip) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Any) || ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal
+            || ip.IsIPv6UniqueLocal || ip.IsIPv6Multicast)
         {
             return false;
         }
 
         if (ip.AddressFamily != AddressFamily.InterNetwork)
         {
-            return true;
+            var v6 = ip.GetAddressBytes();
+            return !(v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b); // 64:ff9b::/96 NAT64 reaches IPv4 space
         }
 
         var b = ip.GetAddressBytes();
         return !(b[0] == 10 || (b[0] == 172 && b[1] is >= 16 and <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254)
-            || (b[0] == 100 && b[1] is >= 64 and <= 127) || b[0] == 0);
+            || (b[0] == 100 && b[1] is >= 64 and <= 127) || b[0] == 0 || (b[0] == 198 && b[1] is 18 or 19) || b[0] >= 224);
     }
+}
+
+/// <summary>
+/// How the Verifier measures one Node Service (#225 arch §2): a new service adds a probe and nothing else.
+/// </summary>
+public interface IServiceProbe
+{
+    byte Service { get; }
+
+    Task<(ProbeOutcome Outcome, long LatencyMs)> ProbeAsync(ProbeTarget target, LocalKeyMetricAttestor? key, CancellationToken ct);
+
+    /// <summary>The service's own signed volume figure for an epoch, when it has one; null otherwise.</summary>
+    Task<EpochReportSignature.Report?> FigureAsync(ProbeTarget target, ulong epoch, CancellationToken ct);
 }
 
 /// <summary>
 /// Probes one Blob Gateway (#225 FR4): a fresh nonce, signed with the metric-signer key when there is one (the
 /// reserved lane), answered with <c>keccak(nonce ‖ canary)</c>; a 5 s budget.
 /// </summary>
-public sealed class BlobGatewayProbe(HttpClient http)
+public sealed class BlobGatewayProbe(HttpClient http) : IServiceProbe
 {
+    byte IServiceProbe.Service => Service;
+
     public const byte Service = 8;
 
     public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
@@ -252,8 +263,8 @@ public sealed class BlobGatewayProbe(HttpClient http)
 
         var nonce = ProbeChallenge.NewNonce();
         var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var digest = ProbeChallenge.Digest(target.Node, ts, nonce);
-        var signature = key?.SignDigest(digest) ?? new Nethereum.Signer.EthereumMessageSigner().Sign(digest, _anonymous);
+        var signature = key?.SignProbe(target.Node, ts, nonce)
+            ?? new Nethereum.Signer.EthereumMessageSigner().Sign(ProbeChallenge.Digest(target.Node, ts, nonce), _anonymous);
         using var request = new HttpRequestMessage(HttpMethod.Get, target.Url + ProbeChallenge.Path);
         request.Headers.Add(ProbeChallenge.Header, ProbeChallenge.Format(ts, nonce, signature));
 
@@ -358,5 +369,39 @@ public sealed class MonitorHealthGuard(HttpClient http, VerifierOptions options)
         {
             return false;
         }
+    }
+}
+
+/// <summary>
+/// HTTP for target nodes (#225, SSRF): no redirects, and off LocalDev every connection's resolved address is checked
+/// at connect time, so a public name that later resolves (or redirects) into private space is refused.
+/// </summary>
+public static class TargetHttp
+{
+    public static HttpClient Create(VerifierOptions options)
+    {
+        var handler = new SocketsHttpHandler { AllowAutoRedirect = false, PooledConnectionLifetime = TimeSpan.FromMinutes(5) };
+        if (!options.IsLocalDev)
+        {
+            handler.ConnectCallback = async (context, ct) =>
+            {
+                var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, ct);
+                var address = addresses.FirstOrDefault(TargetDirectory.IsPublic)
+                    ?? throw new HttpRequestException($"{context.DnsEndPoint.Host} doesn't resolve to a public address.");
+                var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                try
+                {
+                    await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), ct);
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            };
+        }
+
+        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
     }
 }
