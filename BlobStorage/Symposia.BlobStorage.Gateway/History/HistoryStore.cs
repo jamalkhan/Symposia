@@ -48,8 +48,35 @@ public sealed class HistoryStore
             );
             CREATE INDEX IF NOT EXISTS idx_history_object ON object_history (bucket, key, id);
             CREATE INDEX IF NOT EXISTS idx_history_ts ON object_history (ts_ms);
+            -- #221: one row per minute the gateway was up, for the uptime factor.
+            CREATE TABLE IF NOT EXISTS gateway_liveness (minute_ms INTEGER PRIMARY KEY);
+            -- #221: each epoch's factors, measured once, and the report's submission state.
+            CREATE TABLE IF NOT EXISTS epoch_report (
+                epoch        INTEGER PRIMARY KEY,
+                start_ms     INTEGER NOT NULL,
+                end_ms       INTEGER NOT NULL,
+                uptime_bps   INTEGER NOT NULL,
+                success_bps  INTEGER NOT NULL,
+                p95_ms       INTEGER NOT NULL,
+                bytes_served INTEGER NOT NULL,
+                requests     INTEGER NOT NULL,
+                state        TEXT NOT NULL,
+                signature    TEXT,
+                tx_hash      TEXT,
+                last_error   TEXT,
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                updated_ms   INTEGER NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
+
+        // #221: request duration, for the p95 latency factor. Rows written before this have none.
+        cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('object_history') WHERE name = 'duration_ms'";
+        if (Convert.ToInt64(cmd.ExecuteScalar()) == 0)
+        {
+            cmd.CommandText = "ALTER TABLE object_history ADD COLUMN duration_ms INTEGER";
+            cmd.ExecuteNonQuery();
+        }
     }
 
     /// <summary>The database file, for disk accounting.</summary>
@@ -68,16 +95,16 @@ public sealed class HistoryStore
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO object_history (ts_ms, operation, bucket, key, api, size_bytes, etag, cid, client_ip, access_key_id, tenant_id, user_agent, request_id, outcome, status)
-            VALUES ($ts, $op, $b, $k, $api, $size, $etag, $cid, $ip, $ak, $tenant, $ua, $rid, $outcome, $status)
+            INSERT INTO object_history (ts_ms, operation, bucket, key, api, size_bytes, etag, cid, client_ip, access_key_id, tenant_id, user_agent, request_id, outcome, status, duration_ms)
+            VALUES ($ts, $op, $b, $k, $api, $size, $etag, $cid, $ip, $ak, $tenant, $ua, $rid, $outcome, $status, $dur)
             """;
-        var integers = new HashSet<string> { "$ts", "$size", "$status" };
-        var p = new[] { "$ts", "$op", "$b", "$k", "$api", "$size", "$etag", "$cid", "$ip", "$ak", "$tenant", "$ua", "$rid", "$outcome", "$status" }
+        var integers = new HashSet<string> { "$ts", "$size", "$status", "$dur" };
+        var p = new[] { "$ts", "$op", "$b", "$k", "$api", "$size", "$etag", "$cid", "$ip", "$ak", "$tenant", "$ua", "$rid", "$outcome", "$status", "$dur" }
             .Select(n => cmd.Parameters.Add(n, integers.Contains(n) ? SqliteType.Integer : SqliteType.Text)).ToArray();
         foreach (var e in entries)
         {
             object?[] values = [e.Timestamp.ToUnixTimeMilliseconds(), e.Operation, e.Bucket, e.Key, e.Api, e.Size, e.Etag, e.Cid, e.ClientIp,
-                e.AccessKeyId, e.TenantId, e.UserAgent, e.RequestId, e.Outcome, e.Status];
+                e.AccessKeyId, e.TenantId, e.UserAgent, e.RequestId, e.Outcome, e.Status, e.DurationMs];
             for (var i = 0; i < p.Length; i++)
             {
                 p[i].Value = values[i] ?? DBNull.Value;
@@ -148,6 +175,119 @@ public sealed class HistoryStore
         cmd.Parameters.AddWithValue("$n", batch);
         return cmd.ExecuteNonQuery();
     }
+
+    /// <summary>Marks the minute containing <paramref name="now"/> as up (#221); idempotent.</summary>
+    public void RecordLiveness(DateTimeOffset now)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO gateway_liveness (minute_ms) VALUES ($m)";
+        cmd.Parameters.AddWithValue("$m", now.ToUnixTimeMilliseconds() / 60_000 * 60_000);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// The Blob Gateway factors over [<paramref name="startMs"/>, <paramref name="endMs"/>) (#221), in one read
+    /// transaction. Both range scans use <c>idx_history_ts</c>; the p95 sort over the range is a temp B-tree,
+    /// once per epoch, off the request path.
+    /// </summary>
+    public EpochFactors Aggregate(long startMs, long endMs)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction(deferred: true);
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.Parameters.AddWithValue("$s", startMs);
+        cmd.Parameters.AddWithValue("$e", endMs);
+
+        cmd.CommandText = """
+            SELECT COUNT(*), COALESCE(SUM(status >= 500), 0),
+                   COALESCE(SUM(CASE WHEN operation = 'view' AND status < 400 THEN size_bytes END), 0), COUNT(duration_ms)
+            FROM object_history WHERE ts_ms >= $s AND ts_ms < $e
+            """;
+        long requests, failures, bytes, timed;
+        using (var r = cmd.ExecuteReader())
+        {
+            r.Read();
+            (requests, failures, bytes, timed) = (r.GetInt64(0), r.GetInt64(1), r.GetInt64(2), r.GetInt64(3));
+        }
+
+        long p95 = 0;
+        if (timed > 0)
+        {
+            // Nearest rank: the ceil(0.95 n)-th smallest.
+            cmd.CommandText = "SELECT duration_ms FROM object_history WHERE ts_ms >= $s AND ts_ms < $e AND duration_ms IS NOT NULL ORDER BY duration_ms LIMIT 1 OFFSET $k";
+            cmd.Parameters.AddWithValue("$k", ((timed * 95) + 99) / 100 - 1);
+            p95 = Convert.ToInt64(cmd.ExecuteScalar());
+        }
+
+        cmd.CommandText = "SELECT COUNT(*) FROM gateway_liveness WHERE minute_ms >= $s AND minute_ms < $e";
+        var upMinutes = Convert.ToInt64(cmd.ExecuteScalar());
+        var epochMinutes = Math.Max(1, (endMs - startMs + 59_999) / 60_000);
+
+        tx.Commit();
+        return new EpochFactors(
+            UptimeBps: (uint)Math.Min(10_000, upMinutes * 10_000 / epochMinutes),
+            SuccessBps: requests == 0 ? 10_000u : (uint)((requests - failures) * 10_000 / requests),
+            P95Ms: p95,
+            BytesServed: bytes,
+            Requests: requests);
+    }
+
+    public EpochReportRow? GetEpochReport(ulong epoch)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms FROM epoch_report WHERE epoch = $e";
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        using var r = cmd.ExecuteReader();
+        return r.Read() ? ReadReport(r) : null;
+    }
+
+    /// <summary>The most recent epoch's report, for diagnostics.</summary>
+    public EpochReportRow? LatestEpochReport()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms FROM epoch_report ORDER BY epoch DESC LIMIT 1";
+        using var r = cmd.ExecuteReader();
+        return r.Read() ? ReadReport(r) : null;
+    }
+
+    public void SaveEpochReport(EpochReportRow row)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO epoch_report (epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms)
+            VALUES ($epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $state, $sig, $tx, $err, $attempts, $updated)
+            ON CONFLICT (epoch) DO UPDATE SET state = $state, signature = $sig, tx_hash = $tx, last_error = $err, attempts = $attempts, updated_ms = $updated
+            """;
+        object?[] values = [(long)row.Epoch, row.StartMs, row.EndMs, (long)row.Factors.UptimeBps, (long)row.Factors.SuccessBps, row.Factors.P95Ms,
+            row.Factors.BytesServed, row.Factors.Requests, row.State.ToString(), row.Signature, row.TxHash, row.LastError, row.Attempts, row.UpdatedMs];
+        string[] names = ["$epoch", "$s", "$e", "$up", "$ok", "$p95", "$bytes", "$n", "$state", "$sig", "$tx", "$err", "$attempts", "$updated"];
+        for (var i = 0; i < names.Length; i++)
+        {
+            cmd.Parameters.AddWithValue(names[i], values[i] ?? DBNull.Value);
+        }
+
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Deletes liveness minutes older than <paramref name="cutoff"/>.</summary>
+    public int DeleteLivenessOlderThan(DateTimeOffset cutoff)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM gateway_liveness WHERE minute_ms < $cutoff";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToUnixTimeMilliseconds());
+        return cmd.ExecuteNonQuery();
+    }
+
+    private static EpochReportRow ReadReport(SqliteDataReader r) => new(
+        (ulong)r.GetInt64(0), r.GetInt64(1), r.GetInt64(2),
+        new EpochFactors((uint)r.GetInt64(3), (uint)r.GetInt64(4), r.GetInt64(5), r.GetInt64(6), r.GetInt64(7)),
+        Enum.Parse<EpochReportState>(r.GetString(8)), Text(r, 9), Text(r, 10), Text(r, 11), r.GetInt32(12), r.GetInt64(13));
 
     /// <summary>The database's size on disk, including its WAL.</summary>
     public long SizeBytes => new[] { DatabasePath, DatabasePath + "-wal" }.Sum(f => File.Exists(f) ? new FileInfo(f).Length : 0);

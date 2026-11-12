@@ -17,7 +17,25 @@ public sealed record HistoryEntry(
     string? UserAgent,
     string RequestId,
     string Outcome,
-    int Status);
+    int Status,
+    long? DurationMs = null);
+
+/// <summary>One epoch's Blob Gateway factors (#221), in ScoringWeights order bar <see cref="Requests"/>.</summary>
+public sealed record EpochFactors(uint UptimeBps, uint SuccessBps, long P95Ms, long BytesServed, long Requests);
+
+/// <summary>Where an epoch's report is (#221). Terminal states are never revisited.</summary>
+public enum EpochReportState
+{
+    Measured,
+    Signed,
+    Submitted,
+    Terminal,
+    Skipped,
+}
+
+/// <summary>A persisted epoch report: factors measured once at epoch end, then its submission state.</summary>
+public sealed record EpochReportRow(ulong Epoch, long StartMs, long EndMs, EpochFactors Factors, EpochReportState State,
+    string? Signature, string? TxHash, string? LastError, int Attempts, long UpdatedMs);
 
 /// <summary>Operation types recorded per object.</summary>
 public static class HistoryOperation

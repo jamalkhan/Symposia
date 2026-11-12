@@ -14,3 +14,6 @@ public sealed class EpochLengthFunction : FunctionMessage;
 
 [Function("currentEpoch", "uint256")]
 public sealed class CurrentEpochFunction : FunctionMessage;
+
+[Function("acceptsReports", "bool")]
+public sealed class AcceptsReportsFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }

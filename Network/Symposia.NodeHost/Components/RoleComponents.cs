@@ -2,6 +2,7 @@ using Symposia.BlobStorage.Gateway;
 using Symposia.BlobStorage.StorageNode;
 using Symposia.Database.ComputeNode;
 using Symposia.NodeHost.Diagnostics;
+using Symposia.NodeHost.Settings;
 
 namespace Symposia.NodeHost.Components;
 
@@ -221,7 +222,7 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
     {
         var gateway = context.Settings.BlobGateway;
         var network = context.Network!;
-        return new Dictionary<string, string?>
+        var config = new Dictionary<string, string?>
         {
             ["Gateway:ListenPort"] = gateway.Port.ToString(),
             ["Gateway:Region"] = gateway.Region,
@@ -244,5 +245,26 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
             ["Gateway:Credentials:0:TenantId"] = "dev",
         };
+        AddServiceMetrics(config, context, network);
+        return config;
+    }
+
+    /// <summary>
+    /// LocalDev only (#221): the gateway self-signs its reward reports with the deployer key, which the LocalDev
+    /// deploy makes the metric signer. Other networks wait for the Network Monitor (#225).
+    /// </summary>
+    private static void AddServiceMetrics(IDictionary<string, string?> config, HostContext context, NetworkInfo network)
+    {
+        if (context.Settings.Network.Mode != NetworkMode.LocalDev || network.ChainId != Symposia.Network.Node.Staking.DevFunding.LocalDevChainId)
+        {
+            return;
+        }
+
+        config["Gateway:ServiceMetrics:Enabled"] = "true";
+        config["Gateway:ServiceMetrics:RpcUrl"] = network.RpcUrl;
+        config["Gateway:ServiceMetrics:RewardDistributorAddress"] = network.RewardDistributorAddress;
+        config["Gateway:ServiceMetrics:EpochControllerAddress"] = network.EpochControllerAddress;
+        config["Gateway:ServiceMetrics:StakingRegistryAddress"] = network.StakingRegistryAddress;
+        config["Gateway:ServiceMetrics:SignerPrivateKey"] = ChainComponent.AnvilDevKey;
     }
 }

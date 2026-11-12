@@ -3,6 +3,7 @@ using Symposia.Blockchain.Gateway.Nodes;
 using Symposia.Blockchain.Gateway.Rpc;
 using Symposia.Blockchain.Gateway.Sealing;
 using Symposia.Blockchain.Gateway.Staking;
+using Symposia.Blockchain.Gateway.Rewards;
 using Symposia.Blockchain.Gateway.Telemetry;
 using Symposia.Network.Node.Telemetry.Committee;
 
@@ -55,6 +56,7 @@ public static class GatewayApp
         app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
         app.MapNodeEndpoints();
         app.MapTelemetryRelay();
+        app.MapServiceMetricsRelay();
         if (gateway.RpcProxy.Enabled)
         {
             app.MapRpcProxy();

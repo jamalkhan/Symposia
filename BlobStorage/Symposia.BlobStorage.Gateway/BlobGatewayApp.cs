@@ -120,6 +120,8 @@ public static class BlobGatewayApp
 
         builder.Services.AddHostedService<NodeSourceSyncService>();
 
+        AddServiceMetrics(builder, gatewayConfig);
+
         // ── Kestrel: HTTP/1.1 for S3 clients ─────────────────────────────────────────
         // Production terminates TLS externally (load-balancer or sidecar). Cleartext HTTP/2 isn't
         // negotiated on a mixed listener anyway, and S3 SDKs speak HTTP/1.1 (issue #135).
@@ -203,6 +205,13 @@ public static class BlobGatewayApp
 
         AdminEndpoints.Map(app);
 
+        // Local diagnostics for the last epoch's reward report (#221 FR4); admin paths skip SigV4.
+        app.MapGet("/admin/service-metrics", (History.HistoryStore store) =>
+            store.LatestEpochReport() is { } r
+                ? Results.Ok(new { r.Epoch, State = r.State.ToString(), r.Factors.UptimeBps, r.Factors.SuccessBps, r.Factors.P95Ms, r.Factors.BytesServed,
+                    r.Factors.Requests, r.TxHash, r.LastError, r.Attempts })
+                : Results.NoContent());
+
         // ── S3 routes ─────────────────────────────────────────────────────────────────
 
         // ── Symposia-native API (#203) ────────────────────────────────────────────────
@@ -216,6 +225,67 @@ public static class BlobGatewayApp
         ObjectEndpoints.Map(app);
         BucketEndpoints.Map(app);
         return app;
+    }
+
+    /// <summary>
+    /// The Blob Gateway's reward reporter (#221). Needs the chain, the relay and the node key; without them it stays
+    /// off with one warning. Self-signing is LocalDev only: configured anywhere else, the gateway refuses to start.
+    /// </summary>
+    private static void AddServiceMetrics(WebApplicationBuilder builder, GatewayOptions gateway)
+    {
+        var o = gateway.ServiceMetrics;
+        if (!o.Enabled)
+        {
+            return;
+        }
+
+        if (gateway.ChainId != Symposia.Network.Node.Staking.DevFunding.LocalDevChainId)
+        {
+            throw new Symposia.Network.Node.Rewards.MetricSignerConfigurationException(
+                $"Gateway:ServiceMetrics self-signs reports, which only runs on LocalDev (chain {Symposia.Network.Node.Staking.DevFunding.LocalDevChainId}); this gateway is on chain {gateway.ChainId}.");
+        }
+
+        string[] missing = [.. new[]
+        {
+            ("RpcUrl", o.RpcUrl), ("RewardDistributorAddress", o.RewardDistributorAddress), ("EpochControllerAddress", o.EpochControllerAddress),
+            ("StakingRegistryAddress", o.StakingRegistryAddress), ("SignerPrivateKey", o.SignerPrivateKey),
+            ("BlockchainGatewayUrl", gateway.BlockchainGatewayUrl), ("NodeIdentityKeyPath", gateway.NodeIdentityKeyPath),
+        }.Where(p => string.IsNullOrWhiteSpace(p.Item2)).Select(p => p.Item1)];
+        if (missing.Length > 0)
+        {
+            builder.Services.AddHostedService(sp => new LogOnce(sp.GetRequiredService<ILogger<Rewards.ServiceMetricsReporter>>(),
+                $"Service metrics reporting is off: missing {string.Join(", ", missing)}."));
+            return;
+        }
+
+        builder.Services.Configure<Rewards.ServiceMetricsOptions>(builder.Configuration.GetSection("Gateway:ServiceMetrics"));
+        builder.Services.AddSingleton<Rewards.IServiceMetricsChain>(new Rewards.NethereumServiceMetricsChain(o));
+        builder.Services.AddHttpClient<Rewards.IServiceMetricsRelay, Rewards.HttpServiceMetricsRelay>(http =>
+        {
+            http.BaseAddress = new Uri(gateway.BlockchainGatewayUrl);
+            http.Timeout = TimeSpan.FromMinutes(3); // the relay waits for the receipt
+        });
+        builder.Services.AddHostedService(sp =>
+        {
+            var identity = new NodeIdentity(Microsoft.Extensions.Options.Options.Create(new NodeNetworkOptions { NodeIdentityKeyPath = gateway.NodeIdentityKeyPath }));
+            identity.LoadExisting();
+            return new Rewards.ServiceMetricsReporter(sp.GetRequiredService<History.HistoryStore>(), sp.GetRequiredService<History.HistoryRecorder>(),
+                sp.GetRequiredService<Rewards.IServiceMetricsChain>(), sp.GetRequiredService<Rewards.IServiceMetricsRelay>(),
+                chainId => new Symposia.Network.Node.Rewards.LocalDevSelfSigner(o.SignerPrivateKey, chainId), identity.NodeId,
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<Rewards.ServiceMetricsOptions>>(),
+                sp.GetRequiredService<ILogger<Rewards.ServiceMetricsReporter>>());
+        });
+    }
+
+    private sealed class LogOnce(ILogger logger, string message) : IHostedService
+    {
+        public Task StartAsync(CancellationToken ct)
+        {
+            logger.LogWarning("{Message}", message);
+            return Task.CompletedTask;
+        }
+
+        public Task StopAsync(CancellationToken ct) => Task.CompletedTask;
     }
 
     public static WebApplication Create(string[] args) => Create(new WebApplicationOptions { Args = args });
