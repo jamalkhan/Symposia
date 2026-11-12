@@ -15,6 +15,7 @@ namespace Symposia.NodeHost.Components;
 public sealed class NetworkComponent : HostComponent
 {
     private IHost? _host;
+    private HostContext? _context; // OnStopAsync isn't given the context; kept only to clear HostPeers (#207)
 
     public override string Name => "network";
 
@@ -49,12 +50,20 @@ public sealed class NetworkComponent : HostComponent
         _host = builder.Build();
         _host.Services.GetRequiredService<NodeIdentity>().EnsureLoadedOrGenerated();
         await _host.StartAsync(ct);
+        _context = context;
+        context.HostPeers = _host.Services.GetRequiredService<PeerTable>();
     }
 
     protected override async Task OnStopAsync()
     {
         var host = _host;
         _host = null;
+        if (_context is not null)
+        {
+            _context.HostPeers = null;
+            _context = null;
+        }
+
         if (host is not null)
         {
             await host.StopAsync();
