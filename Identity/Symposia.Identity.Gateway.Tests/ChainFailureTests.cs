@@ -10,7 +10,7 @@ public class ChainFailureTests
     {
         var message = EthereumChainClient.FailureMessage("issueCapability", "CapabilityRegistry: no active consent", 107_186, 107_186);
 
-        Assert.Equal("issueCapability ran out of gas (107186 of 107186 used)", message);
+        Assert.Equal("issueCapability used its whole gas limit (107186 of 107186), likely out of gas", message);
     }
 
     [Theory]
@@ -22,4 +22,8 @@ public class ChainFailureTests
     [Fact]
     public void FailureMessage_UnknownLimit_KeepsTheRevertMessage() =>
         Assert.Equal("X reverted", EthereumChainClient.FailureMessage("X", "X reverted", 41_000, null));
+
+    [Fact]
+    public void FailureMessage_UsedMoreThanTheLimit_IsOutOfGas() =>
+        Assert.Contains("likely out of gas", EthereumChainClient.FailureMessage("X", "X reverted", 107_187, 107_186));
 }

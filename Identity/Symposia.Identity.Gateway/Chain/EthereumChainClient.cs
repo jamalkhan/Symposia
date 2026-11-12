@@ -162,14 +162,23 @@ public sealed class EthereumChainClient : IChainClient
 
     private async Task<string> FailureMessageAsync(TransactionReceipt receipt, string name, string revertMessage)
     {
-        var tx = await _web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
-        return FailureMessage(name, revertMessage, receipt.GasUsed.Value, tx?.Gas?.Value);
+        try
+        {
+            var tx = await _web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
+            return FailureMessage(name, revertMessage, receipt.GasUsed.Value, tx?.Gas?.Value);
+        }
+        catch (Exception)
+        {
+            // Only the wording depends on this lookup; it must not turn the failure into a different error.
+            return revertMessage;
+        }
     }
 
     /// <summary>
-    /// The error for a failed receipt: out of gas when it used its whole limit (#219), so a gas problem isn't reported
-    /// as the caller's consent state; otherwise <paramref name="revertMessage"/>.
+    /// The error for a failed receipt: likely out of gas when it used its whole limit (#219), so a gas problem isn't
+    /// reported as the caller's consent state; otherwise <paramref name="revertMessage"/>. An INVALID opcode also burns
+    /// the whole limit, hence "likely"; an out-of-gas inside a nested call leaves gas over and reads as a revert.
     /// </summary>
     internal static string FailureMessage(string name, string revertMessage, BigInteger gasUsed, BigInteger? gasLimit) =>
-        GasHeadroom.RanOutOfGas(gasUsed, gasLimit) ? $"{name} ran out of gas ({gasUsed} of {gasLimit} used)" : revertMessage;
+        GasHeadroom.RanOutOfGas(gasUsed, gasLimit) ? $"{name} used its whole gas limit ({gasUsed} of {gasLimit}), likely out of gas" : revertMessage;
 }

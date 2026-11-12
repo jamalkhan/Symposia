@@ -6,9 +6,7 @@
     <ProjectReference Include="..\..\Blockchain\Symposia.Blockchain.Contracts\Symposia.Blockchain.Contracts.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Nethereum.Web3" Version="4.29.0" />
-  </ItemGroup>
+  <!-- Nethereum.Web3 comes through Symposia.Blockchain.Contracts, so the two can't drift apart. -->
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
