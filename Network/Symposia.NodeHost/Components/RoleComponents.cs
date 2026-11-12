@@ -137,7 +137,8 @@ public sealed class ComputeRoleComponent : WebAppComponent
         app.Use(async (http, next) =>
         {
             var remote = http.Connection.RemoteIpAddress;
-            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && http.Request.Path != "/v1/peer/handshake" && http.Request.Path != NodeHealth.Path)
+            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && http.Request.Path != "/v1/peer/handshake" && http.Request.Path != NodeHealth.Path
+                && http.Request.Path != Symposia.Network.Node.Discovery.ServiceDirectory.Path)
             {
                 http.Response.StatusCode = StatusCodes.Status404NotFound;
                 return;
@@ -245,17 +246,17 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
             ["Gateway:Credentials:0:TenantId"] = "dev",
         };
-        AddServiceMetrics(config, context, network);
+        AddServiceMetrics(config, network);
         return config;
     }
 
     /// <summary>
-    /// LocalDev only (#221): the gateway self-signs its reward reports with the deployer key, which the LocalDev
-    /// deploy makes the metric signer. Other networks wait for the Network Monitor (#225).
+    /// The gateway measures its own epochs and serves the Verifier's probe and signed epoch figure (#221/#225), on
+    /// every network whose reward contracts are known. It never signs a metric report: the Verifier role does.
     /// </summary>
-    private static void AddServiceMetrics(IDictionary<string, string?> config, HostContext context, NetworkInfo network)
+    private static void AddServiceMetrics(IDictionary<string, string?> config, NetworkInfo network)
     {
-        if (context.Settings.Network.Mode != NetworkMode.LocalDev || network.ChainId != Symposia.Network.Node.Staking.DevFunding.LocalDevChainId)
+        if (string.IsNullOrEmpty(network.RpcUrl) || string.IsNullOrEmpty(network.RewardDistributorAddress) || string.IsNullOrEmpty(network.EpochControllerAddress))
         {
             return;
         }
@@ -264,7 +265,5 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
         config["Gateway:ServiceMetrics:RpcUrl"] = network.RpcUrl;
         config["Gateway:ServiceMetrics:RewardDistributorAddress"] = network.RewardDistributorAddress;
         config["Gateway:ServiceMetrics:EpochControllerAddress"] = network.EpochControllerAddress;
-        config["Gateway:ServiceMetrics:StakingRegistryAddress"] = network.StakingRegistryAddress;
-        config["Gateway:ServiceMetrics:SignerPrivateKey"] = ChainComponent.AnvilDevKey;
     }
 }

@@ -24,9 +24,11 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
 
     public BlobGatewayRoleComponent BlobGateway { get; } = new();
 
+    public VerifierRoleComponent Verifier { get; } = new();
+
     public HostContext Context => context;
 
-    public IReadOnlyList<HostComponent> All => [Chain, Gateway, Network, Storage, Compute, BlobGateway];
+    public IReadOnlyList<HostComponent> All => [Chain, Gateway, Network, Storage, Compute, BlobGateway, Verifier];
 
     public async Task StartAllAsync(CancellationToken ct)
     {
@@ -158,6 +160,18 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         if (Changed(previous.BlobGateway, next.BlobGateway) || (next.BlobGateway.Enabled && Changed(previous.Discovery, next.Discovery)))
         {
             affected.Add(BlobGateway);
+        }
+
+        // The primary role serves the signed service directory, which lists the gateway's URL (#225).
+        if (Changed(previous.BlobGateway, next.BlobGateway) && !affected.Contains(Storage) && !affected.Contains(Compute)
+            && (next.Storage.Enabled ? Storage : next.Compute.Enabled ? (HostComponent)Compute : null) is { } primary)
+        {
+            affected.Add(primary);
+        }
+
+        if (Changed(previous.Verifier, next.Verifier))
+        {
+            affected.Add(Verifier);
         }
 
         return affected;

@@ -100,6 +100,11 @@ public sealed class HistoryRecorder : BackgroundService
 
     public void Record(HistoryEntry entry)
     {
+        if (entry.Bucket.StartsWith(".symposia-", StringComparison.Ordinal))
+        {
+            return; // reserved system buckets (the probe canary, #225) are never tenant history
+        }
+
         if (_queue.Writer.TryWrite(entry))
         {
             return;

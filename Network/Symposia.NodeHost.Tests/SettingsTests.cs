@@ -151,6 +151,18 @@ public sealed class SettingsTests : IDisposable
         gatewayDiscoveryNext.Discovery.IntervalSeconds = 30;
         Assert.Equal([supervisor.Network, supervisor.BlobGateway], supervisor.Affected(gatewayDiscovery, gatewayDiscoveryNext));
 
+        // #225: the primary role serves the signed service directory listing the gateway, so it restarts too.
+        var withStorage = HostSettings.Defaults(0);
+        withStorage.Storage.Enabled = true;
+        var withStorageGateway = HostSettings.Defaults(0);
+        withStorageGateway.Storage.Enabled = true;
+        withStorageGateway.BlobGateway.Enabled = true;
+        Assert.Equal([supervisor.BlobGateway, supervisor.Storage], supervisor.Affected(withStorage, withStorageGateway).OrderBy(c => c.Name));
+
+        var verifier = HostSettings.Defaults(0);
+        verifier.Verifier.Enabled = true;
+        Assert.Equal([supervisor.Verifier], supervisor.Affected(before, verifier));
+
         // Review (Carl 5): a change that doesn't move the primary endpoint leaves the network alone.
         var capacity = HostSettings.Defaults(0);
         capacity.Storage.Enabled = true;

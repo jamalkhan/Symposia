@@ -304,6 +304,15 @@ public static class UiApp
             return Results.File(System.Text.Encoding.UTF8.GetBytes(csv), "text/csv", "symposia-ledger.csv");
         });
 
+        // The Verifier role's card (#225 FR7): mode, targets, last probes, recent reports. In-memory plus one small read.
+        api.MapGet("/verifier", async (CancellationToken ct) =>
+        {
+            var component = supervisor.Verifier;
+            return component.Engine is { } engine
+                ? Results.Ok(new { status = component.Status.ToString(), reason = component.Reason, snapshot = await engine.SnapshotAsync(ct) })
+                : Results.Ok(new { status = component.Status.ToString(), reason = component.Reason, snapshot = (object?)null });
+        });
+
         // Public earnings breakdown of every Node Service (issue #159).
         api.MapGet("/node-services", () => Results.Ok(ServiceCatalog.NodeServiceCatalog.All));
 

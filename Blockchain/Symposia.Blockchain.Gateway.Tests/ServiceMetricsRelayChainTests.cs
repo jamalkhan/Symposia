@@ -10,7 +10,7 @@ using Wire = Symposia.Network.Node.Rewards.ServiceMetricsRelayWire;
 namespace Symposia.Blockchain.Gateway.Tests;
 
 /// <summary>
-/// #221: a Blob Gateway report signed by the LocalDev self-signer (the deployer, which DeployRewards makes the
+/// #221/#225: a Blob Gateway report signed with the metric-signer key (the deployer, which DeployRewards makes the
 /// metric signer) is accepted by the real RewardDistributor through the relay, so the C# digest matches the
 /// contract's. Bad signatures and factor counts come back 409, terminal, and spend nothing.
 /// </summary>
@@ -46,7 +46,7 @@ public sealed class ServiceMetricsRelayChainTests(RewardsChainFixture chain) : I
         await using var gateway = Gateway();
         var epoch = await CurrentEpochAsync();
         var report = Report(epoch, 9_500, 9_990, 42, 1_000_000);
-        var signer = new LocalDevSelfSigner(RewardsChainFixture.DeployerKey, 31337);
+        var signer = new LocalKeyMetricAttestor(new Nethereum.Signer.EthECKey(RewardsChainFixture.DeployerKey));
 
         var response = await gateway.CreateClient().PostAsJsonAsync(Wire.Path, Wire.Request.From(report, await signer.AttestAsync(report, default)));
 
@@ -63,7 +63,7 @@ public sealed class ServiceMetricsRelayChainTests(RewardsChainFixture chain) : I
     {
         await using var gateway = Gateway();
         var report = Report(await CurrentEpochAsync(), 9_000, 9_000, 10, 10) with { Node = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65" }; // anvil #4
-        var request = Wire.Request.From(report, await new LocalDevSelfSigner(RewardsChainFixture.DeployerKey, 31337).AttestAsync(report, default));
+        var request = Wire.Request.From(report, await new LocalKeyMetricAttestor(new Nethereum.Signer.EthECKey(RewardsChainFixture.DeployerKey)).AttestAsync(report, default));
         var client = gateway.CreateClient();
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(Wire.Path, request)).StatusCode);
 
@@ -78,7 +78,7 @@ public sealed class ServiceMetricsRelayChainTests(RewardsChainFixture chain) : I
     {
         await using var gateway = Gateway();
         var report = Report(await CurrentEpochAsync(), 1, 2, 3, 4);
-        var stranger = new LocalDevSelfSigner(RewardsChainFixture.NodeKey, 31337);
+        var stranger = new LocalKeyMetricAttestor(new Nethereum.Signer.EthECKey(RewardsChainFixture.NodeKey));
 
         var response = await gateway.CreateClient().PostAsJsonAsync(Wire.Path, Wire.Request.From(report, await stranger.AttestAsync(report, default)));
 
@@ -91,7 +91,7 @@ public sealed class ServiceMetricsRelayChainTests(RewardsChainFixture chain) : I
     {
         await using var gateway = Gateway();
         var report = Report(await CurrentEpochAsync(), 1, 2, 3) with { Node = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc" }; // anvil #5: no report yet
-        var signer = new LocalDevSelfSigner(RewardsChainFixture.DeployerKey, 31337);
+        var signer = new LocalKeyMetricAttestor(new Nethereum.Signer.EthECKey(RewardsChainFixture.DeployerKey));
 
         var response = await gateway.CreateClient().PostAsJsonAsync(Wire.Path, Wire.Request.From(report, await signer.AttestAsync(report, default)));
 
@@ -110,16 +110,9 @@ public sealed class ServiceMetricsRelayChainTests(RewardsChainFixture chain) : I
     }
 
     [Fact]
-    public void SelfSigner_RefusesAnyChainButLocalDev()
-    {
-        var ex = Assert.Throws<MetricSignerConfigurationException>(() => new LocalDevSelfSigner(RewardsChainFixture.DeployerKey, 84532));
-        Assert.Contains("only runs on LocalDev", ex.Message);
-    }
-
-    [Fact]
     public async Task Digest_RecoversToTheSigner()
     {
-        var signer = new LocalDevSelfSigner(RewardsChainFixture.DeployerKey, 31337);
+        var signer = new LocalKeyMetricAttestor(new Nethereum.Signer.EthECKey(RewardsChainFixture.DeployerKey));
         var report = Report(7, 1, 2, 3, 4);
 
         var attestation = await signer.AttestAsync(report, default);

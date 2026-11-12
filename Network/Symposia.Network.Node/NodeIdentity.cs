@@ -139,6 +139,14 @@ public sealed class NodeIdentity
     /// </summary>
     public byte[] Sign(byte[] digest) => Eip712NodeRegistrySigner.Sign(Key, digest);
 
+    /// <summary>This gateway's own bytes-served figure for an epoch, for the Verifier (#225 FR3.4).</summary>
+    public Rewards.EpochReportSignature.Report SignEpochReport(ulong chainId, string distributor, ulong epoch, long bytesServed, long requests) =>
+        Rewards.EpochReportSignature.Sign(Key, chainId, distributor, epoch, bytesServed, requests);
+
+    /// <summary>Where this node's services listen, for the Verifier's discovery (#225 FR2.2).</summary>
+    public Discovery.ServiceDirectory SignServiceDirectory(ulong chainId, string nodeRegistry, IEnumerable<Discovery.ServiceDirectory.Entry> services, DateTimeOffset now) =>
+        Discovery.ServiceDirectory.Sign(Key, chainId, nodeRegistry, services, now);
+
     /// <summary>Signs a LocalDev funding or verification request (issue #200).</summary>
     public string SignDevFunding(byte[] digest) => Staking.DevFunding.Sign(Key, digest);
 

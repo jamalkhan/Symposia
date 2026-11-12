@@ -66,6 +66,11 @@ public abstract class WebAppComponent : HostComponent
         }, context);
 
         Secure(_app);
+        if (ServesNodeHealth && context.Network is { } network)
+        {
+            MapServiceDirectory(_app, context, network);
+        }
+
         if (context.Health is { } health && ServesNodeHealth)
         {
             // Public, read-only health summary peers poll for their Network tab.
@@ -81,6 +86,36 @@ public abstract class WebAppComponent : HostComponent
 
         await _app.StartAsync(ct);
         StartLocalDevStaking(context);
+    }
+
+    /// <summary>
+    /// The node-signed list of where this host's Node Services listen (#225 FR2.2), on the primary endpoint the
+    /// registry holds, so the Verifier can find the gateway without trusting anyone else. Re-signed every 6 hours.
+    /// </summary>
+    private static void MapServiceDirectory(WebApplication app, HostContext context, NetworkInfo network)
+    {
+        var identity = new Symposia.Network.Node.NodeIdentity(Microsoft.Extensions.Options.Options.Create(
+            new Symposia.Network.Node.NodeNetworkOptions { NodeIdentityKeyPath = context.Paths.NodeKey }));
+        identity.LoadExisting();
+        var gateway = context.Settings.BlobGateway;
+        Symposia.Network.Node.Discovery.ServiceDirectory.Entry[] services = gateway.Enabled
+            ? [new(8, HostContext.EndpointFor(gateway.AdvertisedEndpoint, gateway.Port))]
+            : [];
+        Symposia.Network.Node.Discovery.ServiceDirectory? signed = null;
+        var gate = new object();
+        app.MapGet(Symposia.Network.Node.Discovery.ServiceDirectory.Path, () =>
+        {
+            lock (gate)
+            {
+                var now = DateTimeOffset.UtcNow;
+                if (signed is null || now.ToUnixTimeSeconds() > signed.IssuedAt + (6 * 3600))
+                {
+                    signed = identity.SignServiceDirectory(network.ChainId, network.NodeRegistryAddress, services, now);
+                }
+
+                return Results.Ok(signed);
+            }
+        });
     }
 
     /// <summary>On a LocalDev network, asks the host's shared staker to stake this role's Node Service (#200).</summary>

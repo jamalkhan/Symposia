@@ -205,13 +205,15 @@ public static class BlobGatewayApp
 
         AdminEndpoints.Map(app);
 
-        // Local diagnostics for the last epoch's reward report (#221 FR4); admin paths skip SigV4.
+        // Local diagnostics for the last epoch this gateway measured (#221 FR4); admin paths skip SigV4.
         app.MapGet("/admin/service-metrics", (HttpContext ctx, History.HistoryStore store) =>
             ctx.Connection.RemoteIpAddress is not { } ip || !System.Net.IPAddress.IsLoopback(ip) ? Results.NotFound()
-            : store.LatestEpochReport() is { } r
-                ? Results.Ok(new { r.Epoch, State = r.State.ToString(), r.Factors.UptimeBps, r.Factors.SuccessBps, r.Factors.P95Ms, r.Factors.BytesServed,
-                    r.Factors.Requests, r.TxHash, r.LastError, r.Attempts })
+            : store.LatestMeasurement() is { } m
+                ? Results.Ok(new { m.Epoch, m.Factors.UptimeBps, m.Factors.SuccessBps, m.Factors.P95Ms, m.Factors.BytesServed, m.Factors.Requests })
                 : Results.NoContent());
+
+        // What the Verifier measures this gateway through (#225); /healthz paths skip SigV4 and history.
+        Rewards.ProbeEndpoints.Map(app, trustedProxies);
 
         // ── S3 routes ─────────────────────────────────────────────────────────────────
 
@@ -229,53 +231,42 @@ public static class BlobGatewayApp
     }
 
     /// <summary>
-    /// The Blob Gateway's reward reporter (#221). Needs the chain, the relay and the node key; without them it stays
-    /// off with one warning. Self-signing is LocalDev only: configured anywhere else, the gateway refuses to start.
+    /// What the Verifier measures this gateway through (#225): the probe canary and endpoints need the node key; the
+    /// epoch recorder, the signed epoch figure and the probe's reserved lane need the chain. Without them each part
+    /// stays off with one warning. The gateway never signs a metric report.
     /// </summary>
     private static void AddServiceMetrics(WebApplicationBuilder builder, GatewayOptions gateway)
     {
         var o = gateway.ServiceMetrics;
+        if (!string.IsNullOrWhiteSpace(gateway.NodeIdentityKeyPath))
+        {
+            builder.Services.AddSingleton(_ =>
+            {
+                var identity = new NodeIdentity(Microsoft.Extensions.Options.Options.Create(new NodeNetworkOptions { NodeIdentityKeyPath = gateway.NodeIdentityKeyPath }));
+                identity.LoadExisting();
+                return identity;
+            });
+            builder.Services.AddHostedService<Rewards.CanaryService>();
+        }
+
+        builder.Services.AddSingleton(sp => new Rewards.ProbeLimiter(sp.GetService<Rewards.IServiceMetricsChain>(), sp.GetRequiredService<ILogger<Rewards.ProbeLimiter>>()));
+        builder.Services.Configure<Rewards.ServiceMetricsOptions>(builder.Configuration.GetSection("Gateway:ServiceMetrics"));
         if (!o.Enabled)
         {
             return;
         }
 
-        if (gateway.ChainId != Symposia.Network.Node.Staking.DevFunding.LocalDevChainId)
-        {
-            throw new Symposia.Network.Node.Rewards.MetricSignerConfigurationException(
-                $"Gateway:ServiceMetrics self-signs reports, which only runs on LocalDev (chain {Symposia.Network.Node.Staking.DevFunding.LocalDevChainId}); this gateway is on chain {gateway.ChainId}.");
-        }
-
-        string[] missing = [.. new[]
-        {
-            ("RpcUrl", o.RpcUrl), ("RewardDistributorAddress", o.RewardDistributorAddress), ("EpochControllerAddress", o.EpochControllerAddress),
-            ("StakingRegistryAddress", o.StakingRegistryAddress), ("SignerPrivateKey", o.SignerPrivateKey),
-            ("BlockchainGatewayUrl", gateway.BlockchainGatewayUrl), ("NodeIdentityKeyPath", gateway.NodeIdentityKeyPath),
-        }.Where(p => string.IsNullOrWhiteSpace(p.Item2)).Select(p => p.Item1)];
+        string[] missing = [.. new[] { ("RpcUrl", o.RpcUrl), ("RewardDistributorAddress", o.RewardDistributorAddress), ("EpochControllerAddress", o.EpochControllerAddress) }
+            .Where(p => string.IsNullOrWhiteSpace(p.Item2)).Select(p => p.Item1)];
         if (missing.Length > 0)
         {
-            builder.Services.AddHostedService(sp => new LogOnce(sp.GetRequiredService<ILogger<Rewards.ServiceMetricsReporter>>(),
-                $"Service metrics reporting is off: missing {string.Join(", ", missing)}."));
+            builder.Services.AddHostedService(sp => new LogOnce(sp.GetRequiredService<ILogger<Rewards.EpochFactorRecorder>>(),
+                $"Epoch measurement is off: missing Gateway:ServiceMetrics {string.Join(", ", missing)}."));
             return;
         }
 
-        builder.Services.Configure<Rewards.ServiceMetricsOptions>(builder.Configuration.GetSection("Gateway:ServiceMetrics"));
         builder.Services.AddSingleton<Rewards.IServiceMetricsChain>(new Rewards.NethereumServiceMetricsChain(o));
-        builder.Services.AddHttpClient<Rewards.IServiceMetricsRelay, Rewards.HttpServiceMetricsRelay>(http =>
-        {
-            http.BaseAddress = new Uri(gateway.BlockchainGatewayUrl);
-            http.Timeout = TimeSpan.FromMinutes(3); // the relay waits for the receipt
-        });
-        builder.Services.AddHostedService(sp =>
-        {
-            var identity = new NodeIdentity(Microsoft.Extensions.Options.Options.Create(new NodeNetworkOptions { NodeIdentityKeyPath = gateway.NodeIdentityKeyPath }));
-            identity.LoadExisting();
-            return new Rewards.ServiceMetricsReporter(sp.GetRequiredService<History.HistoryStore>(), sp.GetRequiredService<History.HistoryRecorder>(),
-                sp.GetRequiredService<Rewards.IServiceMetricsChain>(), sp.GetRequiredService<Rewards.IServiceMetricsRelay>(),
-                chainId => new Symposia.Network.Node.Rewards.LocalDevSelfSigner(o.SignerPrivateKey, chainId), identity.NodeId,
-                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<Rewards.ServiceMetricsOptions>>(),
-                sp.GetRequiredService<ILogger<Rewards.ServiceMetricsReporter>>());
-        });
+        builder.Services.AddHostedService<Rewards.EpochFactorRecorder>();
     }
 
     private sealed class LogOnce(ILogger logger, string message) : IHostedService

@@ -1,13 +1,25 @@
-using System.Net;
-using System.Net.Http.Json;
 using System.Numerics;
+using Nethereum.Util;
 using Nethereum.Web3;
 using Symposia.Blockchain.Contracts;
-using Wire = Symposia.Network.Node.Rewards.ServiceMetricsRelayWire;
 
 namespace Symposia.BlobStorage.Gateway.Rewards;
 
-/// <summary>The chain reads the service-metrics reporter needs (#221); read-only, never signs or spends gas.</summary>
+/// <summary>Where the gateway reads epochs and the metric signer (#221/#225). Set by the Node Host on every network.</summary>
+public sealed class ServiceMetricsOptions
+{
+    public bool Enabled { get; set; }
+
+    public string RpcUrl { get; set; } = "";
+
+    public string RewardDistributorAddress { get; set; } = "";
+
+    public string EpochControllerAddress { get; set; } = "";
+
+    public int PollSeconds { get; set; } = 15;
+}
+
+/// <summary>The chain reads the gateway's reward plumbing needs; read-only, never signs or spends gas.</summary>
 public interface IServiceMetricsChain
 {
     Task<ulong> ChainIdAsync(CancellationToken ct);
@@ -17,22 +29,18 @@ public interface IServiceMetricsChain
     /// <summary>The epoch's start, unix seconds.</summary>
     Task<long> EpochStartAsync(ulong epoch, CancellationToken ct);
 
-    Task<bool> AcceptsReportsAsync(ulong epoch, CancellationToken ct);
-
-    Task<bool> IsActiveAsync(string node, byte service, CancellationToken ct);
-
-    /// <summary>Whether <c>metricOf(epoch, accountOf(node, service)).submitted</c>: a report already landed.</summary>
-    Task<bool> SubmittedAsync(ulong epoch, string node, byte service, CancellationToken ct);
+    /// <summary><c>reward.metric.signer</c>: whose probes get the reserved lane (#225).</summary>
+    Task<string> MetricSignerAsync(CancellationToken ct);
 }
 
 public sealed class NethereumServiceMetricsChain(ServiceMetricsOptions options) : IServiceMetricsChain
 {
-    /// <summary><c>INodeRegistry.NodeStatus.Active</c>.</summary>
-    private const byte Active = 2;
+    private static readonly byte[] MetricSignerKey = Sha3Keccack.Current.CalculateHash(System.Text.Encoding.UTF8.GetBytes("reward.metric.signer"));
 
     private readonly Web3 _web3 = new(options.RpcUrl);
+    private ulong? _chainId;
 
-    public async Task<ulong> ChainIdAsync(CancellationToken ct) => (ulong)(await _web3.Eth.ChainId.SendRequestAsync()).Value;
+    public async Task<ulong> ChainIdAsync(CancellationToken ct) => _chainId ??= (ulong)(await _web3.Eth.ChainId.SendRequestAsync()).Value;
 
     public async Task<ulong> CurrentEpochAsync(CancellationToken ct) => (ulong)await _web3.Eth.GetContractQueryHandler<CurrentEpochFunction>()
         .QueryAsync<BigInteger>(options.EpochControllerAddress, new CurrentEpochFunction());
@@ -40,57 +48,9 @@ public sealed class NethereumServiceMetricsChain(ServiceMetricsOptions options) 
     public async Task<long> EpochStartAsync(ulong epoch, CancellationToken ct) => (long)await _web3.Eth.GetContractQueryHandler<EpochStartFunction>()
         .QueryAsync<BigInteger>(options.EpochControllerAddress, new EpochStartFunction { Epoch = epoch });
 
-    public Task<bool> AcceptsReportsAsync(ulong epoch, CancellationToken ct) => _web3.Eth.GetContractQueryHandler<AcceptsReportsFunction>()
-        .QueryAsync<bool>(options.EpochControllerAddress, new AcceptsReportsFunction { Epoch = epoch });
-
-    public async Task<bool> IsActiveAsync(string node, byte service, CancellationToken ct) => await _web3.Eth.GetContractQueryHandler<ServiceStatusOfFunction>()
-        .QueryAsync<byte>(options.StakingRegistryAddress, new ServiceStatusOfFunction { Node = node, Service = service }) == Active;
-
-    public async Task<bool> SubmittedAsync(ulong epoch, string node, byte service, CancellationToken ct)
+    public async Task<string> MetricSignerAsync(CancellationToken ct)
     {
-        var account = await _web3.Eth.GetContractQueryHandler<AccountOfFunction>()
-            .QueryAsync<string>(options.RewardDistributorAddress, new AccountOfFunction { Node = node, Service = service });
-        var record = await _web3.Eth.GetContractQueryHandler<MetricOfFunction>()
-            .QueryDeserializingToObjectAsync<MetricRecordOutput>(new MetricOfFunction { Epoch = epoch, Account = account }, options.RewardDistributorAddress);
-        return record.Submitted;
-    }
-}
-
-/// <summary>What the relay said: <see cref="Terminal"/> means stop trying this epoch.</summary>
-public sealed record RelayOutcome(bool Submitted, bool Terminal, string? TransactionHash, string? Error);
-
-public interface IServiceMetricsRelay
-{
-    Task<RelayOutcome> SubmitAsync(Wire.Request request, CancellationToken ct);
-}
-
-/// <summary>Posts reports to the Blockchain Gateway's relay, which pays the gas (#221).</summary>
-public sealed class HttpServiceMetricsRelay(HttpClient http) : IServiceMetricsRelay
-{
-    public async Task<RelayOutcome> SubmitAsync(Wire.Request request, CancellationToken ct)
-    {
-        using var response = await http.PostAsJsonAsync(Wire.Path, request, ct);
-        var body = await ReadAsync(response, ct);
-        return response.StatusCode switch
-        {
-            HttpStatusCode.OK => new RelayOutcome(true, false, body?.TransactionHash, null),
-            // 409 is a terminal revert and 400 a malformed report. Anything else (a 404 from a relay still being
-            // configured or deployed, a 5xx) is retried until the window closes.
-            HttpStatusCode.Conflict or HttpStatusCode.BadRequest =>
-                new RelayOutcome(false, true, body?.TransactionHash, body?.Error ?? $"HTTP {(int)response.StatusCode}"),
-            _ => new RelayOutcome(false, false, body?.TransactionHash, body?.Error ?? $"HTTP {(int)response.StatusCode}"),
-        };
-    }
-
-    private static async Task<Wire.Response?> ReadAsync(HttpResponseMessage response, CancellationToken ct)
-    {
-        try
-        {
-            return await response.Content.ReadFromJsonAsync<Wire.Response>(ct);
-        }
-        catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException)
-        {
-            return null;
-        }
+        var config = await _web3.Eth.GetContractQueryHandler<ConfigFunction>().QueryAsync<string>(options.RewardDistributorAddress, new ConfigFunction());
+        return await _web3.Eth.GetContractQueryHandler<GetAddressFunction>().QueryAsync<string>(config, new GetAddressFunction { Key = MetricSignerKey });
     }
 }

@@ -50,9 +50,10 @@ public sealed class HistoryStore
             CREATE INDEX IF NOT EXISTS idx_history_ts ON object_history (ts_ms);
             -- #221: one row per minute the gateway was up, for the uptime factor.
             CREATE TABLE IF NOT EXISTS gateway_liveness (minute_ms INTEGER PRIMARY KEY);
-            -- #221: each epoch's factors, measured once, and the report's submission state. Keyed by the
-            -- distributor too: a reset LocalDev chain starts over at epoch 0 under a new one.
-            CREATE TABLE IF NOT EXISTS epoch_report (
+            -- #221/#225: each epoch's own factors, measured once and never changed. Keyed by the distributor
+            -- too: a reset LocalDev chain starts over at epoch 0 under a new one. The gateway never signs
+            -- these as a metric report; the Verifier reads the signed bytes-served figure (#225 FR3.4).
+            CREATE TABLE IF NOT EXISTS epoch_measurement (
                 distributor  TEXT NOT NULL,
                 epoch        INTEGER NOT NULL,
                 start_ms     INTEGER NOT NULL,
@@ -62,14 +63,9 @@ public sealed class HistoryStore
                 p95_ms       INTEGER NOT NULL,
                 bytes_served INTEGER NOT NULL,
                 requests     INTEGER NOT NULL,
-                state        TEXT NOT NULL,
-                signature    TEXT,
-                tx_hash      TEXT,
-                last_error   TEXT,
-                attempts     INTEGER NOT NULL DEFAULT 0,
-                updated_ms   INTEGER NOT NULL,
+                measured_ms  INTEGER NOT NULL,
                 PRIMARY KEY (distributor, epoch)
-            );
+            ) WITHOUT ROWID;
             """;
         cmd.ExecuteNonQuery();
 
@@ -79,6 +75,23 @@ public sealed class HistoryStore
         {
             cmd.CommandText = "ALTER TABLE object_history ADD COLUMN duration_ms INTEGER";
             cmd.ExecuteNonQuery();
+        }
+
+        // #225: #221's epoch_report carried signing state the gateway no longer has. Keep what it measured.
+        cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'epoch_report'";
+        if (Convert.ToInt64(cmd.ExecuteScalar()) > 0)
+        {
+            using var tx = conn.BeginTransaction();
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                INSERT OR IGNORE INTO epoch_measurement (distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms)
+                SELECT distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, updated_ms
+                FROM epoch_report WHERE NOT (state = 'Terminal' AND requests = 0 AND uptime_bps = 0);
+                DROP TABLE epoch_report;
+                """;
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+            cmd.Transaction = null;
         }
     }
 
@@ -245,42 +258,42 @@ public sealed class HistoryStore
             Requests: requests);
     }
 
-    public EpochReportRow? GetEpochReport(string distributor, ulong epoch)
+    public EpochMeasurement? GetMeasurement(string distributor, ulong epoch)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {ReportColumns} FROM epoch_report WHERE distributor = $d AND epoch = $e";
+        cmd.CommandText = $"SELECT {MeasurementColumns} FROM epoch_measurement WHERE distributor = $d AND epoch = $e";
         cmd.Parameters.AddWithValue("$d", distributor.ToLowerInvariant());
         cmd.Parameters.AddWithValue("$e", (long)epoch);
         using var r = cmd.ExecuteReader();
-        return r.Read() ? ReadReport(r) : null;
+        return r.Read() ? ReadMeasurement(r) : null;
     }
 
-    /// <summary>The most recently updated report, for diagnostics.</summary>
-    public EpochReportRow? LatestEpochReport()
+    /// <summary>The most recent measurement, for diagnostics.</summary>
+    public EpochMeasurement? LatestMeasurement()
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {ReportColumns} FROM epoch_report ORDER BY updated_ms DESC LIMIT 1";
+        cmd.CommandText = $"SELECT {MeasurementColumns} FROM epoch_measurement ORDER BY measured_ms DESC LIMIT 1";
         using var r = cmd.ExecuteReader();
-        return r.Read() ? ReadReport(r) : null;
+        return r.Read() ? ReadMeasurement(r) : null;
     }
 
-    public void SaveEpochReport(EpochReportRow row)
+    /// <summary>Stores a measurement once; a second save for the same epoch is ignored (measurements are immutable).</summary>
+    public void SaveMeasurement(EpochMeasurement m)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO epoch_report (distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms)
-            VALUES ($dist, $epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $state, $sig, $tx, $err, $attempts, $updated)
-            ON CONFLICT (distributor, epoch) DO UPDATE SET state = $state, signature = $sig, tx_hash = $tx, last_error = $err, attempts = $attempts, updated_ms = $updated
+            INSERT OR IGNORE INTO epoch_measurement (distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms)
+            VALUES ($dist, $epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $at)
             """;
-        object?[] values = [row.Distributor.ToLowerInvariant(), (long)row.Epoch, row.StartMs, row.EndMs, (long)row.Factors.UptimeBps, (long)row.Factors.SuccessBps, row.Factors.P95Ms,
-            row.Factors.BytesServed, row.Factors.Requests, row.State.ToString(), row.Signature, row.TxHash, row.LastError, row.Attempts, row.UpdatedMs];
-        string[] names = ["$dist", "$epoch", "$s", "$e", "$up", "$ok", "$p95", "$bytes", "$n", "$state", "$sig", "$tx", "$err", "$attempts", "$updated"];
+        object[] values = [m.Distributor.ToLowerInvariant(), (long)m.Epoch, m.StartMs, m.EndMs, (long)m.Factors.UptimeBps, (long)m.Factors.SuccessBps,
+            m.Factors.P95Ms, m.Factors.BytesServed, m.Factors.Requests, m.MeasuredMs];
+        string[] names = ["$dist", "$epoch", "$s", "$e", "$up", "$ok", "$p95", "$bytes", "$n", "$at"];
         for (var i = 0; i < names.Length; i++)
         {
-            cmd.Parameters.AddWithValue(names[i], values[i] ?? DBNull.Value);
+            cmd.Parameters.AddWithValue(names[i], values[i]);
         }
 
         cmd.ExecuteNonQuery();
@@ -296,13 +309,12 @@ public sealed class HistoryStore
         return cmd.ExecuteNonQuery();
     }
 
-    private const string ReportColumns =
-        "distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms";
+    private const string MeasurementColumns =
+        "distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms";
 
-    private static EpochReportRow ReadReport(SqliteDataReader r) => new(
+    private static EpochMeasurement ReadMeasurement(SqliteDataReader r) => new(
         r.GetString(0), (ulong)r.GetInt64(1), r.GetInt64(2), r.GetInt64(3),
-        new EpochFactors((uint)r.GetInt64(4), (uint)r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8)),
-        Enum.Parse<EpochReportState>(r.GetString(9)), Text(r, 10), Text(r, 11), Text(r, 12), r.GetInt32(13), r.GetInt64(14));
+        new EpochFactors((uint)r.GetInt64(4), (uint)r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8)), r.GetInt64(9));
 
     /// <summary>The database's size on disk, including its WAL.</summary>
     public long SizeBytes => new[] { DatabasePath, DatabasePath + "-wal" }.Sum(f => File.Exists(f) ? new FileInfo(f).Length : 0);

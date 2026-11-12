@@ -169,6 +169,28 @@ async function refresh() {
       ['Storage nodes', g.storageNodes != null ? `${g.healthyStorageNodes} reachable of ${g.storageNodes}` : ''],
       ['Waiting for another copy', g.underReplicated]]);
   }
+  refreshVerifier();
+}
+
+// Verifier role (#225 FR7): mode and why, targets with their last probe, each target's latest report.
+const OUTCOMES = ['OK', 'Wrong answer', 'Server error', 'Other status', 'Timeout', 'Connect failed', 'Rate limited', 'Undiscoverable'];
+const REPORT_STATES = ['Measured', 'Observed only', 'Signed', 'Submitted', 'Terminal'];
+const REPORT_FLAGS = [[1, 'bytes capped'], [2, 'bytes missing'], [4, 'bytes signature invalid'], [8, 'low coverage']];
+async function refreshVerifier() {
+  let v;
+  try { v = await api('GET', '/verifier'); } catch { return; }
+  const snap = v.snapshot;
+  $('#verifier-card').hidden = v.status === 'Disabled' && !snap;
+  if (!snap) { $('#verifier').innerHTML = dl([['Status', v.status], ['Detail', v.reason]]); $('#verifier-targets').innerHTML = ''; $('#verifier-reports').innerHTML = ''; return; }
+  const MODES = { Attesting: 'Attesting (signs reports)', ObserveOnly: 'Observe-only (measures, never signs)', Unknown: 'Unknown (signs nothing)' };
+  $('#verifier').innerHTML = dl([['Mode', MODES[snap.mode] || snap.mode], ['Why', snap.reason], ['Epoch', snap.epoch],
+    ['Discarded minutes this epoch', snap.discardedMinutes]]);
+  $('#verifier-targets').innerHTML = table(['Gateway', 'URL', 'Last probe', 'Latency'], snap.targets.map((t) =>
+    `<tr><td class="mono">${esc(t.node)}</td><td class="mono">${esc(t.url || t.problem)}</td><td>${t.lastOutcome == null ? 'not yet' : esc(OUTCOMES[t.lastOutcome] || t.lastOutcome)}</td><td>${t.lastLatencyMs == null ? '' : `${t.lastLatencyMs} ms`}</td></tr>`));
+  $('#verifier-reports').innerHTML = table(['Gateway', 'Epoch', 'Uptime / success / p95 / bytes', 'State', 'Notes'], snap.reports.map((r) =>
+    `<tr><td class="mono">${esc(r.target)}</td><td>${r.epoch}</td><td>${(r.values[0] / 100).toFixed(2)}% / ${(r.values[1] / 100).toFixed(2)}% / ${r.values[2]} ms / ${bytes(r.values[3])}</td>
+      <td>${esc(REPORT_STATES[r.state] || r.state)}${r.txHash ? ` <span class="mono">${esc(r.txHash.slice(0, 10))}…</span>` : ''}</td>
+      <td>${esc([...REPORT_FLAGS.filter(([f]) => r.flags & f).map(([, n]) => n), r.lastError].filter(Boolean).join('; '))}</td></tr>`));
 }
 
 // ---------- network dashboard (#198) ----------

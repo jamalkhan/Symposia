@@ -3,7 +3,6 @@ using Nethereum.ABI;
 using Nethereum.Hex.HexConvertors.Extensions;
 using Nethereum.Signer;
 using Nethereum.Util;
-using Symposia.Network.Node.Staking;
 
 namespace Symposia.Network.Node.Rewards;
 
@@ -17,8 +16,8 @@ public sealed record MetricReport(string Distributor, string Node, byte Service,
 public sealed record MetricAttestation(string Signature, string Signer);
 
 /// <summary>
-/// Signs metric reports as <c>reward.metric.signer</c> (#221). LocalDev self-signs
-/// (<see cref="LocalDevSelfSigner"/>); the foundation Network Monitor (#225) is the production attestor.
+/// Signs metric reports as <c>reward.metric.signer</c>: the Verifier role (#225), run by the foundation for MVP. A
+/// gateway never signs its own report.
 /// </summary>
 public interface IMetricAttestor
 {
@@ -56,35 +55,68 @@ public static class MetricReportDigest
     }
 }
 
-/// <summary>Thrown when a metric signer is configured where it must not run.</summary>
-public sealed class MetricSignerConfigurationException(string message) : Exception(message);
+/// <summary>The metric-signer key can't be used: missing, malformed, or readable by others.</summary>
+public sealed class MetricSignerKeyException(string message) : Exception(message);
 
 /// <summary>
-/// The gateway signs its own report with the LocalDev deployer key, which DeployRewards makes
-/// <c>roles.metricSigner</c> (#221 FR3.5). Self-reporting is trivially gameable, so this refuses any chain
-/// but LocalDev's (FR3.6): the chain ID comes from the RPC, not only from settings.
+/// Signs metric reports with a key held in a file (#225): the Verifier role's <c>reward.metric.signer</c>. The key
+/// file must be owner-only, like the node key; the key is never logged or exposed.
 /// </summary>
-public sealed class LocalDevSelfSigner : IMetricAttestor
+public sealed class LocalKeyMetricAttestor : IMetricAttestor
 {
     private readonly EthECKey _key;
 
-    public LocalDevSelfSigner(string privateKey, ulong chainId)
-    {
-        if (chainId != DevFunding.LocalDevChainId)
-        {
-            throw new MetricSignerConfigurationException(
-                $"The LocalDev metric self-signer only runs on LocalDev (chain {DevFunding.LocalDevChainId}); this host is on chain {chainId}.");
-        }
+    public LocalKeyMetricAttestor(EthECKey key) => _key = key;
 
-        _key = new EthECKey(privateKey);
-    }
-
-    public string Name => "localdev-self-signer";
+    public string Name => "local-key";
 
     public string Address => _key.GetPublicAddress();
 
+    /// <summary>Signs any digest with the eth-signed-message prefix: probe challenges use the same key (#225).</summary>
+    public string SignDigest(byte[] digest) => new EthereumMessageSigner().Sign(digest, _key);
+
     public Task<MetricAttestation> AttestAsync(MetricReport report, CancellationToken ct) =>
-        Task.FromResult(new MetricAttestation(new EthereumMessageSigner().Sign(MetricReportDigest.Hash(report), _key), Address));
+        Task.FromResult(new MetricAttestation(SignDigest(MetricReportDigest.Hash(report)), Address));
+
+    public override string ToString() => $"LocalKeyMetricAttestor({Address})";
+
+    /// <summary>Loads the key; throws <see cref="MetricSignerKeyException"/> when missing, malformed or group/world-readable.</summary>
+    public static LocalKeyMetricAttestor Load(string path)
+    {
+        if (!File.Exists(path))
+        {
+            throw new MetricSignerKeyException($"Metric signer key file '{path}' is missing.");
+        }
+
+        if (!OperatingSystem.IsWindows() && (File.GetUnixFileMode(path) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.OtherRead | UnixFileMode.OtherWrite)) != 0)
+        {
+            throw new MetricSignerKeyException($"Metric signer key file '{path}' is readable by other users; chmod 600 it.");
+        }
+
+        var hex = File.ReadAllText(path).Trim();
+        try
+        {
+            return new LocalKeyMetricAttestor(new EthECKey(hex));
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException)
+        {
+            throw new MetricSignerKeyException($"Metric signer key file '{path}' isn't a secp256k1 private key.");
+        }
+    }
+
+    /// <summary>Writes <paramref name="privateKey"/> owner-only from creation (LocalDev provisioning).</summary>
+    public static void Write(string path, string privateKey)
+    {
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!);
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows())
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        using var writer = new StreamWriter(path, System.Text.Encoding.UTF8, options);
+        writer.Write(privateKey);
+    }
 }
 
 /// <summary>The Blockchain Gateway's service-metrics relay (#221): it pays the gas, the contract checks the signature.</summary>
