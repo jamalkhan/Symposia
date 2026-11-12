@@ -2,6 +2,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Symposia.Identity.Domain\Symposia.Identity.Domain.csproj" />
+    <!-- GasHeadroom (#216/#219): the gas limit every Symposia .NET chain write sends. -->
+    <ProjectReference Include="..\..\Blockchain\Symposia.Blockchain.Contracts\Symposia.Blockchain.Contracts.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,8 +1,10 @@
+using System.Numerics;
 using Microsoft.Extensions.Options;
 using Nethereum.Contracts;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
 using Nethereum.Web3.Accounts;
+using Symposia.Blockchain.Contracts;
 using Symposia.Identity.Domain;
 
 namespace Symposia.Identity.Gateway.Chain;
@@ -114,7 +116,8 @@ public sealed class EthereumChainClient : IChainClient
         TransactionReceipt receipt;
         try
         {
-            receipt = await handler.SendRequestAndWaitForReceiptAsync(_capabilityRegistryAddress, function);
+            receipt = await handler.WithHeadroomAsync(_capabilityRegistryAddress, function,
+                () => handler.SendRequestAndWaitForReceiptAsync(_capabilityRegistryAddress, function));
         }
         catch (Exception ex)
         {
@@ -123,7 +126,7 @@ public sealed class EthereumChainClient : IChainClient
 
         if (receipt.Status?.Value != 1)
         {
-            throw new ChainCallException("CapabilityRegistry: no active consent");
+            throw new ChainCallException(await FailureMessageAsync(receipt, "issueCapability", "CapabilityRegistry: no active consent"));
         }
 
         var decoded = receipt.DecodeAllEvents<CapabilityIssuedEventDto>();
@@ -138,10 +141,11 @@ public sealed class EthereumChainClient : IChainClient
         var handler = _web3.Eth.GetContractTransactionHandler<TFunction>();
         try
         {
-            var receipt = await handler.SendRequestAndWaitForReceiptAsync(contractAddress, function);
+            var receipt = await handler.WithHeadroomAsync(contractAddress, function,
+                () => handler.SendRequestAndWaitForReceiptAsync(contractAddress, function));
             if (receipt.Status?.Value != 1)
             {
-                throw new ChainCallException($"{typeof(TFunction).Name} reverted");
+                throw new ChainCallException(await FailureMessageAsync(receipt, typeof(TFunction).Name, $"{typeof(TFunction).Name} reverted"));
             }
 
             return receipt.TransactionHash;
@@ -155,4 +159,17 @@ public sealed class EthereumChainClient : IChainClient
             throw new ChainCallException($"{typeof(TFunction).Name} reverted: {ex.Message}");
         }
     }
+
+    private async Task<string> FailureMessageAsync(TransactionReceipt receipt, string name, string revertMessage)
+    {
+        var tx = await _web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
+        return FailureMessage(name, revertMessage, receipt.GasUsed.Value, tx?.Gas?.Value);
+    }
+
+    /// <summary>
+    /// The error for a failed receipt: out of gas when it used its whole limit (#219), so a gas problem isn't reported
+    /// as the caller's consent state; otherwise <paramref name="revertMessage"/>.
+    /// </summary>
+    internal static string FailureMessage(string name, string revertMessage, BigInteger gasUsed, BigInteger? gasLimit) =>
+        GasHeadroom.RanOutOfGas(gasUsed, gasLimit) ? $"{name} ran out of gas ({gasUsed} of {gasLimit} used)" : revertMessage;
 }
