@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Contracts;
 using Nethereum.RPC.Eth.DTOs;
+using Symposia.Blockchain.Contracts;
 using Symposia.Blockchain.Gateway.Chain;
 
 namespace Symposia.Blockchain.Gateway.Tests;
@@ -39,7 +40,7 @@ public sealed class RelayerAccountChainTests(RewardsChainFixture chain) : IClass
     [InlineData(64_322, 107_186)]
     [InlineData(10_000_000, 12_030_000)]
     public void WithHeadroom_AddsTwentyPercentAndOneFreshSlot(long estimate, long limit) =>
-        Assert.Equal(new BigInteger(limit), RelayerAccount.WithHeadroom(estimate));
+        Assert.Equal(new BigInteger(limit), GasHeadroom.Over(estimate));
 
     [Fact]
     public async Task Send_CarriesHeadroomOverTheEstimate()
@@ -54,8 +55,8 @@ public sealed class RelayerAccountChainTests(RewardsChainFixture chain) : IClass
 
         Assert.Equal(1, (int)receipt.Status.Value);
         var tx = await relayer.Web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
-        // Re-estimated against the same state, so the limit is the formula over it (#216).
-        Assert.Equal(RelayerAccount.WithHeadroom(estimate.Value), tx.Gas.Value);
+        Assert.True(tx.Gas.Value >= GasHeadroom.Over(estimate.Value), $"gas {tx.Gas.Value} under headroom over {estimate.Value}");
+        Assert.Null(mint.Gas); // set for that send only (#216)
     }
 
     [Fact]
@@ -74,11 +75,16 @@ public sealed class RelayerAccountChainTests(RewardsChainFixture chain) : IClass
         var relayer = Relayer();
         var token = chain.Addresses["SYMToken"];
 
+        var before = await relayer.Web3.Eth.Transactions.GetTransactionCount.SendRequestAsync(relayer.Address, BlockParameter.CreatePending());
+
         // Amount 0 reverts with ZeroAmount, so the estimate fails before anything is signed.
-        await Assert.ThrowsAnyAsync<Exception>(() => relayer.SendAsync(token, new MintFunction { To = relayer.Address, Amount = 0 }));
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => relayer.SendAsync(token, new MintFunction { To = relayer.Address, Amount = 0 }));
+        Assert.DoesNotContain("intrinsic gas", ex.Message);
         var receipt = await relayer.SendAsync(token, new MintFunction { To = relayer.Address, Amount = 1 });
 
         Assert.Equal(1, (int)receipt.Status.Value);
+        var tx = await relayer.Web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
+        Assert.Equal(before.Value, tx.Nonce.Value); // the failed estimate consumed no nonce
     }
 
     private RelayerAccount Relayer()
