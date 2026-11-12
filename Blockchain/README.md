@@ -39,7 +39,7 @@ forge test
 # Gateway (against a local anvil + deployed contracts)
 anvil &
 forge script script/Deploy.s.sol:Deploy --rpc-url http://localhost:8545 \
-  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --broadcast
+  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --broadcast --slow
 # then set Gateway:NodeRegistryAddress / Gateway:EpochRootRegistryAddress / Gateway:RelayerPrivateKey
 # in Symposia.Blockchain.Gateway/appsettings.json (or env vars) to the logged addresses, and:
 dotnet run --project Symposia.Blockchain.Gateway

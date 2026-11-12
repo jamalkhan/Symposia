@@ -78,6 +78,18 @@ public sealed class HostContext
     /// <summary>Set when the LocalDev rewards stack was deployed with parameters it can't settle under (#181 FR4).</summary>
     public RewardsStaleNotice? RewardsStale { get; set; }
 
+    private Symposia.Network.Node.PeerTable? _hostPeers;
+
+    /// <summary>
+    /// The network component's peer table while it runs, else null (#207). Roles read it per call,
+    /// so they follow a network restart and pick up peers recognized mid-epoch.
+    /// </summary>
+    public Symposia.Network.Node.PeerTable? HostPeers
+    {
+        get => Volatile.Read(ref _hostPeers);
+        set => Volatile.Write(ref _hostPeers, value);
+    }
+
     /// <summary>Heartbeat acceptance, shared with the storage role (#181 FR5).</summary>
     public Symposia.Network.Node.Telemetry.TelemetryDiagnostics Telemetry { get; } = new();
 

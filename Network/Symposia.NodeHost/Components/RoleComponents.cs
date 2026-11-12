@@ -5,7 +5,10 @@ using Symposia.NodeHost.Diagnostics;
 
 namespace Symposia.NodeHost.Components;
 
-/// <summary>Node-network settings every hosted role shares. Roles only answer handshakes; the host registers and discovers once.</summary>
+/// <summary>
+/// Node-network settings every hosted role shares. Roles only answer handshakes; the host registers and discovers once,
+/// so a role that needs peers (telemetry gossip) reads the host's table through <see cref="HostTelemetryPeers"/> (#207).
+/// </summary>
 internal static class RoleNetwork
 {
     public static void Add(IDictionary<string, string?> config, string section, HostContext context, string advertisedEndpoint)
@@ -42,6 +45,8 @@ public sealed class StorageRoleComponent : WebAppComponent
             // Heartbeat acceptance surfaces on the host's Diagnostics page (#181 FR5); each start is a fresh run.
             context.Telemetry.Reset();
             builder.Services.AddSingleton(context.Telemetry);
+            // Roles run without discovery, so gossip uses the host's peer table (#207).
+            builder.Services.AddSingleton<Symposia.Network.Node.Telemetry.Committee.ITelemetryPeers>(new HostTelemetryPeers(context));
             builder.Services.AddSingleton<Symposia.Network.Node.Alerts.IOperatorAlertSink>(context.Alerts);
         });
 

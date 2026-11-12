@@ -29,7 +29,7 @@ public sealed class AnvilHistoryTests : IDisposable
         Assert.True(i >= 0, "LocalDev anvil must prune history");
         Assert.Equal(AnvilArgs.HistoryStates.ToString(), args[i + 1]);
         Assert.Contains("--state", args);
-        Assert.Equal(["--port", "8545", .. AnvilArgs.PruneHistory, "--silent"], AnvilArgs.Fixture(8545));
+        Assert.Equal(["--port", "0", .. AnvilArgs.PruneHistory], AnvilArgs.Fixture());
     }
 
     [Fact]

@@ -23,7 +23,7 @@ until curl -s -o /dev/null -X POST -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' http://127.0.0.1:$RPC_PORT; do sleep 0.2; done
 
 REGISTRY=$(cd "$ROOT/Blockchain/bootstrap-chain" && "$FOUNDRY/forge" script script/Deploy.s.sol:Deploy \
-  --rpc-url http://127.0.0.1:$RPC_PORT --private-key $DEPLOYER_KEY --broadcast 2>&1 \
+  --rpc-url http://127.0.0.1:$RPC_PORT --private-key $DEPLOYER_KEY --broadcast --slow 2>&1 \
   | sed -n 's/.*NodeRegistry: *\(0x[0-9a-fA-F]\{40\}\).*/\1/p' | head -1)
 EPOCH=$(cd "$ROOT/Blockchain/bootstrap-chain" && ls -t broadcast/Deploy.s.sol/31337/run-latest.json >/dev/null && \
   python3 -c "import json;print([t['contractAddress'] for t in json.load(open('broadcast/Deploy.s.sol/31337/run-latest.json'))['transactions'] if t['contractName']=='EpochRootRegistry'][0])")

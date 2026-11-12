@@ -18,6 +18,9 @@ public static class AnvilArgs
     /// </summary>
     public static IReadOnlyList<string> PruneHistory { get; } = ["--prune-history", HistoryStates.ToString()];
 
-    /// <summary>The bare test-fixture launch: <paramref name="port"/>, pruned, silent.</summary>
-    public static IReadOnlyList<string> Fixture(int port) => ["--port", port.ToString(), .. PruneHistory, "--silent"];
+    /// <summary>
+    /// The bare test-fixture launch: anvil picks its own port and prints it as "Listening on host:port" (#186),
+    /// so there is no gap for another listener to take a pre-picked port. Not --silent: that hides the line.
+    /// </summary>
+    public static IReadOnlyList<string> Fixture() => ["--port", "0", .. PruneHistory];
 }
