@@ -14,6 +14,11 @@ namespace Symposia.Blockchain.Gateway.Tests;
 public sealed partial class AnvilProcess : IAsyncDisposable
 {
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ExitTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>Where anvil and forge are installed (~/.foundry/bin).</summary>
+    public static string FoundryBin { get; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
 
     private readonly Process _process;
 
@@ -23,10 +28,9 @@ public sealed partial class AnvilProcess : IAsyncDisposable
 
     public string RpcUrl => $"http://127.0.0.1:{Port}";
 
-    public static Task<AnvilProcess> StartAsync() =>
-        StartAsync(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin", "anvil"));
+    public static Task<AnvilProcess> StartAsync() => StartAsync(Path.Combine(FoundryBin, "anvil"), StartTimeout);
 
-    internal static async Task<AnvilProcess> StartAsync(string anvilPath)
+    internal static async Task<AnvilProcess> StartAsync(string anvilPath, TimeSpan startTimeout)
     {
         var process = new Process
         {
@@ -61,25 +65,33 @@ public sealed partial class AnvilProcess : IAsyncDisposable
 
         process.OutputDataReceived += OnLine;
         process.ErrorDataReceived += OnLine;
-        process.Exited += (_, _) => listening.TrySetException(new InvalidOperationException($"anvil exited before listening:\n{Captured()}"));
-        if (!process.Start())
+        process.Exited += (_, _) =>
         {
-            throw new InvalidOperationException("Failed to start anvil.");
-        }
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
+            // Flushes the async readers, so the message carries anvil's last lines.
+            process.WaitForExit();
+            listening.TrySetException(new InvalidOperationException($"anvil exited before listening:\n{Captured()}"));
+        };
 
         try
         {
-            return new AnvilProcess(process, await listening.Task.WaitAsync(StartTimeout));
+            try
+            {
+                process.Start();
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                throw new InvalidOperationException($"Failed to start anvil at {anvilPath}.", ex);
+            }
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            return new AnvilProcess(process, await listening.Task.WaitAsync(startTimeout));
         }
         catch (Exception ex)
         {
-            Kill(process);
-            process.Dispose();
+            await StopAsync(process);
             throw ex is TimeoutException
-                ? new InvalidOperationException($"anvil did not report a port within {StartTimeout.TotalSeconds} s:\n{Captured()}")
+                ? new InvalidOperationException($"anvil did not report a port within {startTimeout.TotalSeconds} s:\n{Captured()}")
                 : ex;
         }
 
@@ -99,22 +111,22 @@ public sealed partial class AnvilProcess : IAsyncDisposable
     [GeneratedRegex(@"^Listening on [^\s]+:(\d+)\s*$")]
     private static partial Regex ListeningLine();
 
-    public async ValueTask DisposeAsync()
-    {
-        Kill(_process);
-        await _process.WaitForExitAsync();
-        _process.Dispose();
-    }
+    public ValueTask DisposeAsync() => new(StopAsync(_process));
 
-    private static void Kill(Process process)
+    /// <summary>Kills the process tree and waits, bounded, so a kill that doesn't take can't hang teardown.</summary>
+    private static async Task StopAsync(Process process)
     {
         try
         {
             process.Kill(entireProcessTree: true);
+            using var limit = new CancellationTokenSource(ExitTimeout);
+            await process.WaitForExitAsync(limit.Token);
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException)
         {
-            // Already exited.
+            // Never started, already exited, or didn't exit in time; nothing more to do in a test teardown.
         }
+
+        process.Dispose();
     }
 }

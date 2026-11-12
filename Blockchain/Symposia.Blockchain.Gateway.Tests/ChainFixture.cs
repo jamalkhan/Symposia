@@ -48,7 +48,21 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
 
     public async Task InitializeAsync()
     {
-        var foundryBin = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
+        try
+        {
+            await StartChainAsync();
+        }
+        catch
+        {
+            // A failed deploy must not orphan anvil: xUnit doesn't dispose a fixture whose initialization threw.
+            await StopAnvilAsync();
+            throw;
+        }
+    }
+
+    private async Task StartChainAsync()
+    {
+        var foundryBin = AnvilProcess.FoundryBin;
 
         _anvil = await AnvilProcess.StartAsync();
 
@@ -114,12 +128,18 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
 
     async Task IAsyncLifetime.DisposeAsync()
     {
+        await StopAnvilAsync();
+
+        await base.DisposeAsync();
+    }
+
+    private async Task StopAnvilAsync()
+    {
         if (_anvil is not null)
         {
             await _anvil.DisposeAsync();
+            _anvil = null;
         }
-
-        await base.DisposeAsync();
     }
 }
 

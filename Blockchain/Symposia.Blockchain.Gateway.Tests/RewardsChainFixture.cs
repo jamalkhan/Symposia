@@ -13,8 +13,7 @@ public sealed class RewardsChainFixture : IAsyncLifetime
     public const string DeployerKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     public const string NodeKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"; // anvil account #1
 
-    private static readonly string FoundryBin =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".foundry", "bin");
+    private static readonly string FoundryBin = AnvilProcess.FoundryBin;
 
     /// <summary>
     /// One forge invocation at a time across the test process: on a fresh checkout, several fixtures
@@ -32,6 +31,20 @@ public sealed class RewardsChainFixture : IAsyncLifetime
     public IReadOnlyDictionary<string, string> Addresses { get; private set; } = new Dictionary<string, string>();
 
     public async Task InitializeAsync()
+    {
+        try
+        {
+            await StartChainAsync();
+        }
+        catch
+        {
+            // A failed deploy must not orphan anvil: xUnit doesn't dispose a fixture whose initialization threw.
+            await StopAnvilAsync();
+            throw;
+        }
+    }
+
+    private async Task StartChainAsync()
     {
         _anvil = await AnvilProcess.StartAsync();
 
@@ -87,10 +100,7 @@ public sealed class RewardsChainFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_anvil is not null)
-        {
-            await _anvil.DisposeAsync();
-        }
+        await StopAnvilAsync();
 
         File.Delete(_out);
     }
@@ -108,4 +118,12 @@ public sealed class RewardsChainFixture : IAsyncLifetime
             : Path.Combine(dir, "Blockchain", "bootstrap-chain");
     }
 
+    private async Task StopAnvilAsync()
+    {
+        if (_anvil is not null)
+        {
+            await _anvil.DisposeAsync();
+            _anvil = null;
+        }
+    }
 }
