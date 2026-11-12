@@ -32,4 +32,59 @@ public sealed class RelayerAccountChainTests(RewardsChainFixture chain) : IClass
             (await relayer.Web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(r.TransactionHash)).Nonce.Value));
         Assert.Equal(8, nonces.Distinct().Count());
     }
+
+    [Theory]
+    [InlineData(0, 30_000)]
+    [InlineData(21_000, 55_200)]
+    [InlineData(64_322, 107_186)]
+    [InlineData(10_000_000, 12_030_000)]
+    public void WithHeadroom_AddsTwentyPercentAndOneFreshSlot(long estimate, long limit) =>
+        Assert.Equal(new BigInteger(limit), RelayerAccount.WithHeadroom(estimate));
+
+    [Fact]
+    public async Task Send_CarriesHeadroomOverTheEstimate()
+    {
+        var relayer = Relayer();
+        var token = chain.Addresses["SYMToken"];
+        var mint = new MintFunction { To = relayer.Address, Amount = 1 };
+        var estimate = await relayer.Web3.Eth.GetContractTransactionHandler<MintFunction>()
+            .EstimateGasAsync(token, new MintFunction { To = relayer.Address, Amount = 1 });
+
+        var receipt = await relayer.SendAsync(token, mint);
+
+        Assert.Equal(1, (int)receipt.Status.Value);
+        var tx = await relayer.Web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
+        // Re-estimated against the same state, so the limit is the formula over it (#216).
+        Assert.Equal(RelayerAccount.WithHeadroom(estimate.Value), tx.Gas.Value);
+    }
+
+    [Fact]
+    public async Task Send_KeepsACallerSetGasLimit()
+    {
+        var relayer = Relayer();
+        var receipt = await relayer.SendAsync(chain.Addresses["SYMToken"], new MintFunction { To = relayer.Address, Amount = 1, Gas = 500_000 });
+
+        var tx = await relayer.Web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
+        Assert.Equal(new BigInteger(500_000), tx.Gas.Value);
+    }
+
+    [Fact]
+    public async Task A_send_that_reverts_in_estimation_throws_and_the_next_send_still_mines()
+    {
+        var relayer = Relayer();
+        var token = chain.Addresses["SYMToken"];
+
+        // Amount 0 reverts with ZeroAmount, so the estimate fails before anything is signed.
+        await Assert.ThrowsAnyAsync<Exception>(() => relayer.SendAsync(token, new MintFunction { To = relayer.Address, Amount = 0 }));
+        var receipt = await relayer.SendAsync(token, new MintFunction { To = relayer.Address, Amount = 1 });
+
+        Assert.Equal(1, (int)receipt.Status.Value);
+    }
+
+    private RelayerAccount Relayer()
+    {
+        var relayer = new RelayerAccount(Options.Create(new GatewayOptions { RpcUrl = chain.RpcUrl, RelayerPrivateKey = RewardsChainFixture.DeployerKey }));
+        relayer.Web3.TransactionManager.UseLegacyAsDefault = true;
+        return relayer;
+    }
 }
