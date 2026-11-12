@@ -22,6 +22,12 @@ public static class GasHeadroom
     public static BigInteger Over(BigInteger estimate) => estimate + estimate / Divisor + Fixed;
 
     /// <summary>
+    /// Whether a failed transaction ran out of gas rather than reverting (#219): a top-level out-of-gas consumes the
+    /// whole limit, a revert returns what's left.
+    /// </summary>
+    public static bool RanOutOfGas(BigInteger gasUsed, BigInteger? gasLimit) => gasLimit is { } limit && gasUsed >= limit;
+
+    /// <summary>
     /// Runs <paramref name="send"/> with <paramref name="function"/>'s gas set to the headroom over a fresh estimate,
     /// unless the caller set one, and restores the caller's value afterwards so a reused message is estimated afresh.
     /// </summary>
