@@ -63,6 +63,11 @@ public sealed class LedgerService(
     private LedgerStore? _store;
     private ulong? _cursor;
     private (ulong Block, IReadOnlyDictionary<int, BigInteger> Reserves)? _reserves;
+    private readonly Dictionary<(ulong Epoch, int Service), bool> _reported = [];
+
+    public const string NoMetricReport = "No metric report for this epoch";
+
+    public const string IneligibleWithReport = "Not eligible: not Active, not verified in time, or stake below minimum";
 
     public async Task<LedgerSnapshot> SnapshotAsync(CancellationToken ct)
     {
@@ -87,6 +92,7 @@ public sealed class LedgerService(
                 _entries.Clear();
                 _cursor = null;
                 _reserves = null;
+                _reported.Clear();
                 _store = storeFor?.Invoke();
                 try
                 {
@@ -100,7 +106,7 @@ public sealed class LedgerService(
             }
 
             await ScanAsync(source, ct);
-            return new LedgerSnapshot(true, null, _entries.ToList(), await TotalsAsync(source, ct), _cursor ?? 0);
+            return new LedgerSnapshot(true, null, await ExplainIneligibleAsync(source, ct), await TotalsAsync(source, ct), _cursor ?? 0);
         }
         finally
         {
@@ -229,6 +235,43 @@ public sealed class LedgerService(
             default:
                 return null;
         }
+    }
+
+    /// <summary>
+    /// Says why an Ineligible settlement got nothing (#221): most often no metric report was submitted, which
+    /// isn't the operator's doing. Persisted rows keep the raw reason; this is applied per snapshot. Only
+    /// successful lookups are cached (the answer can't change after the seal); a failed one keeps the raw text.
+    /// </summary>
+    private async Task<List<LedgerEntry>> ExplainIneligibleAsync(ILedgerLogSource source, CancellationToken ct)
+    {
+        var rows = new List<LedgerEntry>(_entries.Count);
+        foreach (var e in _entries)
+        {
+            if (e is { Category: LedgerCategory.Reward, Type: "No reward", Epoch: { } epoch } && e.Detail == SettlementReasons[3]
+                && NodeServiceCatalog.All.FirstOrDefault(s => s.Name == e.Service)?.Id is { } service)
+            {
+                if (!_reported.TryGetValue((epoch, service), out var reported))
+                {
+                    try
+                    {
+                        reported = await source.MetricSubmittedAsync(node, service, epoch, ct);
+                        _reported[(epoch, service)] = reported;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        rows.Add(e);
+                        continue;
+                    }
+                }
+
+                rows.Add(e with { Detail = reported ? IneligibleWithReport : NoMetricReport });
+                continue;
+            }
+
+            rows.Add(e);
+        }
+
+        return rows;
     }
 
     private async Task<IReadOnlyList<ServiceTotals>> TotalsAsync(ILedgerLogSource source, CancellationToken ct)

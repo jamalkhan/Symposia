@@ -118,3 +118,19 @@ public sealed class ReserveBalanceOfFunction : FunctionMessage
 {
     [Parameter("address", "node", 1)] public string Account { get; set; } = "";
 }
+
+[Function("metricOf", typeof(MetricRecordOutput))]
+public sealed class MetricOfFunction : FunctionMessage
+{
+    [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
+    [Parameter("address", "node", 2)] public string Account { get; set; } = "";
+}
+
+/// <summary><c>RewardDistributor.MetricRecord</c>: <see cref="Submitted"/> is what eligibility checks first.</summary>
+[FunctionOutput]
+public sealed class MetricRecordOutput : IFunctionOutputDTO
+{
+    [Parameter("uint256", "score", 1)] public BigInteger Score { get; set; }
+    [Parameter("uint256", "heartbeatBps", 2)] public BigInteger HeartbeatBps { get; set; }
+    [Parameter("bool", "submitted", 3)] public bool Submitted { get; set; }
+}

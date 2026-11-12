@@ -114,6 +114,16 @@ public sealed class NethereumLedgerLogSource(string rpcUrl, string registry, str
             .QueryAsync<BigInteger>(distributor, new ReserveBalanceOfFunction { Account = account });
     }
 
+    /// <summary>Read at latest: a sealed epoch's record never changes, and a pruned LocalDev chain (#210) can't answer for old blocks.</summary>
+    public async Task<bool> MetricSubmittedAsync(string node, int service, ulong epoch, CancellationToken ct)
+    {
+        var account = await _web3.Eth.GetContractQueryHandler<AccountOfFunction>()
+            .QueryAsync<string>(distributor, new AccountOfFunction { Node = node, Service = (byte)service });
+        var record = await _web3.Eth.GetContractQueryHandler<MetricOfFunction>()
+            .QueryDeserializingToObjectAsync<MetricRecordOutput>(new MetricOfFunction { Epoch = epoch, Account = account }, distributor);
+        return record.Submitted;
+    }
+
     private static ulong Block<T>(EventLog<T> e) => (ulong)e.Log.BlockNumber.Value;
 
     private static long Index<T>(EventLog<T> e) => (long)e.Log.LogIndex.Value;
