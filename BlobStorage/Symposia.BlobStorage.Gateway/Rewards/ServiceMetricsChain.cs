@@ -74,8 +74,9 @@ public sealed class HttpServiceMetricsRelay(HttpClient http) : IServiceMetricsRe
         return response.StatusCode switch
         {
             HttpStatusCode.OK => new RelayOutcome(true, false, body?.TransactionHash, null),
-            // 409 is a terminal revert; any other 4xx bar 429 is a report the relay will never take.
-            HttpStatusCode.Conflict or HttpStatusCode.BadRequest or HttpStatusCode.NotFound or HttpStatusCode.UnprocessableEntity =>
+            // 409 is a terminal revert and 400 a malformed report. Anything else (a 404 from a relay still being
+            // configured or deployed, a 5xx) is retried until the window closes.
+            HttpStatusCode.Conflict or HttpStatusCode.BadRequest =>
                 new RelayOutcome(false, true, body?.TransactionHash, body?.Error ?? $"HTTP {(int)response.StatusCode}"),
             _ => new RelayOutcome(false, false, body?.TransactionHash, body?.Error ?? $"HTTP {(int)response.StatusCode}"),
         };

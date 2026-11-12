@@ -27,11 +27,13 @@ public sealed class ServiceMetricsOptions
 
 /// <summary>
 /// Reports this gateway's Blob Gateway factors for every finished epoch (#221), so a staked, Active gateway can
-/// be paid. Each tick marks the minute as up, then advances the last finished epoch through
-/// Measured → Signed → Submitted, persisting each step in <c>epoch_report</c>: factors are measured once, a
-/// restart resends the same signed bytes, and a report that already landed on chain is never sent again.
-/// A window that closes first is lost for good (Terminal), and so is any epoch the service wasn't Active in
-/// (Skipped). Holds the history sweep back to the start of the oldest epoch not yet measured.
+/// be paid. Each tick marks the minute as up, then advances each of the last <see cref="Lookback"/> finished
+/// epochs through Measured → Signed → Submitted, persisting each step in <c>epoch_report</c> (keyed by
+/// distributor, so a reset chain starts over): factors are measured once, <see cref="MeasureGrace"/> after the
+/// epoch ends so the history writer has caught up; a restart resends the same signed bytes; a report already on
+/// chain is never sent again. A window that closes first is lost for good (Terminal). An epoch the service
+/// wasn't Active for is Skipped, rechecked while its window is open. Holds the history sweep back to the start
+/// of the oldest epoch not yet measured.
 /// </summary>
 public sealed class ServiceMetricsReporter(
     HistoryStore store, HistoryRecorder recorder, IServiceMetricsChain chain, IServiceMetricsRelay relay, Func<ulong, IMetricAttestor> attestorFor,
@@ -39,9 +41,36 @@ public sealed class ServiceMetricsReporter(
 {
     public const byte BlobGateway = 8;
 
+    /// <summary>Finished epochs looked at per tick; anything older is far past its finality window.</summary>
+    public const int Lookback = 3;
+
+    /// <summary>Wait after an epoch ends before measuring it: the history writer batches and backs off up to 30 s.</summary>
+    public static readonly TimeSpan MeasureGrace = TimeSpan.FromSeconds(45);
+
     private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private readonly string _distributor = options.Value.RewardDistributorAddress;
+    private readonly HashSet<ulong> _warned = [];
     private IMetricAttestor? _attestor;
-    private ulong _lastWarnedEpoch = ulong.MaxValue;
+
+    /// <summary>
+    /// Checks the chain before the gateway serves (#221 AC6): off LocalDev the self-signer throws and the host
+    /// doesn't start. An unreachable RPC isn't a reason to refuse: the first tick checks again.
+    /// </summary>
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        try
+        {
+            _attestor = attestorFor(await chain.ChainIdAsync(timeout.Token));
+        }
+        catch (Exception ex) when (ex is not MetricSignerConfigurationException && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Service metrics: couldn't read the chain ID at startup, checking on the first pass: {Reason}", ex.Message);
+        }
+
+        await base.StartAsync(cancellationToken);
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -59,7 +88,7 @@ public sealed class ServiceMetricsReporter(
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
             {
-                logger.LogWarning("Service metrics: tick failed, retrying: {Reason}", ex.Message);
+                logger.LogWarning("Service metrics: pass failed, retrying: {Reason}", ex.Message);
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));
@@ -68,80 +97,104 @@ public sealed class ServiceMetricsReporter(
     /// <summary>One pass; public for tests.</summary>
     public async Task TickAsync(CancellationToken ct)
     {
-        store.RecordLiveness(_time.GetUtcNow());
+        try
+        {
+            store.RecordLiveness(_time.GetUtcNow());
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Service metrics: couldn't record liveness: {Reason}", ex.Message);
+        }
+
         _attestor ??= attestorFor(await chain.ChainIdAsync(ct));
 
         var current = await chain.CurrentEpochAsync(ct);
-        if (current == 0)
+        var hold = DateTimeOffset.FromUnixTimeSeconds(await chain.EpochStartAsync(current, ct));
+        for (var epoch = current > Lookback ? current - Lookback : 0; epoch < current; epoch++)
         {
-            recorder.HoldFrom = DateTimeOffset.FromUnixTimeSeconds(await chain.EpochStartAsync(0, ct));
-            return;
+            if (await AdvanceAsync(epoch, ct) is { } pendingFrom && pendingFrom < hold)
+            {
+                hold = pendingFrom;
+            }
         }
 
-        var epoch = current - 1;
-        var row = await AdvanceAsync(epoch, ct);
-        var holdEpoch = row.State is EpochReportState.Measured or EpochReportState.Signed ? epoch : current;
-        recorder.HoldFrom = DateTimeOffset.FromUnixTimeMilliseconds(holdEpoch == epoch ? row.StartMs : row.EndMs);
+        recorder.HoldFrom = hold;
     }
 
-    private async Task<EpochReportRow> AdvanceAsync(ulong epoch, CancellationToken ct)
+    /// <summary>Moves one epoch's report on; returns the epoch's start while its history is still needed.</summary>
+    private async Task<DateTimeOffset?> AdvanceAsync(ulong epoch, CancellationToken ct)
     {
-        var row = store.GetEpochReport(epoch);
+        var row = store.GetEpochReport(_distributor, epoch);
+        if (row is { State: EpochReportState.Submitted or EpochReportState.Terminal })
+        {
+            return null;
+        }
+
         if (row is null)
         {
             var startMs = await chain.EpochStartAsync(epoch, ct) * 1000;
             var endMs = await chain.EpochStartAsync(epoch + 1, ct) * 1000;
-            var factors = store.Aggregate(startMs, endMs);
-            var state = EpochReportState.Measured;
-            string? error = null;
             if (!await chain.AcceptsReportsAsync(epoch, ct))
             {
-                (state, error) = (EpochReportState.Terminal, "FinalityWindowElapsed");
                 logger.LogWarning("Service metrics: epoch {Epoch}'s report window elapsed before it was measured; no report.", epoch);
-            }
-            else if (!await chain.IsActiveAsync(node, BlobGateway, ct))
-            {
-                (state, error) = (EpochReportState.Skipped, "Blob Gateway is not Active");
-                logger.LogDebug("Service metrics: Blob Gateway not Active in epoch {Epoch}; nothing to report.", epoch);
-            }
-            else
-            {
-                logger.LogInformation("Service metrics: epoch {Epoch} measured: uptime {Uptime} bps, success {Success} bps, p95 {P95} ms, {Bytes} bytes over {Requests} requests.",
-                    epoch, factors.UptimeBps, factors.SuccessBps, factors.P95Ms, factors.BytesServed, factors.Requests);
+                Save(new EpochReportRow(_distributor, epoch, startMs, endMs, new EpochFactors(0, 0, 0, 0, 0), EpochReportState.Terminal,
+                    null, null, "FinalityWindowElapsed", 0, 0));
+                return null;
             }
 
-            row = Save(new EpochReportRow(epoch, startMs, endMs, factors, state, null, null, error, 0, 0));
+            if (_time.GetUtcNow() < DateTimeOffset.FromUnixTimeMilliseconds(endMs) + MeasureGrace)
+            {
+                return DateTimeOffset.FromUnixTimeMilliseconds(startMs);
+            }
+
+            var factors = store.Aggregate(startMs, endMs);
+            logger.LogInformation("Service metrics: epoch {Epoch} measured: uptime {Uptime} bps, success {Success} bps, p95 {P95} ms, {Bytes} bytes over {Requests} requests.",
+                epoch, factors.UptimeBps, factors.SuccessBps, factors.P95Ms, factors.BytesServed, factors.Requests);
+            row = Save(new EpochReportRow(_distributor, epoch, startMs, endMs, factors, EpochReportState.Measured, null, null, null, 0, 0));
         }
 
-        if (row.State is not (EpochReportState.Measured or EpochReportState.Signed))
+        // From here the factors are persisted, so the history rows are no longer needed.
+        if (!await chain.AcceptsReportsAsync(epoch, ct))
         {
-            return row;
+            if (row.State != EpochReportState.Skipped)
+            {
+                logger.LogWarning("Service metrics: epoch {Epoch}'s report window elapsed before the report landed ({Error}).", epoch, row.LastError ?? "no attempt");
+            }
+
+            Save(row with { State = EpochReportState.Terminal, LastError = row.State == EpochReportState.Skipped ? row.LastError : "FinalityWindowElapsed" });
+            return null;
         }
 
-        var report = ReportOf(row);
-        if (row.State == EpochReportState.Measured)
+        if (row.State is EpochReportState.Measured or EpochReportState.Skipped)
         {
-            var attestation = await _attestor!.AttestAsync(report, ct);
-            row = Save(row with { State = EpochReportState.Signed, Signature = attestation.Signature });
+            // Rechecked while the window is open: a status read just after the boundary can lag a fresh activation.
+            if (!await chain.IsActiveAsync(node, BlobGateway, ct))
+            {
+                if (row.State != EpochReportState.Skipped)
+                {
+                    logger.LogDebug("Service metrics: Blob Gateway not Active for epoch {Epoch}; nothing to report.", epoch);
+                    Save(row with { State = EpochReportState.Skipped, LastError = "Blob Gateway is not Active" });
+                }
+
+                return null;
+            }
+
+            var attestation = await _attestor!.AttestAsync(ReportOf(row), ct);
+            row = Save(row with { State = EpochReportState.Signed, Signature = attestation.Signature, LastError = null });
         }
 
         // A crash after the transaction mined but before the local write must not send it twice.
         if (await chain.SubmittedAsync(epoch, node, BlobGateway, ct))
         {
             logger.LogInformation("Service metrics: epoch {Epoch}'s report is already on chain.", epoch);
-            return Save(row with { State = EpochReportState.Submitted, LastError = null });
-        }
-
-        if (!await chain.AcceptsReportsAsync(epoch, ct))
-        {
-            logger.LogWarning("Service metrics: epoch {Epoch}'s report window elapsed before the report landed ({Error}).", epoch, row.LastError ?? "no attempt");
-            return Save(row with { State = EpochReportState.Terminal, LastError = "FinalityWindowElapsed" });
+            Save(row with { State = EpochReportState.Submitted, LastError = null });
+            return null;
         }
 
         RelayOutcome outcome;
         try
         {
-            outcome = await relay.SubmitAsync(Wire.Request.From(report, new MetricAttestation(row.Signature!, "")), ct);
+            outcome = await relay.SubmitAsync(Wire.Request.From(ReportOf(row), new MetricAttestation(row.Signature!, "")), ct);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
         {
@@ -150,26 +203,28 @@ public sealed class ServiceMetricsReporter(
 
         if (outcome.Submitted)
         {
-            logger.LogInformation("Service metrics: epoch {Epoch} reported in {Tx}.", epoch, outcome.TransactionHash);
-            return Save(row with { State = EpochReportState.Submitted, TxHash = outcome.TransactionHash, LastError = null, Attempts = row.Attempts + 1 });
+            logger.LogInformation("Service metrics: epoch {Epoch} reported in {Tx}.", epoch, outcome.TransactionHash ?? "an earlier transaction");
+            Save(row with { State = EpochReportState.Submitted, TxHash = outcome.TransactionHash ?? row.TxHash, LastError = null, Attempts = row.Attempts + 1 });
         }
-
-        if (outcome.Terminal)
+        else if (outcome.Terminal)
         {
             logger.LogWarning("Service metrics: epoch {Epoch}'s report was refused: {Error}.", epoch, outcome.Error);
-            return Save(row with { State = EpochReportState.Terminal, TxHash = outcome.TransactionHash, LastError = outcome.Error, Attempts = row.Attempts + 1 });
+            Save(row with { State = EpochReportState.Terminal, TxHash = outcome.TransactionHash, LastError = outcome.Error, Attempts = row.Attempts + 1 });
         }
-
-        if (_lastWarnedEpoch != epoch)
+        else
         {
-            _lastWarnedEpoch = epoch;
-            logger.LogWarning("Service metrics: epoch {Epoch}'s report didn't go through, retrying until the window closes: {Error}.", epoch, outcome.Error);
+            if (_warned.Add(epoch))
+            {
+                logger.LogWarning("Service metrics: epoch {Epoch}'s report didn't go through, retrying until the window closes: {Error}.", epoch, outcome.Error);
+            }
+
+            Save(row with { TxHash = outcome.TransactionHash ?? row.TxHash, LastError = outcome.Error, Attempts = row.Attempts + 1 });
         }
 
-        return Save(row with { TxHash = outcome.TransactionHash ?? row.TxHash, LastError = outcome.Error, Attempts = row.Attempts + 1 });
+        return null;
     }
 
-    private MetricReport ReportOf(EpochReportRow row) => new(options.Value.RewardDistributorAddress, node, BlobGateway, row.Epoch,
+    private MetricReport ReportOf(EpochReportRow row) => new(_distributor, node, BlobGateway, row.Epoch,
         [row.Factors.UptimeBps, row.Factors.SuccessBps, row.Factors.P95Ms, new BigInteger(row.Factors.BytesServed)], row.Factors.UptimeBps);
 
     private EpochReportRow Save(EpochReportRow row)

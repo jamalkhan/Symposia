@@ -14,6 +14,7 @@ public sealed class ServiceMetricsReporterTests : IDisposable
 {
     private const string DevKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     private const string Node = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    private const string Distributor = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
     private const long EpochSeconds = 3600;
     private static readonly DateTimeOffset Genesis = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
 
@@ -36,8 +37,8 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         Directory.Delete(_dir, recursive: true);
     }
 
-    private ServiceMetricsReporter Reporter(Func<ulong, IMetricAttestor>? attestor = null) => new(_store, _recorder, _chain, _relay,
-        attestor ?? (id => new LocalDevSelfSigner(DevKey, id)), Node, Options.Create(new ServiceMetricsOptions { RewardDistributorAddress = "0x5FbDB2315678afecb367f032d93F642f64180aa3" }),
+    private ServiceMetricsReporter Reporter(Func<ulong, IMetricAttestor>? attestor = null, string distributor = Distributor) => new(_store, _recorder, _chain, _relay,
+        attestor ?? (id => new LocalDevSelfSigner(DevKey, id)), Node, Options.Create(new ServiceMetricsOptions { RewardDistributorAddress = distributor }),
         NullLogger<ServiceMetricsReporter>.Instance, _time);
 
     private static HistoryEntry Row(DateTimeOffset at, string op, int status, long? size, long? durationMs) =>
@@ -57,7 +58,8 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         }
     }
 
-    private void EnterEpoch1() => (_chain.Current, _time.Now) = (1, Genesis.AddSeconds(EpochSeconds + 10));
+    /// <summary>Epoch 1, past the measuring grace for epoch 0.</summary>
+    private void EnterEpoch1() => (_chain.Current, _time.Now) = (1, Genesis.AddSeconds(EpochSeconds) + ServiceMetricsReporter.MeasureGrace + TimeSpan.FromSeconds(1));
 
     [Fact]
     public void Aggregate_MatchesTheHistoryRows()
@@ -119,11 +121,11 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         Assert.Equal((Node, (byte)8, 0UL), (sent.Node, sent.Service, sent.Epoch));
         Assert.Equal(["5000", (10_000 * 20 / 21).ToString(), "19", "6000"], sent.Values);
         Assert.Equal(5000u, sent.HeartbeatBps);
-        var row = _store.GetEpochReport(0)!;
+        var row = _store.GetEpochReport(Distributor, 0)!;
         Assert.Equal((EpochReportState.Submitted, "0xtx"), (row.State, row.TxHash));
 
         var signer = new LocalDevSelfSigner(DevKey, 31337);
-        var report = new MetricReport("0x5FbDB2315678afecb367f032d93F642f64180aa3", Node, 8, 0, [.. sent.Values.Select(System.Numerics.BigInteger.Parse)], sent.HeartbeatBps);
+        var report = new MetricReport(Distributor, Node, 8, 0, [.. sent.Values.Select(System.Numerics.BigInteger.Parse)], sent.HeartbeatBps);
         Assert.Equal(signer.Address, MetricReportDigest.Recover(report, sent.Signature), ignoreCase: true);
     }
 
@@ -153,7 +155,7 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         await Reporter().TickAsync(default);
 
         Assert.Single(_relay.Sent);
-        Assert.Equal(EpochReportState.Submitted, _store.GetEpochReport(0)!.State);
+        Assert.Equal(EpochReportState.Submitted, _store.GetEpochReport(Distributor, 0)!.State);
     }
 
     [Fact]
@@ -171,7 +173,7 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         Assert.Equal(2, _relay.Sent.Count);
         Assert.Equal(_relay.Sent[0].Signature, _relay.Sent[1].Signature);
         Assert.Equal(1, signs);
-        var row = _store.GetEpochReport(0)!;
+        var row = _store.GetEpochReport(Distributor, 0)!;
         Assert.Equal((EpochReportState.Submitted, 2), (row.State, row.Attempts));
     }
 
@@ -187,7 +189,7 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         await reporter.TickAsync(default);
 
         Assert.Single(_relay.Sent);
-        Assert.Equal((EpochReportState.Terminal, "InvalidSignature"), (_store.GetEpochReport(0)!.State, _store.GetEpochReport(0)!.LastError));
+        Assert.Equal((EpochReportState.Terminal, "InvalidSignature"), (_store.GetEpochReport(Distributor, 0)!.State, _store.GetEpochReport(Distributor, 0)!.LastError));
     }
 
     [Fact]
@@ -200,7 +202,7 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         await Reporter().TickAsync(default);
 
         Assert.Empty(_relay.Sent);
-        Assert.Equal((EpochReportState.Terminal, "FinalityWindowElapsed"), (_store.GetEpochReport(0)!.State, _store.GetEpochReport(0)!.LastError));
+        Assert.Equal((EpochReportState.Terminal, "FinalityWindowElapsed"), (_store.GetEpochReport(Distributor, 0)!.State, _store.GetEpochReport(Distributor, 0)!.LastError));
     }
 
     [Fact]
@@ -213,7 +215,7 @@ public sealed class ServiceMetricsReporterTests : IDisposable
         await Reporter().TickAsync(default);
 
         Assert.Empty(_relay.Sent);
-        Assert.Equal(EpochReportState.Skipped, _store.GetEpochReport(0)!.State);
+        Assert.Equal(EpochReportState.Skipped, _store.GetEpochReport(Distributor, 0)!.State);
     }
 
     [Fact]
@@ -239,19 +241,115 @@ public sealed class ServiceMetricsReporterTests : IDisposable
     [Fact]
     public async Task UnmeasuredEpoch_HoldsTheSweep_UntilItIsMeasured()
     {
-        // Mid epoch 1 with epoch 0 unmeasured: its rows are past the 1 h LocalDev retention but must survive.
+        // Just into epoch 1, inside the grace: epoch 0 isn't measured yet, so its rows are held.
         SeedEpoch0();
         _chain.Current = 1;
         _time.Now = Genesis.AddSeconds(EpochSeconds + 10);
-        _chain.WindowOpen = true;
-        _recorder.HoldFrom = Genesis;
-        _time.Now = Genesis.AddSeconds(EpochSeconds * 2 - 60); // 1 h 59 min in: epoch 0's rows are expired
+        await Reporter().TickAsync(default);
+        Assert.Equal(Genesis, _recorder.HoldFrom);
+
+        _time.Now = Genesis.AddSeconds(EpochSeconds * 2 - 60); // epoch 0's rows are past the 1 h LocalDev retention
         Assert.Equal(0, _recorder.Sweep());
 
-        await Reporter().TickAsync(default); // measures epoch 0, then holds from epoch 1's start
+        await Reporter().TickAsync(default); // measures epoch 0, then holds only from epoch 1's start
 
         Assert.Equal(Genesis.AddSeconds(EpochSeconds), _recorder.HoldFrom);
         Assert.Equal(21, _recorder.Sweep());
+    }
+
+    [Fact]
+    public void Restart_HoldsEverything_UntilTheReporterHasRun()
+    {
+        var recorder = new HistoryRecorder(_store, Options.Create(new GatewayOptions { ChainId = 31337, ServiceMetrics = { Enabled = true } }),
+            NullLogger<HistoryRecorder>.Instance, time: _time);
+        _store.Append([Row(Genesis, HistoryOperation.View, 200, 1, 1)]);
+        _time.Now = Genesis.AddHours(2); // past retention, within MaxHold
+
+        Assert.Equal(0, recorder.Sweep());
+    }
+
+    [Fact]
+    public async Task EpochsMissedWhileBehind_AreStillReported()
+    {
+        // The gateway was down across a boundary: back at epoch 2 with epoch 0's window still open.
+        SeedEpoch0();
+        _chain.Current = 2;
+        _time.Now = Genesis.AddSeconds(EpochSeconds * 2 + 60);
+
+        await Reporter().TickAsync(default);
+
+        Assert.Equal([0UL, 1UL], _relay.Sent.Select(r => r.Epoch).Order());
+    }
+
+    [Fact]
+    public async Task ResetChain_UnderANewDistributor_ReportsAgain()
+    {
+        SeedEpoch0();
+        EnterEpoch1();
+        await Reporter().TickAsync(default);
+
+        await Reporter(distributor: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512").TickAsync(default);
+
+        Assert.Equal(2, _relay.Sent.Count);
+    }
+
+    [Fact]
+    public async Task Skipped_IsRecheckedWhileTheWindowIsOpen()
+    {
+        SeedEpoch0();
+        EnterEpoch1();
+        _chain.Active = false;
+        await Reporter().TickAsync(default);
+        _chain.Active = true;
+
+        await Reporter().TickAsync(default);
+
+        Assert.Single(_relay.Sent);
+        Assert.Equal(EpochReportState.Submitted, _store.GetEpochReport(Distributor, 0)!.State);
+    }
+
+    [Fact]
+    public void Uptime_FullOnAnEpochThatDoesntStartOnAMinute()
+    {
+        var start = Genesis.AddSeconds(30);
+        for (var t = start; t < start.AddSeconds(EpochSeconds); t = t.AddSeconds(15))
+        {
+            _store.RecordLiveness(t);
+        }
+
+        Assert.Equal(10_000u, _store.Aggregate(start.ToUnixTimeMilliseconds(), start.AddSeconds(EpochSeconds).ToUnixTimeMilliseconds()).UptimeBps);
+    }
+
+    [Fact]
+    public void MultiObjectRequest_CountsOnceForSuccessAndLatency()
+    {
+        var rid = "multi";
+        _store.Append([.. Enumerable.Range(0, 10).Select(i => Row(Genesis.AddSeconds(1), HistoryOperation.Delete, 503, null, 900) with { RequestId = rid, Key = "k" + i })]);
+        _store.Append([Row(Genesis.AddSeconds(2), HistoryOperation.View, 200, 10, 5)]);
+
+        var f = _store.Aggregate(Genesis.ToUnixTimeMilliseconds(), Genesis.AddSeconds(EpochSeconds).ToUnixTimeMilliseconds());
+
+        Assert.Equal((2L, 5_000u), (f.Requests, f.SuccessBps));
+    }
+
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.Conflict, true)]
+    [InlineData(System.Net.HttpStatusCode.BadRequest, true)]
+    [InlineData(System.Net.HttpStatusCode.NotFound, false)]
+    [InlineData(System.Net.HttpStatusCode.BadGateway, false)]
+    public async Task Relay_OnlyRefusalsAreTerminal(System.Net.HttpStatusCode status, bool terminal)
+    {
+        var relay = new HttpServiceMetricsRelay(new HttpClient(new StatusHandler(status)) { BaseAddress = new Uri("http://relay") });
+
+        var outcome = await relay.SubmitAsync(new Wire.Request(Node, 8, 0, ["1"], 0, "0x"), default);
+
+        Assert.Equal((false, terminal), (outcome.Submitted, outcome.Terminal));
+    }
+
+    private sealed class StatusHandler(System.Net.HttpStatusCode status) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("""{"error":"x"}""", System.Text.Encoding.UTF8, "application/json") });
     }
 
     [Fact]

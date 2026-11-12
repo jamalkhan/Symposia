@@ -59,6 +59,21 @@ public sealed class ServiceMetricsRelayChainTests(RewardsChainFixture chain) : I
     }
 
     [Fact]
+    public async Task Replay_OfAnAcceptedReport_SendsNothing()
+    {
+        await using var gateway = Gateway();
+        var report = Report(await CurrentEpochAsync(), 9_000, 9_000, 10, 10) with { Node = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65" }; // anvil #4
+        var request = Wire.Request.From(report, await new LocalDevSelfSigner(RewardsChainFixture.DeployerKey, 31337).AttestAsync(report, default));
+        var client = gateway.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(Wire.Path, request)).StatusCode);
+
+        var again = await client.PostAsJsonAsync(Wire.Path, request);
+
+        Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+        Assert.Null((await again.Content.ReadFromJsonAsync<Wire.Response>())!.TransactionHash);
+    }
+
+    [Fact]
     public async Task WrongSigner_Is409InvalidSignature()
     {
         await using var gateway = Gateway();
@@ -75,7 +90,7 @@ public sealed class ServiceMetricsRelayChainTests(RewardsChainFixture chain) : I
     public async Task WrongFactorCount_Is409FactorCountMismatch()
     {
         await using var gateway = Gateway();
-        var report = Report(await CurrentEpochAsync(), 1, 2, 3);
+        var report = Report(await CurrentEpochAsync(), 1, 2, 3) with { Node = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc" }; // anvil #5: no report yet
         var signer = new LocalDevSelfSigner(RewardsChainFixture.DeployerKey, 31337);
 
         var response = await gateway.CreateClient().PostAsJsonAsync(Wire.Path, Wire.Request.From(report, await signer.AttestAsync(report, default)));

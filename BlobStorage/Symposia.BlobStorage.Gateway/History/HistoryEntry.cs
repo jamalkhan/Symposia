@@ -34,7 +34,7 @@ public enum EpochReportState
 }
 
 /// <summary>A persisted epoch report: factors measured once at epoch end, then its submission state.</summary>
-public sealed record EpochReportRow(ulong Epoch, long StartMs, long EndMs, EpochFactors Factors, EpochReportState State,
+public sealed record EpochReportRow(string Distributor, ulong Epoch, long StartMs, long EndMs, EpochFactors Factors, EpochReportState State,
     string? Signature, string? TxHash, string? LastError, int Attempts, long UpdatedMs);
 
 /// <summary>Operation types recorded per object.</summary>

@@ -241,38 +241,51 @@ public sealed class LedgerService(
     /// Says why an Ineligible settlement got nothing (#221): most often no metric report was submitted, which
     /// isn't the operator's doing. Persisted rows keep the raw reason; this is applied per snapshot. Only
     /// successful lookups are cached (the answer can't change after the seal); a failed one keeps the raw text.
+    /// Uncached lookups run <see cref="LookupConcurrency"/> at a time, and the first failure stops the rest for this
+    /// snapshot, so a down RPC costs one timeout per load, not one per row.
     /// </summary>
     private async Task<List<LedgerEntry>> ExplainIneligibleAsync(ILedgerLogSource source, CancellationToken ct)
     {
-        var rows = new List<LedgerEntry>(_entries.Count);
-        foreach (var e in _entries)
-        {
-            if (e is { Category: LedgerCategory.Reward, Type: "No reward", Epoch: { } epoch } && e.Detail == SettlementReasons[3]
-                && NodeServiceCatalog.All.FirstOrDefault(s => s.Name == e.Service)?.Id is { } service)
-            {
-                if (!_reported.TryGetValue((epoch, service), out var reported))
-                {
-                    try
-                    {
-                        reported = await source.MetricSubmittedAsync(node, service, epoch, ct);
-                        _reported[(epoch, service)] = reported;
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        rows.Add(e);
-                        continue;
-                    }
-                }
+        (ulong Epoch, int Service)? KeyOf(LedgerEntry e) =>
+            e is { Category: LedgerCategory.Reward, Type: "No reward", Epoch: { } epoch } && e.Detail == SettlementReasons[3]
+            && NodeServiceCatalog.All.FirstOrDefault(s => s.Name == e.Service)?.Id is { } service ? (epoch, service) : null;
 
-                rows.Add(e with { Detail = reported ? IneligibleWithReport : NoMetricReport });
-                continue;
+        var missing = _entries.Select(KeyOf).OfType<(ulong Epoch, int Service)>().Where(k => !_reported.ContainsKey(k)).Distinct().ToList();
+        if (missing.Count > 0)
+        {
+            using var failed = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var found = new System.Collections.Concurrent.ConcurrentDictionary<(ulong, int), bool>();
+            try
+            {
+                await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = LookupConcurrency, CancellationToken = failed.Token },
+                    async (k, token) =>
+                    {
+                        try
+                        {
+                            found[k] = await source.MetricSubmittedAsync(node, k.Service, k.Epoch, token);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            failed.Cancel();
+                        }
+                    });
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
             }
 
-            rows.Add(e);
+            foreach (var (k, v) in found)
+            {
+                _reported[k] = v;
+            }
         }
 
-        return rows;
+        return [.. _entries.Select(e => KeyOf(e) is { } k && _reported.TryGetValue(k, out var reported)
+            ? e with { Detail = reported ? IneligibleWithReport : NoMetricReport }
+            : e)];
     }
+
+    public const int LookupConcurrency = 4;
 
     private async Task<IReadOnlyList<ServiceTotals>> TotalsAsync(ILedgerLogSource source, CancellationToken ct)
     {

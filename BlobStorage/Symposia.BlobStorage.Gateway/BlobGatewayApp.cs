@@ -206,8 +206,9 @@ public static class BlobGatewayApp
         AdminEndpoints.Map(app);
 
         // Local diagnostics for the last epoch's reward report (#221 FR4); admin paths skip SigV4.
-        app.MapGet("/admin/service-metrics", (History.HistoryStore store) =>
-            store.LatestEpochReport() is { } r
+        app.MapGet("/admin/service-metrics", (HttpContext ctx, History.HistoryStore store) =>
+            ctx.Connection.RemoteIpAddress is not { } ip || !System.Net.IPAddress.IsLoopback(ip) ? Results.NotFound()
+            : store.LatestEpochReport() is { } r
                 ? Results.Ok(new { r.Epoch, State = r.State.ToString(), r.Factors.UptimeBps, r.Factors.SuccessBps, r.Factors.P95Ms, r.Factors.BytesServed,
                     r.Factors.Requests, r.TxHash, r.LastError, r.Attempts })
                 : Results.NoContent());

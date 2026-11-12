@@ -50,9 +50,11 @@ public sealed class HistoryStore
             CREATE INDEX IF NOT EXISTS idx_history_ts ON object_history (ts_ms);
             -- #221: one row per minute the gateway was up, for the uptime factor.
             CREATE TABLE IF NOT EXISTS gateway_liveness (minute_ms INTEGER PRIMARY KEY);
-            -- #221: each epoch's factors, measured once, and the report's submission state.
+            -- #221: each epoch's factors, measured once, and the report's submission state. Keyed by the
+            -- distributor too: a reset LocalDev chain starts over at epoch 0 under a new one.
             CREATE TABLE IF NOT EXISTS epoch_report (
-                epoch        INTEGER PRIMARY KEY,
+                distributor  TEXT NOT NULL,
+                epoch        INTEGER NOT NULL,
                 start_ms     INTEGER NOT NULL,
                 end_ms       INTEGER NOT NULL,
                 uptime_bps   INTEGER NOT NULL,
@@ -65,7 +67,8 @@ public sealed class HistoryStore
                 tx_hash      TEXT,
                 last_error   TEXT,
                 attempts     INTEGER NOT NULL DEFAULT 0,
-                updated_ms   INTEGER NOT NULL
+                updated_ms   INTEGER NOT NULL,
+                PRIMARY KEY (distributor, epoch)
             );
             """;
         cmd.ExecuteNonQuery();
@@ -188,8 +191,9 @@ public sealed class HistoryStore
 
     /// <summary>
     /// The Blob Gateway factors over [<paramref name="startMs"/>, <paramref name="endMs"/>) (#221), in one read
-    /// transaction. Both range scans use <c>idx_history_ts</c>; the p95 sort over the range is a temp B-tree,
-    /// once per epoch, off the request path.
+    /// transaction. Success rate and p95 are per request (a multi-object request writes a row per object, all with
+    /// its status and duration); bytes served is per object read. Every range scan uses <c>idx_history_ts</c>; the
+    /// per-request grouping and the p95 sort are temp B-trees over the range, once per epoch, off the request path.
     /// </summary>
     public EpochFactors Aggregate(long startMs, long endMs)
     {
@@ -201,29 +205,36 @@ public sealed class HistoryStore
         cmd.Parameters.AddWithValue("$e", endMs);
 
         cmd.CommandText = """
-            SELECT COUNT(*), COALESCE(SUM(status >= 500), 0),
-                   COALESCE(SUM(CASE WHEN operation = 'view' AND status < 400 THEN size_bytes END), 0), COUNT(duration_ms)
-            FROM object_history WHERE ts_ms >= $s AND ts_ms < $e
+            SELECT COUNT(*), COALESCE(SUM(failed), 0), COUNT(duration_ms)
+            FROM (SELECT MAX(status >= 500) AS failed, MAX(duration_ms) AS duration_ms
+                  FROM object_history WHERE ts_ms >= $s AND ts_ms < $e GROUP BY request_id)
             """;
-        long requests, failures, bytes, timed;
+        long requests, failures, timed;
         using (var r = cmd.ExecuteReader())
         {
             r.Read();
-            (requests, failures, bytes, timed) = (r.GetInt64(0), r.GetInt64(1), r.GetInt64(2), r.GetInt64(3));
+            (requests, failures, timed) = (r.GetInt64(0), r.GetInt64(1), r.GetInt64(2));
         }
+
+        cmd.CommandText = "SELECT COALESCE(SUM(size_bytes), 0) FROM object_history WHERE ts_ms >= $s AND ts_ms < $e AND operation = 'view' AND status < 400";
+        var bytes = Convert.ToInt64(cmd.ExecuteScalar());
 
         long p95 = 0;
         if (timed > 0)
         {
             // Nearest rank: the ceil(0.95 n)-th smallest.
-            cmd.CommandText = "SELECT duration_ms FROM object_history WHERE ts_ms >= $s AND ts_ms < $e AND duration_ms IS NOT NULL ORDER BY duration_ms LIMIT 1 OFFSET $k";
+            cmd.CommandText = """
+                SELECT d FROM (SELECT MAX(duration_ms) AS d FROM object_history WHERE ts_ms >= $s AND ts_ms < $e GROUP BY request_id)
+                WHERE d IS NOT NULL ORDER BY d LIMIT 1 OFFSET $k
+                """;
             cmd.Parameters.AddWithValue("$k", ((timed * 95) + 99) / 100 - 1);
             p95 = Convert.ToInt64(cmd.ExecuteScalar());
         }
 
-        cmd.CommandText = "SELECT COUNT(*) FROM gateway_liveness WHERE minute_ms >= $s AND minute_ms < $e";
+        // Minutes overlapping the epoch, counted the same way on both sides: chain epochs needn't start on a minute.
+        cmd.CommandText = "SELECT COUNT(*) FROM gateway_liveness WHERE minute_ms > $s - 60000 AND minute_ms < $e";
         var upMinutes = Convert.ToInt64(cmd.ExecuteScalar());
-        var epochMinutes = Math.Max(1, (endMs - startMs + 59_999) / 60_000);
+        var epochMinutes = Math.Max(1, ((endMs - 1) / 60_000) - (startMs / 60_000) + 1);
 
         tx.Commit();
         return new EpochFactors(
@@ -234,22 +245,23 @@ public sealed class HistoryStore
             Requests: requests);
     }
 
-    public EpochReportRow? GetEpochReport(ulong epoch)
+    public EpochReportRow? GetEpochReport(string distributor, ulong epoch)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms FROM epoch_report WHERE epoch = $e";
+        cmd.CommandText = $"SELECT {ReportColumns} FROM epoch_report WHERE distributor = $d AND epoch = $e";
+        cmd.Parameters.AddWithValue("$d", distributor.ToLowerInvariant());
         cmd.Parameters.AddWithValue("$e", (long)epoch);
         using var r = cmd.ExecuteReader();
         return r.Read() ? ReadReport(r) : null;
     }
 
-    /// <summary>The most recent epoch's report, for diagnostics.</summary>
+    /// <summary>The most recently updated report, for diagnostics.</summary>
     public EpochReportRow? LatestEpochReport()
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms FROM epoch_report ORDER BY epoch DESC LIMIT 1";
+        cmd.CommandText = $"SELECT {ReportColumns} FROM epoch_report ORDER BY updated_ms DESC LIMIT 1";
         using var r = cmd.ExecuteReader();
         return r.Read() ? ReadReport(r) : null;
     }
@@ -259,13 +271,13 @@ public sealed class HistoryStore
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO epoch_report (epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms)
-            VALUES ($epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $state, $sig, $tx, $err, $attempts, $updated)
-            ON CONFLICT (epoch) DO UPDATE SET state = $state, signature = $sig, tx_hash = $tx, last_error = $err, attempts = $attempts, updated_ms = $updated
+            INSERT INTO epoch_report (distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms)
+            VALUES ($dist, $epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $state, $sig, $tx, $err, $attempts, $updated)
+            ON CONFLICT (distributor, epoch) DO UPDATE SET state = $state, signature = $sig, tx_hash = $tx, last_error = $err, attempts = $attempts, updated_ms = $updated
             """;
-        object?[] values = [(long)row.Epoch, row.StartMs, row.EndMs, (long)row.Factors.UptimeBps, (long)row.Factors.SuccessBps, row.Factors.P95Ms,
+        object?[] values = [row.Distributor.ToLowerInvariant(), (long)row.Epoch, row.StartMs, row.EndMs, (long)row.Factors.UptimeBps, (long)row.Factors.SuccessBps, row.Factors.P95Ms,
             row.Factors.BytesServed, row.Factors.Requests, row.State.ToString(), row.Signature, row.TxHash, row.LastError, row.Attempts, row.UpdatedMs];
-        string[] names = ["$epoch", "$s", "$e", "$up", "$ok", "$p95", "$bytes", "$n", "$state", "$sig", "$tx", "$err", "$attempts", "$updated"];
+        string[] names = ["$dist", "$epoch", "$s", "$e", "$up", "$ok", "$p95", "$bytes", "$n", "$state", "$sig", "$tx", "$err", "$attempts", "$updated"];
         for (var i = 0; i < names.Length; i++)
         {
             cmd.Parameters.AddWithValue(names[i], values[i] ?? DBNull.Value);
@@ -284,10 +296,13 @@ public sealed class HistoryStore
         return cmd.ExecuteNonQuery();
     }
 
+    private const string ReportColumns =
+        "distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, state, signature, tx_hash, last_error, attempts, updated_ms";
+
     private static EpochReportRow ReadReport(SqliteDataReader r) => new(
-        (ulong)r.GetInt64(0), r.GetInt64(1), r.GetInt64(2),
-        new EpochFactors((uint)r.GetInt64(3), (uint)r.GetInt64(4), r.GetInt64(5), r.GetInt64(6), r.GetInt64(7)),
-        Enum.Parse<EpochReportState>(r.GetString(8)), Text(r, 9), Text(r, 10), Text(r, 11), r.GetInt32(12), r.GetInt64(13));
+        r.GetString(0), (ulong)r.GetInt64(1), r.GetInt64(2), r.GetInt64(3),
+        new EpochFactors((uint)r.GetInt64(4), (uint)r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8)),
+        Enum.Parse<EpochReportState>(r.GetString(9)), Text(r, 10), Text(r, 11), Text(r, 12), r.GetInt32(13), r.GetInt64(14));
 
     /// <summary>The database's size on disk, including its WAL.</summary>
     public long SizeBytes => new[] { DatabasePath, DatabasePath + "-wal" }.Sum(f => File.Exists(f) ? new FileInfo(f).Length : 0);
