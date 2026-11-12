@@ -20,8 +20,8 @@ forge test
 ```shell
 anvil &
 KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80   # anvil account #0, dev only
-forge script script/Deploy.s.sol:Deploy --rpc-url http://localhost:8545 --private-key $KEY --broadcast
-forge script script/DeployRewards.s.sol:DeployRewards --rpc-url http://localhost:8545 --private-key $KEY --broadcast
+forge script script/Deploy.s.sol:Deploy --rpc-url http://localhost:8545 --private-key $KEY --broadcast --slow
+forge script script/DeployRewards.s.sol:DeployRewards --rpc-url http://localhost:8545 --private-key $KEY --broadcast --slow
 ```
 
 `DeployRewards` logs every address and writes them to `deployments/rewards-<chainId>.json`

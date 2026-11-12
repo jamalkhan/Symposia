@@ -49,7 +49,7 @@ public sealed class RewardsChainFixture : IAsyncLifetime
         _anvil = await AnvilProcess.StartAsync();
 
         var deploy = new ProcessStartInfo(Path.Combine(FoundryBin, "forge"),
-            $"script script/DeployRewards.s.sol:DeployRewards --rpc-url {RpcUrl} --private-key {DeployerKey} --broadcast")
+            $"script script/DeployRewards.s.sol:DeployRewards --rpc-url {RpcUrl} --private-key {DeployerKey} --broadcast --slow")
         {
             WorkingDirectory = BootstrapChainDir(),
             RedirectStandardOutput = true,
@@ -86,7 +86,7 @@ public sealed class RewardsChainFixture : IAsyncLifetime
             catch (OperationCanceledException)
             {
                 forge.Kill(entireProcessTree: true);
-                throw new TimeoutException("DeployRewards did not finish within 5 minutes.");
+                throw new TimeoutException($"DeployRewards did not finish within 5 minutes:\n{await stdout}\n{await stderrTask}");
             }
         }
 

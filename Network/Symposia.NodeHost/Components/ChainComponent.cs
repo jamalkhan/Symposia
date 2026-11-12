@@ -280,9 +280,11 @@ public sealed partial class ChainComponent : HostComponent
         }
     }
 
+    // --slow on every multi-transaction script: forge otherwise sends them in parallel, anvil can miss some, and the
+    // rest queue behind the nonce gap while forge waits for receipts forever (#186).
     private static async Task<Deployment> DeployAsync(string foundryBin, string rpcUrl, CancellationToken ct)
     {
-        var output = await ForgeAsync(foundryBin, ct, "script", "script/Deploy.s.sol:Deploy", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast");
+        var output = await ForgeAsync(foundryBin, ct, "script", "script/Deploy.s.sol:Deploy", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast", "--slow");
         return new Deployment(Extract(output, "NodeRegistry"), Extract(output, "EpochRootRegistry"), rpcUrl, AnvilChainId, Extract(output, "ProtocolActivations"));
     }
 
@@ -294,7 +296,7 @@ public sealed partial class ChainComponent : HostComponent
         string foundryBin, string rpcUrl, LocalDevRewardsProfile profile, CancellationToken ct)
     {
         var output = await ForgeAsync(foundryBin, profile.ToEnvironment(), ct,
-            "script", "script/DeployRewards.s.sol:DeployRewards", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast");
+            "script", "script/DeployRewards.s.sol:DeployRewards", "--rpc-url", rpcUrl, "--private-key", AnvilDevKey, "--broadcast", "--slow");
         return (Extract(output, "RewardDistributor"), Extract(output, "EpochController"), Extract(output, "TelemetryCheckpointRegistry"),
             Extract(output, "StakingNodeRegistry"));
     }

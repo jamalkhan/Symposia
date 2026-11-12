@@ -75,7 +75,7 @@ public sealed class ChainFixture : WebApplicationFactory<Program>, IAsyncLifetim
             using var deploy = Process.Start(new ProcessStartInfo
             {
                 FileName = Path.Combine(foundryBin, "forge"),
-                Arguments = $"script script/Deploy.s.sol:Deploy --rpc-url {RpcUrl} --private-key {DeployerPrivateKey} --broadcast",
+                Arguments = $"script script/Deploy.s.sol:Deploy --rpc-url {RpcUrl} --private-key {DeployerPrivateKey} --broadcast --slow",
                 WorkingDirectory = BootstrapChainDir(),
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
