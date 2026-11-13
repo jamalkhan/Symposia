@@ -68,6 +68,9 @@ public interface IVerifierChain
 
     Task<bool> SeededAsync(ulong epoch, CancellationToken ct) => Task.FromResult(false);
 
+    /// <summary>Values per attestation in <paramref name="epoch"/>, fixed when it was committed.</summary>
+    Task<int> FactorsInAsync(ulong epoch, CancellationToken ct) => Task.FromResult(4);
+
     /// <summary>This Verifier's (target, slot) assignments for <paramref name="epoch"/>, all pages.</summary>
     Task<IReadOnlyList<(string Target, byte Slot)>> AssignmentsOfAsync(ulong epoch, string verifier, CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<(string, byte)>>([]);
@@ -119,6 +122,10 @@ public sealed class NethereumVerifierChain(VerifierOptions options, INodeRegistr
 
     public async Task<bool> SeededAsync(ulong epoch, CancellationToken ct) => await AssignmentsContractAsync(ct) is { Length: > 0 } a
         && (await _web3.Eth.GetContractQueryHandler<SeedOfFunction>().QueryAsync<byte[]>(a, new SeedOfFunction { Epoch = epoch })).Any(b => b != 0);
+
+    public async Task<int> FactorsInAsync(ulong epoch, CancellationToken ct) => await AssignmentsContractAsync(ct) is { Length: > 0 } a
+        ? await _web3.Eth.GetContractQueryHandler<FactorsInFunction>().QueryAsync<byte>(a, new FactorsInFunction { Epoch = epoch })
+        : 0;
 
     public async Task<IReadOnlyList<(string Target, byte Slot)>> AssignmentsOfAsync(ulong epoch, string verifier, CancellationToken ct)
     {

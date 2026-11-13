@@ -148,7 +148,8 @@ public static class VerifierAttestationWire
     /// <summary><paramref name="Values"/> are decimal strings (uint256).</summary>
     public sealed record ItemWire(string Target, byte Slot, IReadOnlyList<string> Values);
 
-    public sealed record Request(ulong Epoch, string Verifier, IReadOnlyList<ItemWire> Items, string Signature);
+    /// <param name="Nonce">Must exceed the last one used for (epoch, verifier); the Verifier uses unix milliseconds.</param>
+    public sealed record Request(ulong Epoch, string Verifier, ulong Nonce, IReadOnlyList<ItemWire> Items, string Signature);
 
     public sealed record SyncRequest(string Node);
 
@@ -156,14 +157,14 @@ public static class VerifierAttestationWire
         [.. items.Select(i => new Blockchain.Contracts.AttestationItem { Target = i.Target, Slot = i.Slot, Values = [.. i.Values.Select(BigInteger.Parse)] })];
 
     /// <summary>Signs a batch with the Verifier's node key, as <c>VerifierAssignments.attest</c> checks.</summary>
-    public static string Sign(EthECKey nodeKey, string contract, ulong chainId, ulong epoch, IReadOnlyList<ItemWire> items) =>
-        new EthereumMessageSigner().Sign(Blockchain.Contracts.AttestationDigest.Hash(contract, chainId, epoch, nodeKey.GetPublicAddress(), ToItems(items)), nodeKey);
+    public static string Sign(EthECKey nodeKey, string contract, ulong chainId, ulong epoch, ulong nonce, IReadOnlyList<ItemWire> items) =>
+        new EthereumMessageSigner().Sign(Blockchain.Contracts.AttestationDigest.Hash(contract, chainId, epoch, nodeKey.GetPublicAddress(), nonce, ToItems(items)), nodeKey);
 
     public static string Recover(string contract, ulong chainId, Request r)
     {
         try
         {
-            return new EthereumMessageSigner().EcRecover(Blockchain.Contracts.AttestationDigest.Hash(contract, chainId, r.Epoch, r.Verifier, ToItems(r.Items)), r.Signature);
+            return new EthereumMessageSigner().EcRecover(Blockchain.Contracts.AttestationDigest.Hash(contract, chainId, r.Epoch, r.Verifier, r.Nonce, ToItems(r.Items)), r.Signature);
         }
         catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException)
         {

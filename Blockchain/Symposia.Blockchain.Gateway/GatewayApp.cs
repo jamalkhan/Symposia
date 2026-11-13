@@ -23,6 +23,8 @@ public static class GatewayApp
 
         builder.Services.Configure<GatewayOptions>(builder.Configuration.GetSection("Gateway"));
         builder.Services.AddSingleton<RelayerAccount>();
+        builder.Services.AddSingleton<VerifierAssignmentsResolver>();
+        builder.Services.AddSingleton<VerifierRelayGuard>();
         builder.Services.AddSingleton<BootstrapChainClient>();
         builder.Services.AddSingleton<LocalDevChain>();
 

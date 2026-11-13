@@ -193,10 +193,10 @@ contract DeployRewards is Script {
         cfg.setUint(ConfigKeys.rewardStagePenaltyBps(1), 7_000);
         cfg.setUint(ConfigKeys.rewardStagePenaltyBps(2), 4_000);
 
-        // Verifier check assignments (#227): k = 3 per Blob Gateway, judged against the median within 10% or an
+        // Verifier check assignments (#227): k = 5 per Blob Gateway, judged against the median within 10% or an
         // absolute floor (bps factors 200, p95 50 ms; bytes relative only). Every entry point is permissionless.
         cfg.setAddress(ConfigKeys.REWARD_VERIFIER_ASSIGNMENTS, address(d.assignments));
-        cfg.setUint(ConfigKeys.VERIFIER_K, 3);
+        cfg.setUint(ConfigKeys.VERIFIER_K, 5);
         cfg.setUint(ConfigKeys.VERIFIER_TARGET_SERVICE, 8);
         cfg.setUint(ConfigKeys.VERIFIER_TOLERANCE_REL_BPS, 1_000);
         cfg.setUint(ConfigKeys.verifierToleranceAbs(0), 200);

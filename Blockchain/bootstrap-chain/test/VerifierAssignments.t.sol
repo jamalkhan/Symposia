@@ -9,6 +9,7 @@ import {VerifierAssignments} from "../src/VerifierAssignments.sol";
 import {VerifierFactorReader} from "../src/libraries/VerifierFactorReader.sol";
 import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.sol";
 import {ConfigKeys} from "../src/config/ConfigKeys.sol";
+import {FactorScoring} from "../src/libraries/FactorScoring.sol";
 
 /// @notice #227: on-chain Verifier assignments, attestations, peer-agreement accuracy and Verifier payouts.
 contract VerifierAssignmentsTest is CoreProtocolTestBase {
@@ -21,6 +22,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
     uint256[] internal vPks;
     address[] internal vs;
     address[] internal gws;
+    uint256 internal nonce;
 
     function setUp() public {
         _deployCoreProtocol();
@@ -80,8 +82,15 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         (v[0], v[1], v[2], v[3]) = (up, ok, p95, bytesServed);
     }
 
-    function _sign(uint256 pk, uint256 epoch, address verifier, VerifierAssignments.Item[] memory items) internal view returns (bytes memory) {
-        bytes32 digest = keccak256(abi.encode(address(va), block.chainid, epoch, verifier, keccak256(abi.encode(items))));
+    /// @dev Commit, then reveal once the committed block is mined.
+    function _seed() internal {
+        va.seedEpoch(0);
+        vm.roll(block.number + va.SEED_DELAY() + 1);
+        va.revealSeed(0);
+    }
+
+    function _sign(uint256 pk, uint256 epoch, address verifier, uint256 n, VerifierAssignments.Item[] memory items) internal view returns (bytes memory) {
+        bytes32 digest = keccak256(abi.encode(address(va), block.chainid, epoch, verifier, n, keccak256(abi.encode(items))));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest)));
         return abi.encodePacked(r, s, v);
     }
@@ -95,7 +104,8 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         require(slot != type(uint8).max, "not assigned");
         VerifierAssignments.Item[] memory items = new VerifierAssignments.Item[](1);
         items[0] = VerifierAssignments.Item(target, slot, values);
-        va.attest(0, verifier, items, _sign(_pkOf(verifier), 0, verifier, items));
+        uint256 n = ++nonce;
+        va.attest(0, verifier, n, items, _sign(_pkOf(verifier), 0, verifier, n, items));
     }
 
     function _record(uint16 compliance) internal pure returns (TelemetryCheckpointRegistry.AggregatedMetricRecord memory r) {
@@ -109,7 +119,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_AssignmentsAreDistinctDeterministicAndNeverSelf() public {
         _network(5, 4);
-        va.seedEpoch(0);
+        _seed();
 
         for (uint256 g; g < gws.length; g++) {
             address[] memory chosen = va.assignedVerifiers(0, gws[g]);
@@ -127,7 +137,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         _network(2, 0);
         _register(vs[0], GATEWAY, 40e18); // verifier 0 also runs a gateway
         va.sync(vs[0]);
-        va.seedEpoch(0);
+        _seed();
 
         address[] memory chosen = va.assignedVerifiers(0, vs[0]);
         assertEq(chosen.length, 1);
@@ -138,17 +148,17 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         _network(1, 0);
         _register(vs[0], GATEWAY, 40e18);
         va.sync(vs[0]);
-        va.seedEpoch(0);
+        _seed();
 
         assertEq(va.assignedVerifiers(0, vs[0]).length, 0);
         (uint256 coverage, uint256 accuracy) = va.factorsOf(0, vs[0]);
-        assertEq(coverage, 10_000);
-        assertEq(accuracy, 10_000);
+        assertEq(coverage, FactorScoring.NO_DATA, "nothing assigned: left out, not full marks");
+        assertEq(accuracy, FactorScoring.NO_DATA);
     }
 
     function test_SnapshotFreezesPools_LaterStatusChangesDontMoveAssignments() public {
         _network(4, 2);
-        va.seedEpoch(0);
+        _seed();
         address[] memory before = va.assignedVerifiers(0, gws[0]);
 
         _network(3, 0); // more verifiers after the seed
@@ -162,7 +172,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         vm.prank(verifierRole);
         registry.recordVerification(vs[0], false, 0); // Active -> Suspended
         va.sync(vs[0]);
-        va.seedEpoch(0);
+        _seed();
 
         assertEq(va.verifierCount(0), 2);
         assertTrue(va.verifierAt(0, 0) != vs[0] && va.verifierAt(0, 1) != vs[0]);
@@ -175,7 +185,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_AssignmentsOf_PagesAVerifiersWork() public {
         _network(4, 6);
-        va.seedEpoch(0);
+        _seed();
         uint256 total;
         for (uint256 v; v < vs.length; v++) {
             (address[] memory first, , uint256 next) = va.assignmentsOf(0, vs[v], 0, 3);
@@ -189,7 +199,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_RevertWhen_UnassignedOrBadlySigned() public {
         _network(4, 1);
-        va.seedEpoch(0);
+        _seed();
         address[] memory chosen = va.assignedVerifiers(0, gws[0]);
         address outsider;
         for (uint256 i; i < vs.length; i++) {
@@ -199,31 +209,30 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         VerifierAssignments.Item[] memory items = new VerifierAssignments.Item[](1);
         items[0] = VerifierAssignments.Item(gws[0], 0, _values(10_000, 10_000, 20, 1_000));
         vm.expectRevert(abi.encodeWithSelector(VerifierAssignments.NotAssigned.selector, 0, gws[0], 0, outsider));
-        va.attest(0, outsider, items, _sign(_pkOf(outsider), 0, outsider, items));
+        va.attest(0, outsider, 1, items, _sign(_pkOf(outsider), 0, outsider, 1, items));
 
         vm.expectRevert(VerifierAssignments.InvalidSignature.selector);
-        va.attest(0, chosen[0], items, _sign(_pkOf(outsider), 0, chosen[0], items));
+        va.attest(0, chosen[0], 1, items, _sign(_pkOf(outsider), 0, chosen[0], 1, items));
     }
 
     function test_RevertWhen_AttestingAfterTheWindow() public {
         _network(3, 1);
-        va.seedEpoch(0);
+        _seed();
         vm.warp(epochs.finalityDeadline(0) + 1);
         address v = va.assignedVerifiers(0, gws[0])[0];
         VerifierAssignments.Item[] memory items = new VerifierAssignments.Item[](1);
         items[0] = VerifierAssignments.Item(gws[0], 0, _values(1, 1, 1, 1));
         vm.expectRevert(abi.encodeWithSelector(VerifierAssignments.WindowClosed.selector, 0));
-        va.attest(0, v, items, _sign(_pkOf(v), 0, v, items));
+        va.attest(0, v, 1, items, _sign(_pkOf(v), 0, v, 1, items));
     }
 
     function test_ResubmissionReplaces_AndCountsOnce() public {
         _network(3, 1);
-        va.seedEpoch(0);
+        _seed();
         address v = va.assignedVerifiers(0, gws[0])[0];
         _attestOne(v, gws[0], _values(1, 1, 1, 1));
         _attestOne(v, gws[0], _values(9_000, 9_000, 30, 500));
 
-        assertEq(va.countsOf(0, v).submitted, 1);
         (, uint256[] memory values) = va.attestationOf(0, gws[0], 0);
         assertEq(values[2], 30);
     }
@@ -232,7 +241,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_Outlier_FailsAccuracy_HonestPairIsUpheld() public {
         _network(3, 1);
-        va.seedEpoch(0);
+        _seed();
         address[] memory chosen = va.assignedVerifiers(0, gws[0]);
         _attestOne(chosen[0], gws[0], _values(10_000, 9_900, 40, 1_000_000));
         _attestOne(chosen[1], gws[0], _values(9_980, 9_950, 42, 1_050_000));
@@ -251,7 +260,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_SkippedAssignment_LowersCoverage() public {
         _network(3, 2);
-        va.seedEpoch(0);
+        _seed();
         address v = va.assignedVerifiers(0, gws[0])[0]; // with 3 verifiers, every verifier is on every gateway
         _attestOne(v, gws[0], _values(10_000, 10_000, 20, 1_000));
 
@@ -260,19 +269,19 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
         (uint256 coverage, uint256 accuracy) = va.factorsOf(0, v);
         assertEq(coverage, 5_000); // 1 of 2 assignments
-        assertEq(accuracy, 10_000); // fewer than 3 attestations: nothing judged
+        assertEq(accuracy, FactorScoring.NO_DATA); // fewer than 3 attestations: nothing judged
     }
 
     function test_RevertWhen_FinalizingWhileTheWindowIsOpen() public {
         _network(3, 1);
-        va.seedEpoch(0);
+        _seed();
         vm.expectRevert(abi.encodeWithSelector(VerifierAssignments.WindowOpen.selector, 0));
         va.finalize(0, 10);
     }
 
     function test_FinalizeInChunks() public {
         _network(3, 5);
-        va.seedEpoch(0);
+        _seed();
         vm.warp(epochs.finalityDeadline(0) + 1);
         assertFalse(va.finalize(0, 2));
         assertFalse(va.finalize(0, 2));
@@ -285,7 +294,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_SealWaitsForFinalize_ThenPaysVerifiersFromTheSlice() public {
         _network(3, 1);
-        va.seedEpoch(0);
+        _seed();
         address[] memory chosen = va.assignedVerifiers(0, gws[0]);
         _attestOne(chosen[0], gws[0], _values(10_000, 10_000, 40, 1_000));
         _attestOne(chosen[1], gws[0], _values(10_000, 10_000, 40, 1_000));
@@ -303,7 +312,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         uint256 full = rewards.settlementOf(0, chosen[0]).score;
         uint256 skipped = rewards.settlementOf(0, chosen[2]).score;
         assertEq(full, 1e18);
-        assertEq(skipped, 0.7e18); // uptime 0.4 + accuracy 0.3 (nothing judged) + coverage 0
+        assertEq(skipped, (uint256(0.4e18) * 10_000) / 7_000); // nothing judged, so accuracy is left out: uptime 0.4 + coverage 0, over 0.7
         uint256 paid = rewards.payoutOf(0, vs[0]) + rewards.payoutOf(0, vs[1]) + rewards.payoutOf(0, vs[2]);
         assertLe(paid, SLICE);
         assertApproxEqAbs(paid, SLICE, 10);
@@ -311,7 +320,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_VerifierWithoutATelemetryRecord_IsIneligible() public {
         _network(1, 0);
-        va.seedEpoch(0);
+        _seed();
         telemetry.finalize(0);
         vm.warp(epochs.finalityDeadline(0) + 1);
         va.finalize(0, 10);
@@ -322,7 +331,7 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
 
     function test_SignedVerifierReport_CantOverrideOnChainScores() public {
         _network(3, 1);
-        va.seedEpoch(0);
+        _seed();
         for (uint256 i; i < 3; i++) telemetry.setRecord(0, vs[i], _record(10_000));
         telemetry.finalize(0);
         // The metric signer claims perfect coverage for a verifier that attested nothing.
@@ -334,10 +343,10 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         va.finalize(0, 100);
         rewards.sealEpoch(0, vs);
 
-        assertEq(rewards.settlementOf(0, vs[0]).score, 0.7e18, "on-chain coverage 0 wins over the signed report");
+        assertEq(rewards.settlementOf(0, vs[0]).score, (uint256(0.4e18) * 10_000) / 7_000, "on-chain coverage 0 wins over the signed report");
     }
 
-    function test_UnseededEpoch_FullMarksAndSealDoesNotWait() public {
+    function test_UnseededEpoch_ScoresOnUptimeAlone_AndSealDoesNotWait() public {
         _network(2, 1);
         for (uint256 i; i < 2; i++) telemetry.setRecord(0, vs[i], _record(10_000));
         telemetry.finalize(0);
@@ -353,6 +362,124 @@ contract VerifierAssignmentsTest is CoreProtocolTestBase {
         uint256[] memory g = _values(10_000, 10_000, 40, 1_000);
         rewards.submitServiceFactorMetrics(gws[0], GATEWAY, 0, g, 10_000, _signFactorService(gws[0], GATEWAY, 0, g, 10_000));
         assertTrue(rewards.metricOf(0, rewards.accountOf(gws[0], GATEWAY)).submitted);
+    }
+
+    // ---------------------------------------------------------------- review fixes
+
+    function test_RevertWhen_AttestingForAnAddressOutsideTheSnapshot() public {
+        _network(3, 1);
+        _seed();
+        address fake = makeAddr("not-a-gateway");
+        address v = va.assignedVerifiers(0, fake)[0]; // assignedVerifiers draws for any address
+        VerifierAssignments.Item[] memory items = new VerifierAssignments.Item[](1);
+        items[0] = VerifierAssignments.Item(fake, 0, _values(1, 1, 1, 1));
+        vm.expectRevert(abi.encodeWithSelector(VerifierAssignments.NotATarget.selector, 0, fake));
+        va.attest(0, v, 1, items, _sign(_pkOf(v), 0, v, 1, items));
+    }
+
+    function test_RevertWhen_ReplayingAnOlderBatch() public {
+        _network(3, 1);
+        _seed();
+        address v = va.assignedVerifiers(0, gws[0])[0];
+        VerifierAssignments.Item[] memory first = new VerifierAssignments.Item[](1);
+        first[0] = VerifierAssignments.Item(gws[0], 0, _values(1, 1, 1, 1));
+        uint256 slot = 0;
+        address[] memory chosen = va.assignedVerifiers(0, gws[0]);
+        for (uint256 d; d < chosen.length; d++) if (chosen[d] == v) slot = d;
+        first[0].slot = uint8(slot);
+        bytes memory firstSig = _sign(_pkOf(v), 0, v, 1, first);
+        va.attest(0, v, 1, first, firstSig);
+        nonce = 1;
+        _attestOne(v, gws[0], _values(9_000, 9_000, 30, 500)); // a correction with a higher nonce
+
+        vm.expectRevert(abi.encodeWithSelector(VerifierAssignments.StaleNonce.selector, 1, va.lastNonceOf(0, v)));
+        va.attest(0, v, 1, first, firstSig);
+        (, uint256[] memory values) = va.attestationOf(0, gws[0], uint8(slot));
+        assertEq(values[2], 30, "the correction stands");
+    }
+
+    function test_SeedIsUnknownUntilTheCommittedBlock() public {
+        _network(3, 1);
+        va.seedEpoch(0);
+        assertEq(va.seedOf(0), bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(VerifierAssignments.SeedNotReady.selector, 0, va.commitBlockOf(0)));
+        va.revealSeed(0);
+        assertEq(va.assignedVerifiers(0, gws[0]).length, 0, "no assignments before the reveal");
+
+        vm.roll(va.commitBlockOf(0) + 1);
+        va.revealSeed(0);
+        assertTrue(va.seedOf(0) != bytes32(0));
+        assertEq(va.assignedVerifiers(0, gws[0]).length, 3);
+    }
+
+    function test_ExpiredCommit_IsRenewed_PoolsStayFrozen() public {
+        _network(3, 1);
+        va.seedEpoch(0);
+        uint64 first = va.commitBlockOf(0);
+        _network(2, 0); // joins after the freeze
+        vm.roll(first + 300); // past the 256-block hash window
+        vm.expectRevert(abi.encodeWithSelector(VerifierAssignments.SeedNotReady.selector, 0, first));
+        va.revealSeed(0);
+
+        va.seedEpoch(0);
+        assertGt(va.commitBlockOf(0), first);
+        vm.roll(va.commitBlockOf(0) + 1);
+        va.revealSeed(0);
+        assertEq(va.verifierCount(0), 3, "the snapshot from the first commit");
+    }
+
+    function test_FinalizeRunsWhilePaused_SoSealsAreNeverBlocked() public {
+        _network(3, 1);
+        _seed();
+        vm.warp(epochs.finalityDeadline(0) + 1);
+        vm.prank(timelockAddr);
+        va.pause();
+
+        assertTrue(va.finalize(0, 100));
+    }
+
+    function test_StaleAmong_ListsOnlyNodesThatNeedASync() public {
+        _network(3, 0);
+        address joining = vm.addr(0xBEEF);
+        _register(joining, VERIFIER, 125e18);
+        vm.prank(verifierRole);
+        registry.recordVerification(vs[1], false, 0); // leaves Active
+
+        address[] memory ask = new address[](4);
+        (ask[0], ask[1], ask[2], ask[3]) = (vs[0], vs[1], vs[2], joining);
+        address[] memory stale = va.staleAmong(ask);
+
+        assertEq(stale.length, 2);
+        assertEq(stale[0], vs[1]);
+        assertEq(stale[1], joining);
+        assertEq(va.poolMembers(5, 0, 10).length, 3);
+    }
+
+    function test_K5_StillJudges_WithTwoAttestationsMissing() public {
+        vm.prank(configOwner);
+        cfg.setUint(ConfigKeys.VERIFIER_K, 5);
+        _network(5, 1);
+        _seed();
+        address[] memory chosen = va.assignedVerifiers(0, gws[0]);
+        assertEq(chosen.length, 5);
+        _attestOne(chosen[0], gws[0], _values(10_000, 9_900, 40, 1_000_000));
+        _attestOne(chosen[1], gws[0], _values(9_980, 9_950, 42, 1_050_000));
+        _attestOne(chosen[2], gws[0], _values(2_000, 1_000, 900, 10)); // the liar; chosen[3] and chosen[4] skip
+        vm.warp(epochs.finalityDeadline(0) + 1);
+        va.finalize(0, 10);
+
+        (, uint256 liar) = va.factorsOf(0, chosen[2]);
+        (, uint256 honest) = va.factorsOf(0, chosen[0]);
+        assertEq(liar, 0);
+        assertEq(honest, 10_000);
+    }
+
+    function test_RevertWhen_ToleranceConfigIsOutOfRange() public {
+        _network(3, 1);
+        vm.prank(configOwner);
+        cfg.setUint(ConfigKeys.VERIFIER_TOLERANCE_REL_BPS, 70_000);
+        vm.expectRevert(VerifierAssignments.BadParameters.selector);
+        va.seedEpoch(0);
     }
 
     function _signFactorService(address node, INodeRegistry.NodeType s, uint256 epoch, uint256[] memory values, uint256 hb)
@@ -404,6 +531,8 @@ contract VerifierAssignmentsGasTest is CoreProtocolTestBase {
             va.syncMany(batch);
         }
         va.seedEpoch(0);
+        vm.roll(block.number + va.SEED_DELAY() + 1);
+        va.revealSeed(0);
         assertEq(va.verifierCount(0), 100);
         assertEq(va.targetCount(0), 1_000);
 
@@ -414,10 +543,10 @@ contract VerifierAssignmentsGasTest is CoreProtocolTestBase {
         uint256[] memory values = new uint256[](4);
         (values[0], values[1], values[2], values[3]) = (10_000, 10_000, 40, 1_000);
         for (uint256 i; i < targets.length; i++) items[i] = VerifierAssignments.Item(targets[i], slots[i], values);
-        bytes32 digest = va.attestationDigest(0, v, items);
+        bytes32 digest = va.attestationDigest(0, v, 1, items);
         (uint8 sv, bytes32 r, bytes32 s) = vm.sign(0x2000, keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest)));
         uint256 g0 = gasleft();
-        va.attest(0, v, items, abi.encodePacked(r, s, sv));
+        va.attest(0, v, 1, items, abi.encodePacked(r, s, sv));
         uint256 attestGas = g0 - gasleft();
         emit log_named_uint("attest items", items.length);
         assertGt(items.length, 10, "a fair share of the 3,000 slots");

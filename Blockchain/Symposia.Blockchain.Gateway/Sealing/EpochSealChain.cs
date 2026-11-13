@@ -39,10 +39,11 @@ public interface IEpochSealChain
     Task SealAsync(ulong epoch, IReadOnlyList<string> nodes, CancellationToken ct);
 
     /// <summary>
-    /// #227: syncs every registered node into the Verifier pools and seeds the current epoch, once per epoch, so no
-    /// epoch goes unseeded (unseeded epochs give Verifiers full marks). No-op without VerifierAssignments.
+    /// #227: commits, then reveals, the current epoch's Verifier seed (the commit first: syncing only affects later
+    /// epochs), then syncs nodes whose pool membership is stale. Returns a problem worth alerting on (still unseeded
+    /// past mid-epoch), else null. No-op without VerifierAssignments.
     /// </summary>
-    Task PrepareVerifierEpochAsync(CancellationToken ct) => Task.CompletedTask;
+    Task<string?> PrepareVerifierEpochAsync(CancellationToken ct) => Task.FromResult<string?>(null);
 
     /// <summary>#227: runs <c>finalize</c> chunks until the epoch's Verifier results are final, which the seal waits for.</summary>
     Task FinalizeVerifiersAsync(ulong epoch, CancellationToken ct) => Task.CompletedTask;
@@ -64,8 +65,8 @@ public sealed class EpochSealChain : IEpochSealChain
 
     private readonly string _epochs;
     private readonly BootstrapChainClient? _nodes;
-    private string? _assignments;
-    private ulong? _seeded;
+    private readonly Rewards.VerifierAssignmentsResolver? _resolver;
+    private ulong? _synced;
 
     /// <summary>Targets judged per finalize tx: about 45k gas each, so 100 is about 4.5M (#227 AC6).</summary>
     public const int FinalizeChunk = 100;
@@ -73,11 +74,13 @@ public sealed class EpochSealChain : IEpochSealChain
     /// <summary>Nodes synced per tx.</summary>
     public const int SyncChunk = 100;
 
-    public EpochSealChain(IOptions<GatewayOptions> options, RelayerAccount relayer, BootstrapChainClient? nodes = null)
+    public EpochSealChain(IOptions<GatewayOptions> options, RelayerAccount relayer, BootstrapChainClient? nodes = null,
+        Rewards.VerifierAssignmentsResolver? resolver = null)
     {
         var o = options.Value;
         _relayer = relayer;
         _nodes = nodes;
+        _resolver = resolver;
         _epochs = o.EpochControllerAddress;
         _web3 = relayer.Web3;
         _distributor = o.RewardDistributorAddress;
@@ -158,48 +161,74 @@ public sealed class EpochSealChain : IEpochSealChain
         }
     }
 
-    /// <summary>VerifierAssignments, from the distributor's config; "" when the network has none.</summary>
-    private async Task<string> AssignmentsAsync()
-    {
-        if (_assignments is { } known)
-        {
-            return known;
-        }
+    private async Task<string> AssignmentsAsync() =>
+        _resolver is not null && await _resolver.ResolveAsync() is { } r ? r.Address : "";
 
-        var config = await _web3.Eth.GetContractQueryHandler<ConfigFunction>().QueryAsync<string>(_distributor, new ConfigFunction());
-        var address = await _web3.Eth.GetContractQueryHandler<GetAddressFunction>().QueryAsync<string>(config, new GetAddressFunction { Key = ConfigKeys.VerifierAssignments });
-        return _assignments = string.IsNullOrEmpty(address) || address == "0x0000000000000000000000000000000000000000" ? "" : address;
-    }
-
-    public async Task PrepareVerifierEpochAsync(CancellationToken ct)
+    public async Task<string?> PrepareVerifierEpochAsync(CancellationToken ct)
     {
         var assignments = await AssignmentsAsync();
-        if (assignments.Length == 0 || _nodes is null || string.IsNullOrEmpty(_epochs))
+        if (assignments.Length == 0 || string.IsNullOrEmpty(_epochs))
         {
-            return;
+            return null;
         }
 
         var current = (ulong)await _web3.Eth.GetContractQueryHandler<CurrentEpochFunction>().QueryAsync<BigInteger>(_epochs, new CurrentEpochFunction());
-        if (_seeded == current)
-        {
-            return;
-        }
-
         var seed = await _web3.Eth.GetContractQueryHandler<SeedOfFunction>().QueryAsync<byte[]>(assignments, new SeedOfFunction { Epoch = current });
-        if (seed.Any(b => b != 0))
+        if (seed.All(b => b == 0))
         {
-            _seeded = current;
-            return;
+            var commit = (ulong)await _web3.Eth.GetContractQueryHandler<CommitBlockOfFunction>().QueryAsync<ulong>(assignments, new CommitBlockOfFunction { Epoch = current });
+            var head = (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+            if (commit == 0 || head > commit + 256)
+            {
+                await Ensure(await _relayer.SendAsync(assignments, new SeedEpochFunction { Epoch = current }, ct), $"seedEpoch({current})");
+            }
+            else if (head > commit)
+            {
+                await Ensure(await _relayer.SendAsync(assignments, new RevealSeedFunction { Epoch = current }, ct), $"revealSeed({current})");
+            }
         }
 
-        var nodes = (await _nodes.ListNodesAsync()).Select(n => n.Node).ToList();
-        foreach (var chunk in nodes.Chunk(SyncChunk))
+        if (_synced != current && _nodes is not null)
         {
-            await Ensure(await _relayer.SendAsync(assignments, new SyncManyFunction { Nodes = [.. chunk] }, ct), $"syncMany for epoch {current}");
+            await SyncStaleAsync(assignments, ct);
+            _synced = current;
         }
 
-        await Ensure(await _relayer.SendAsync(assignments, new SeedEpochFunction { Epoch = current }, ct), $"seedEpoch({current})");
-        _seeded = current;
+        seed = await _web3.Eth.GetContractQueryHandler<SeedOfFunction>().QueryAsync<byte[]>(assignments, new SeedOfFunction { Epoch = current });
+        var start = (long)await _web3.Eth.GetContractQueryHandler<EpochStartFunction>().QueryAsync<BigInteger>(_epochs, new EpochStartFunction { Epoch = current });
+        var next = (long)await _web3.Eth.GetContractQueryHandler<EpochStartFunction>().QueryAsync<BigInteger>(_epochs, new EpochStartFunction { Epoch = current + 1 });
+        return seed.All(b => b == 0) && DateTimeOffset.UtcNow.ToUnixTimeSeconds() > start + ((next - start) / 2)
+            ? $"Epoch {current} is past its midpoint and its Verifier seed isn't set: Verifiers will be scored on uptime alone."
+            : null;
+    }
+
+    /// <summary>Syncs only nodes whose pool membership no longer matches the registry: registered nodes plus current
+    /// pool members, so nodes the registry no longer lists are synced out too.</summary>
+    private async Task SyncStaleAsync(string assignments, CancellationToken ct)
+    {
+        var candidates = new HashSet<string>((await _nodes!.ListNodesAsync()).Select(n => n.Node), StringComparer.OrdinalIgnoreCase);
+        foreach (byte pool in new byte[] { 5, 8 })
+        {
+            for (var offset = 0; ; offset += 500)
+            {
+                var members = await _web3.Eth.GetContractQueryHandler<PoolMembersFunction>().QueryAsync<List<string>>(assignments,
+                    new PoolMembersFunction { Pool = pool, Offset = offset, Limit = 500 });
+                candidates.UnionWith(members);
+                if (members.Count < 500)
+                {
+                    break;
+                }
+            }
+        }
+
+        foreach (var chunk in candidates.Chunk(SyncChunk))
+        {
+            var stale = await _web3.Eth.GetContractQueryHandler<StaleAmongFunction>().QueryAsync<List<string>>(assignments, new StaleAmongFunction { Nodes = [.. chunk] });
+            if (stale.Count > 0)
+            {
+                await Ensure(await _relayer.SendAsync(assignments, new SyncManyFunction { Nodes = stale }, ct), "syncMany");
+            }
+        }
     }
 
     public async Task FinalizeVerifiersAsync(ulong epoch, CancellationToken ct)

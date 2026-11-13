@@ -284,11 +284,10 @@ library ConfigKeys {
         return keccak256(abi.encode("computePenalty.absLatencyMs", tier));
     }
 
-    /// @notice Reward multiplier (bps) applied for a node currently in
     // --- Verifier check assignments (#227) ---
     /// VerifierAssignments: on-chain seeded assignments, attestations and peer-agreement accuracy.
     bytes32 internal constant REWARD_VERIFIER_ASSIGNMENTS = keccak256("reward.verifier.assignments");
-    /// Verifiers assigned per target (3).
+    /// Verifiers assigned per target (5: a median survives one or two missing attestations).
     bytes32 internal constant VERIFIER_K = keccak256("verifier.k");
     /// The Node Service Verifiers check (8 = Blob Gateway).
     bytes32 internal constant VERIFIER_TARGET_SERVICE = keccak256("verifier.targetService");
@@ -300,6 +299,7 @@ library ConfigKeys {
         return keccak256(abi.encode("verifier.toleranceAbs", factor));
     }
 
+    /// @notice Reward multiplier (bps) applied for a node currently in
     /// `stage` (0-4), read by `stagePenaltyMult`.
     function computePenaltyStageMultBps(uint8 stage) internal pure returns (bytes32) {
         return keccak256(abi.encode("computePenalty.stageMultBps", stage));

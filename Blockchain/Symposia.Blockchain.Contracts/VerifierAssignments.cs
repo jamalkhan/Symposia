@@ -14,6 +14,26 @@ public sealed class SyncManyFunction : FunctionMessage { [Parameter("address[]",
 [Function("seedEpoch")]
 public sealed class SeedEpochFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
 
+[Function("revealSeed")]
+public sealed class RevealSeedFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
+
+[Function("commitBlockOf", "uint64")]
+public sealed class CommitBlockOfFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
+
+[Function("factorsIn", "uint8")]
+public sealed class FactorsInFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
+
+[Function("staleAmong", "address[]")]
+public sealed class StaleAmongFunction : FunctionMessage { [Parameter("address[]", "nodes", 1)] public List<string> Nodes { get; set; } = []; }
+
+[Function("poolMembers", "address[]")]
+public sealed class PoolMembersFunction : FunctionMessage
+{
+    [Parameter("uint8", "pool", 1)] public byte Pool { get; set; }
+    [Parameter("uint256", "offset", 2)] public BigInteger Offset { get; set; }
+    [Parameter("uint256", "limit", 3)] public BigInteger Limit { get; set; }
+}
+
 [Function("seedOf", "bytes32")]
 public sealed class SeedOfFunction : FunctionMessage { [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; } }
 
@@ -75,24 +95,26 @@ public sealed class AttestFunction : FunctionMessage
 {
     [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
     [Parameter("address", "verifier", 2)] public string Verifier { get; set; } = "";
-    [Parameter("tuple[]", "items", 3)] public List<AttestationItem> Items { get; set; } = [];
-    [Parameter("bytes", "signature", 4)] public byte[] Signature { get; set; } = [];
+    [Parameter("uint256", "nonce", 3)] public BigInteger Nonce { get; set; }
+    [Parameter("tuple[]", "items", 4)] public List<AttestationItem> Items { get; set; } = [];
+    [Parameter("bytes", "signature", 5)] public byte[] Signature { get; set; } = [];
 }
 
 /// <summary>
 /// <c>VerifierAssignments.attestationDigest</c> off-chain:
-/// <c>keccak256(abi.encode(contract, chainid, epoch, verifier, keccak256(abi.encode(items))))</c>, signed with the
-/// eth-signed-message prefix by the Verifier's node key (#227).
+/// <c>keccak256(abi.encode(contract, chainid, epoch, verifier, nonce, keccak256(abi.encode(items))))</c>, signed with
+/// the eth-signed-message prefix by the Verifier's node key (#227). The nonce must exceed the last one used for the
+/// (epoch, verifier), so an older batch can't be replayed over a correction.
 /// </summary>
 public static class AttestationDigest
 {
-    public static byte[] Hash(string contract, ulong chainId, ulong epoch, string verifier, IReadOnlyList<AttestationItem> items)
+    public static byte[] Hash(string contract, ulong chainId, ulong epoch, string verifier, ulong nonce, IReadOnlyList<AttestationItem> items)
     {
         // abi.encode(Item[]) of a single dynamic-tuple-array argument.
         var encodedItems = new Nethereum.ABI.FunctionEncoding.ParametersEncoder().EncodeParameters(
             [new Nethereum.ABI.Model.Parameter("tuple[]", "items", 1) { DecodedType = typeof(AttestationItem) }], [items.ToList()]);
         return Sha3Keccack.Current.CalculateHash(new ABIEncode().GetABIEncoded(
             new ABIValue("address", contract), new ABIValue("uint256", new BigInteger(chainId)), new ABIValue("uint256", new BigInteger(epoch)),
-            new ABIValue("address", verifier), new ABIValue("bytes32", Sha3Keccack.Current.CalculateHash(encodedItems))));
+            new ABIValue("address", verifier), new ABIValue("uint256", new BigInteger(nonce)), new ABIValue("bytes32", Sha3Keccack.Current.CalculateHash(encodedItems))));
     }
 }

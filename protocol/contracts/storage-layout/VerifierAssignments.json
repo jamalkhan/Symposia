@@ -56,6 +56,10 @@
         "name": "finalized"
       },
       {
+        "type": "uint64",
+        "name": "commitBlock"
+      },
+      {
         "type": "uint32[MAX_FACTORS]",
         "name": "absFloor"
       }
@@ -98,12 +102,8 @@
         "name": "poolSeq"
       },
       {
-        "type": "Pool",
-        "name": "verifiers"
-      },
-      {
-        "type": "mapping(uint8 service => Pool)",
-        "name": "targets"
+        "type": "mapping(uint8 key => Pool)",
+        "name": "pools"
       },
       {
         "type": "mapping(uint256 epoch => EpochInfo)",
@@ -116,6 +116,10 @@
       {
         "type": "mapping(uint256 epoch => mapping(address verifier => Counts))",
         "name": "counts"
+      },
+      {
+        "type": "mapping(uint256 epoch => mapping(address verifier => uint256))",
+        "name": "lastNonce"
       }
     ]
   },

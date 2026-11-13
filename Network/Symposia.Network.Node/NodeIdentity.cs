@@ -144,8 +144,8 @@ public sealed class NodeIdentity
         Rewards.EpochReportSignature.Sign(Key, chainId, distributor, epoch, bytesServed, requests);
 
     /// <summary>A Verifier attestation batch for <c>VerifierAssignments.attest</c> (#227), signed by this node's key.</summary>
-    public string SignVerifierAttestation(string contract, ulong chainId, ulong epoch, IReadOnlyList<Rewards.VerifierAttestationWire.ItemWire> items) =>
-        Rewards.VerifierAttestationWire.Sign(Key, contract, chainId, epoch, items);
+    public string SignVerifierAttestation(string contract, ulong chainId, ulong epoch, ulong nonce, IReadOnlyList<Rewards.VerifierAttestationWire.ItemWire> items) =>
+        Rewards.VerifierAttestationWire.Sign(Key, contract, chainId, epoch, nonce, items);
 
     /// <summary>Where this node's services listen, for the Verifier's discovery (#225 FR2.2).</summary>
     public Discovery.ServiceDirectory SignServiceDirectory(ulong chainId, string nodeRegistry, IEnumerable<Discovery.ServiceDirectory.Entry> services, DateTimeOffset now) =>

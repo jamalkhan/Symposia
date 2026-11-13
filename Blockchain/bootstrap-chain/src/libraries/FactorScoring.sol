@@ -21,6 +21,10 @@ library FactorScoring {
     uint256 internal constant WAD = 1e18;
     uint256 internal constant BPS = 10_000;
 
+    /// @notice "No data" (#227): the factor is left out of this node's score and the remaining weights are scaled up to
+    /// 100%, so missing data neither rewards nor punishes. Distinct from 0, which means "measured as nothing".
+    uint256 internal constant NO_DATA = type(uint256).max;
+
     /// @notice Per-factor best values across `raws` (one row per node of a type).
     function bests(uint256[][] memory raws, bool[] memory lowerIsBetter) public pure returns (uint256[] memory best) {
         uint256 factors = lowerIsBetter.length;
@@ -28,7 +32,7 @@ library FactorScoring {
         for (uint256 n; n < raws.length; ++n) {
             for (uint256 f; f < factors; ++f) {
                 uint256 v = raws[n][f];
-                if (v == 0) continue;
+                if (v == 0 || v == NO_DATA) continue;
                 if (lowerIsBetter[f] ? (best[f] == 0 || v < best[f]) : v > best[f]) best[f] = v;
             }
         }
@@ -45,8 +49,12 @@ library FactorScoring {
         pure
         returns (uint256 total)
     {
+        uint256 counted;
         for (uint256 f; f < weightsBps.length; ++f) {
+            if (raw[f] == NO_DATA) continue;
+            counted += weightsBps[f];
             total += (normalize(raw[f], best[f], lowerIsBetter[f]) * weightsBps[f]) / BPS;
         }
+        if (counted != 0 && counted < BPS) total = (total * BPS) / counted;
     }
 }

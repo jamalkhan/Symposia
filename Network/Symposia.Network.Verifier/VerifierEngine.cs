@@ -28,6 +28,13 @@ public static class FactorMath
         return new GatewayFactors((uint)((long)up * 10_000 / n), (uint)((long)ok.Count * 10_000 / n), p95, n, expectedSamples);
     }
 
+    /// <summary>
+    /// What a Verifier attests for an assigned target it has no measurement of: down. For the Blob Gateway order
+    /// (uptime, success, p95, bytes) p95 is the probe timeout, since 0 would read as perfect latency.
+    /// </summary>
+    public static IReadOnlyList<string> Down(int factors) =>
+        [.. Enumerable.Range(0, factors).Select(f => factors == 4 && f == 2 ? ((long)BlobGatewayProbe.Timeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture) : "0")];
+
     /// <summary>10x the median of the valid figures, never below <paramref name="floor"/>; an even count averages the middle two.</summary>
     public static long Cap(IReadOnlyCollection<long> validFigures, long floor)
     {
@@ -48,7 +55,7 @@ public interface IAttestationSigner
 {
     string Address { get; }
 
-    string Sign(string contract, ulong chainId, ulong epoch, IReadOnlyList<VerifierAttestationWire.ItemWire> items);
+    string Sign(string contract, ulong chainId, ulong epoch, ulong nonce, IReadOnlyList<VerifierAttestationWire.ItemWire> items);
 }
 
 /// <summary>This host's own Verifier duty (#227 FR5.1): the current epoch's assignments, the last batch, the last counts.</summary>
@@ -108,6 +115,7 @@ public sealed class VerifierEngine : IAsyncDisposable
     private long _samplesThroughMs;
     private readonly IAttestationSigner? _nodeSigner;
     private ulong? _syncedEpoch;
+    private ulong _lastNonce;
     private VerifierDuty? _duty;
     private CancellationTokenSource? _stop;
     private Task? _loops;
@@ -214,6 +222,14 @@ public sealed class VerifierEngine : IAsyncDisposable
         var current = await _chain.CurrentEpochAsync(ct);
         var epoch = (current, await _chain.EpochStartAsync(current, ct) * 1000, await _chain.EpochStartAsync(current + 1, ct) * 1000);
         var targets = await _directory.TargetsAsync(Service, current, ct);
+        // #227: a Verifier that isn't the foundation signer probes only its assignments (k per target, not every
+        // Verifier on every gateway); the foundation's Attesting host measures every gateway for their reports.
+        if (_nodeSigner is not null && Authority.Current.Mode != VerifierMode.Attesting)
+        {
+            var assigned = _store.AssignmentsIn(current).Select(a => a.Target).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            targets = [.. targets.Where(t => assigned.Contains(t.Node))];
+        }
+
         Volatile.Write(ref _view, new View(epoch, targets));
         foreach (var gone in _due.Keys.Where(k => !targets.Any(t => string.Equals(t.Node, k, StringComparison.OrdinalIgnoreCase))))
         {
@@ -493,17 +509,21 @@ public sealed class VerifierEngine : IAsyncDisposable
                 continue;
             }
 
-            // After the epoch's own measurement, so attested values are the ones this host measured and capped.
-            if (now < DateTimeOffset.FromUnixTimeMilliseconds(endMs) + FigureWait || _store.UnreportedTargets(_options.RewardDistributorAddress, Service, epoch).Count > 0)
+            // After the epoch's own measurement of the assigned targets (not every probed target), so attested values
+            // are the ones this host measured and capped, and one stuck unassigned target can't hold the batch back.
+            var assignments = _store.AssignmentsIn(epoch);
+            var unmeasured = _store.UnreportedTargets(_options.RewardDistributorAddress, Service, epoch).Select(t => t.Target).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (now < DateTimeOffset.FromUnixTimeMilliseconds(endMs) + FigureWait || assignments.Any(a => unmeasured.Contains(a.Target)))
             {
                 continue;
             }
 
-            var items = _store.AssignmentsIn(epoch).Select(a =>
+            var factors = await _chain.FactorsInAsync(epoch, ct);
+            var items = assignments.Select(a =>
             {
-                var values = _store.GetReport(_options.RewardDistributorAddress, Service, a.Target, epoch) is { Values.Count: > 0 } r
-                    ? r.Values.Select(v => v.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList()
-                    : ["0", "0", "0", "0"];
+                var values = _store.GetReport(_options.RewardDistributorAddress, Service, a.Target, epoch) is { } r && r.Values.Count == factors
+                    ? [.. r.Values.Select(v => v.ToString(System.Globalization.CultureInfo.InvariantCulture))]
+                    : FactorMath.Down(factors);
                 return new VerifierAttestationWire.ItemWire(a.Target, a.Slot, values);
             }).ToList();
 
@@ -511,8 +531,11 @@ public sealed class VerifierEngine : IAsyncDisposable
             RelayOutcome? failure = null;
             foreach (var chunk in items.Chunk(VerifierAttestationWire.MaxItems))
             {
-                var signature = signer.Sign(contract, _options.ChainId, epoch, chunk);
-                var outcome = await _relay.AttestAsync(new VerifierAttestationWire.Request(epoch, signer.Address, chunk, signature), ct);
+                // Unix ms: increasing across chunks, retries and restarts, as the contract requires.
+                var nonce = (ulong)Math.Max(_time.GetUtcNow().ToUnixTimeMilliseconds(), (long)_lastNonce + 1);
+                _lastNonce = nonce;
+                var signature = signer.Sign(contract, _options.ChainId, epoch, nonce, chunk);
+                var outcome = await _relay.AttestAsync(new VerifierAttestationWire.Request(epoch, signer.Address, nonce, chunk, signature), ct);
                 if (!outcome.Submitted)
                 {
                     failure = outcome;

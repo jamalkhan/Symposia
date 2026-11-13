@@ -21,7 +21,10 @@ public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> 
         var sealedCount = 0;
         try
         {
-            await chain.PrepareVerifierEpochAsync(ct);
+            if (await chain.PrepareVerifierEpochAsync(ct) is { } problem)
+            {
+                logger.LogError("{Problem}", problem); // an unseeded epoch skips Verifier coverage and accuracy: alert
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -64,8 +64,8 @@ public sealed class VerifierTests : IDisposable
     {
         public string Address => key.GetPublicAddress();
 
-        public string Sign(string contract, ulong chainId, ulong epoch, IReadOnlyList<VerifierAttestationWire.ItemWire> items) =>
-            VerifierAttestationWire.Sign(key, contract, chainId, epoch, items);
+        public string Sign(string contract, ulong chainId, ulong epoch, ulong nonce, IReadOnlyList<VerifierAttestationWire.ItemWire> items) =>
+            VerifierAttestationWire.Sign(key, contract, chainId, epoch, nonce, items);
     }
 
     /// <summary>Ticks every 5 s through epoch 0, as the real loop does, then moves past the measuring grace and the figure wait.</summary>
@@ -478,7 +478,8 @@ public sealed class VerifierTests : IDisposable
         Assert.Equal((byte)1, forMeasured.Slot);
         Assert.Equal(["10000", "10000"], forMeasured.Values.Take(2));
         Assert.Equal("4321", forMeasured.Values[3]);
-        Assert.Equal(["0", "0", "0", "0"], batch.Items.Single(i => string.Equals(i.Target, unmeasured, StringComparison.OrdinalIgnoreCase)).Values);
+        Assert.Equal(["0", "0", "5000", "0"], batch.Items.Single(i => string.Equals(i.Target, unmeasured, StringComparison.OrdinalIgnoreCase)).Values); // down: p95 at the probe timeout
+        Assert.True(batch.Nonce > 0);
         Assert.Equal(_self.GetPublicAddress(), VerifierAttestationWire.Recover(FakeChain.Contract, 31337, batch), ignoreCase: true);
     }
 
@@ -532,6 +533,36 @@ public sealed class VerifierTests : IDisposable
     }
 
     [Fact]
+    public async Task Duty_VerifierOnlyHost_ProbesOnlyItsAssignments()
+    {
+        var mine = AddGateway();
+        var other = AddGateway();
+        _chain.Assignments[0] = [(mine.Node, 0)];
+        await using var engine = Engine(Options(key: EthECKey.GenerateKey()), new KeySigner(_self)); // not the metric signer
+        await engine.AttestTickAsync(default); // loads epoch 0's assignments
+        await RunEpoch0Async(engine);
+
+        var probed = new VerifierStore(Path.Combine(_dir, "verifier.db")).TargetsIn(8, 0).Select(t => t.Target).ToList();
+        Assert.Contains(mine.Node.ToLowerInvariant(), probed);
+        Assert.DoesNotContain(other.Node.ToLowerInvariant(), probed);
+    }
+
+    [Fact]
+    public async Task Duty_FallbackFollowsTheEpochsFactorCount()
+    {
+        AddGateway();
+        _chain.Assignments[0] = [(EthECKey.GenerateKey().GetPublicAddress(), 0)];
+        _chain.Factors = 3;
+        await using var engine = Engine(Options(), new KeySigner(_self));
+        await engine.AttestTickAsync(default);
+        await RunEpoch0Async(engine);
+
+        await engine.AttestTickAsync(default);
+
+        Assert.Equal(["0", "0", "0"], Assert.Single(Assert.Single(_relay.Attested).Items).Values);
+    }
+
+    [Fact]
     public async Task Duty_WithoutVerifierAssignmentsOnChain_DoesNothing()
     {
         AddGateway();
@@ -568,6 +599,8 @@ public sealed class VerifierTests : IDisposable
 
         public Task<string> AssignmentsContractAsync(CancellationToken ct) => Task.FromResult(Contract_);
         public Task<bool> SeededAsync(ulong epoch, CancellationToken ct) => Task.FromResult(Assignments.ContainsKey(epoch));
+        public int Factors { get; set; } = 4;
+        public Task<int> FactorsInAsync(ulong epoch, CancellationToken ct) => Task.FromResult(Factors);
         public Task<IReadOnlyList<(string Target, byte Slot)>> AssignmentsOfAsync(ulong epoch, string verifier, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<(string, byte)>>(Assignments.GetValueOrDefault(epoch) ?? []);
 

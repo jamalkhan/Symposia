@@ -114,6 +114,6 @@ internal sealed class NodeAttestationSigner(NodeIdentity identity) : IAttestatio
 {
     public string Address => identity.NodeId;
 
-    public string Sign(string contract, ulong chainId, ulong epoch, IReadOnlyList<Symposia.Network.Node.Rewards.VerifierAttestationWire.ItemWire> items) =>
-        identity.SignVerifierAttestation(contract, chainId, epoch, items);
+    public string Sign(string contract, ulong chainId, ulong epoch, ulong nonce, IReadOnlyList<Symposia.Network.Node.Rewards.VerifierAttestationWire.ItemWire> items) =>
+        identity.SignVerifierAttestation(contract, chainId, epoch, nonce, items);
 }

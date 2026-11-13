@@ -154,6 +154,26 @@ public sealed class SettingsTests : IDisposable
     }
 
     [Fact]
+    public async Task Supervisor_AddingTheGatewaySecret_MovesThePrimaryToTheGateway()
+    {
+        var secrets = new SecretStore(Paths);
+        var store = new SettingsStore(Paths, 0, Env());
+        var gatewayOnly = HostSettings.Defaults(0);
+        (gatewayOnly.BlobGateway.Enabled, gatewayOnly.BlobGateway.AccessKeyId) = (true, "AK");
+        store.Save(gatewayOnly);
+        var supervisor = new ComponentSupervisor(new HostContext(Paths, secrets, new LogBuffer()), store);
+        await supervisor.SaveAndApplyAsync(gatewayOnly, default); // no secret yet: no primary
+        Assert.Equal(PrimaryRole.None, supervisor.Context.Primary);
+
+        secrets.SetBlobGatewaySecret("s3cret");
+        var restarted = await supervisor.SaveAndApplyAsync(gatewayOnly, default);
+
+        Assert.Equal(PrimaryRole.BlobGateway, supervisor.Context.Primary);
+        Assert.Contains(supervisor.Network, restarted);
+        Assert.Contains(supervisor.BlobGateway, restarted);
+    }
+
+    [Fact]
     public void Supervisor_RestartsOnlyAffectedComponents()
     {
         var supervisor = new ComponentSupervisor(new HostContext(Paths, new SecretStore(Paths), new LogBuffer()), new SettingsStore(Paths, 0, Env()));

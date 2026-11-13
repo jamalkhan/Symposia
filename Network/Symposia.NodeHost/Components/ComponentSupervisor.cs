@@ -71,8 +71,21 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
             var previous = settings.Effective;
             settings.Save(updated);
             var next = settings.Effective;
-            var affected = Affected(previous, next);
+            var affected = Affected(previous, next).ToList();
             context.Settings = next;
+            // A secret saved alongside settings can move the primary too (#228): compare with what was last applied.
+            if (context.Primary != _appliedPrimary)
+            {
+                foreach (var c in new[] { Network, RoleComponent(_appliedPrimary), RoleComponent(context.Primary) })
+                {
+                    if (c is not null && !affected.Contains(c))
+                    {
+                        affected.Add(c);
+                    }
+                }
+
+                affected = [.. All.Where(affected.Contains)];
+            }
             await StopAsync(affected);
             await StartAsync(affected, ct);
             return affected;
@@ -107,8 +120,40 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         }
     }
 
-    /// <summary>Restarts the blob gateway so a replaced secret takes effect (no settings change involved).</summary>
-    public Task RestartBlobGatewayAsync(CancellationToken ct) => RestartAsync(BlobGateway.Name, ct);
+    /// <summary>
+    /// Restarts the blob gateway so a replaced secret takes effect (no settings change involved). Adding or removing
+    /// the secret can also decide whether a gateway-only host's gateway is the primary endpoint (#228): then the
+    /// network component and the old primary restart too, so registration and the handshake follow.
+    /// </summary>
+    public async Task RestartBlobGatewayAsync(CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            context.Settings = settings.Effective;
+            var now = context.Primary;
+            List<HostComponent> affected = [BlobGateway];
+            if (now != _appliedPrimary)
+            {
+                affected.Add(Network);
+                if (RoleComponent(_appliedPrimary) is { } old)
+                {
+                    affected.Add(old);
+                }
+            }
+
+            IReadOnlyList<HostComponent> ordered = [.. All.Where(affected.Contains)];
+            await StopAsync(ordered);
+            await StartAsync(ordered, ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>The primary role as of the last start or apply, so a secret change can tell it moved.</summary>
+    private PrimaryRole _appliedPrimary;
 
     public async Task RestartAsync(string name, CancellationToken ct)
     {
@@ -205,6 +250,7 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
 
     private async Task StartAsync(IReadOnlyList<HostComponent> components, CancellationToken ct)
     {
+        _appliedPrimary = context.Primary;
         foreach (var component in All.Where(components.Contains))
         {
             if (component == Chain)
