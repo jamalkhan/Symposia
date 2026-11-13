@@ -17,6 +17,7 @@ import {BonusNormalization} from "./libraries/BonusNormalization.sol";
 import {FactorScoring} from "./libraries/FactorScoring.sol";
 import {ITelemetryRecords, IScoringWeights} from "./interfaces/ITelemetryRecords.sol";
 import {TelemetryRecordReader} from "./libraries/TelemetryRecordReader.sol";
+import {VerifierFactorReader} from "./libraries/VerifierFactorReader.sol";
 import {NodeServices} from "./libraries/NodeServices.sol";
 
 /// @title RewardDistributor
@@ -573,6 +574,7 @@ contract RewardDistributor is GovernedUpgradeable {
         if (epoch != $.nextSealableEpoch) revert EpochSealOutOfOrder(epoch, $.nextSealableEpoch);
         EpochSource source = epochSource(epoch);
         if (source == EpochSource.Pending) revert TelemetryRecordsPending(epoch);
+        VerifierFactorReader.requireFinalized(address(config()), epoch);
         $.nextSealableEpoch = epoch + 1;
         // Latch before any external call (emission mint, reliability finalize, payouts).
         $.seals[epoch] = EpochSeal({sealed_: true, sealedAt: block.timestamp});
@@ -750,6 +752,14 @@ contract RewardDistributor is GovernedUpgradeable {
         if (r.exists && service == INodeRegistry.NodeType.Storage && address(registry) != address(0)) {
             _ingestRecord(epoch, c, r);
             recordIneligible = !r.eligible;
+        } else if (service == INodeRegistry.NodeType.Verifier) {
+            // #227: Verifiers are scored on-chain (uptime from telemetry, coverage and accuracy from assignments).
+            (bool onChain, uint256[] memory raw) = VerifierFactorReader.read(address(config()), node, epoch, r.exists, r.heartbeatBps);
+            if (onChain) {
+                recordIneligible = raw.length == 0;
+                r.raw = raw;
+                if (!recordIneligible) _ingestRecord(epoch, c, r);
+            }
         }
         if (!_isPaidService(c.nodeType)) {
             c.reason = SettlementReason.ExcludedType;

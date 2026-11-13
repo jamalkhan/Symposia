@@ -1,0 +1,125 @@
+{
+  "structs": {
+    "Pool": [
+      {
+        "type": "Checkpoints.Trace208",
+        "name": "length"
+      },
+      {
+        "type": "mapping(uint256 index => Checkpoints.Trace208)",
+        "name": "slot"
+      },
+      {
+        "type": "mapping(address node => uint256)",
+        "name": "indexPlus1"
+      },
+      {
+        "type": "mapping(address node => Checkpoints.Trace208)",
+        "name": "member"
+      },
+      {
+        "type": "uint256",
+        "name": "size"
+      }
+    ],
+    "EpochInfo": [
+      {
+        "type": "bytes32",
+        "name": "seed"
+      },
+      {
+        "type": "uint48",
+        "name": "snapSeq"
+      },
+      {
+        "type": "uint8",
+        "name": "k"
+      },
+      {
+        "type": "uint8",
+        "name": "targetService"
+      },
+      {
+        "type": "uint8",
+        "name": "factors"
+      },
+      {
+        "type": "uint16",
+        "name": "relBps"
+      },
+      {
+        "type": "uint32",
+        "name": "cursor"
+      },
+      {
+        "type": "bool",
+        "name": "finalized"
+      },
+      {
+        "type": "uint32[MAX_FACTORS]",
+        "name": "absFloor"
+      }
+    ],
+    "Counts": [
+      {
+        "type": "uint32",
+        "name": "assigned"
+      },
+      {
+        "type": "uint32",
+        "name": "submitted"
+      },
+      {
+        "type": "uint32",
+        "name": "judged"
+      },
+      {
+        "type": "uint32",
+        "name": "upheld"
+      }
+    ],
+    "Item": [
+      {
+        "type": "address",
+        "name": "target"
+      },
+      {
+        "type": "uint8",
+        "name": "slot"
+      },
+      {
+        "type": "uint256[]",
+        "name": "values"
+      }
+    ],
+    "AssignmentsStorage": [
+      {
+        "type": "uint48",
+        "name": "poolSeq"
+      },
+      {
+        "type": "Pool",
+        "name": "verifiers"
+      },
+      {
+        "type": "mapping(uint8 service => Pool)",
+        "name": "targets"
+      },
+      {
+        "type": "mapping(uint256 epoch => EpochInfo)",
+        "name": "epochs"
+      },
+      {
+        "type": "mapping(uint256 epoch => mapping(address target => mapping(uint8 slot => uint256)))",
+        "name": "attestations"
+      },
+      {
+        "type": "mapping(uint256 epoch => mapping(address verifier => Counts))",
+        "name": "counts"
+      }
+    ]
+  },
+  "locations": {
+    "STORAGE_LOCATION": "0xc4f0770a1d4f62d22a051aa32a369508a6dd3b3c70a234a35d028aff503a7700"
+  }
+}
