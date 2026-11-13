@@ -2,6 +2,7 @@ using Symposia.BlobStorage.Gateway;
 using Symposia.BlobStorage.StorageNode;
 using Symposia.Database.ComputeNode;
 using Symposia.NodeHost.Diagnostics;
+using Symposia.NodeHost.Settings;
 
 namespace Symposia.NodeHost.Components;
 
@@ -31,7 +32,7 @@ public sealed class StorageRoleComponent : WebAppComponent
 
     protected override bool UsesRoleDataDir => true;
 
-    protected override bool ServesNodeHealth => true;
+    protected override bool ServesNodeHealth(HostContext context) => true;
 
     protected override bool BindsOwnPort => true;
 
@@ -106,7 +107,7 @@ public sealed class ComputeRoleComponent : WebAppComponent
 
     protected override bool UsesRoleDataDir => true;
 
-    protected override bool ServesNodeHealth => true;
+    protected override bool ServesNodeHealth(HostContext context) => true;
 
     protected override string? SkipReason(HostContext context) =>
         !context.Settings.Compute.Enabled ? "Compute service is turned off" : base.SkipReason(context);
@@ -136,7 +137,7 @@ public sealed class ComputeRoleComponent : WebAppComponent
         app.Use(async (http, next) =>
         {
             var remote = http.Connection.RemoteIpAddress;
-            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && http.Request.Path != "/v1/peer/handshake" && http.Request.Path != NodeHealth.Path)
+            if (remote is not null && !System.Net.IPAddress.IsLoopback(remote) && !Symposia.Network.Node.PrimaryEndpointPaths.Contains(http.Request.Path))
             {
                 http.Response.StatusCode = StatusCodes.Status404NotFound;
                 return;
@@ -217,11 +218,14 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
 
     protected override (byte Service, long Capacity)? StakedService(HostContext context) => (8, 0);
 
+    /// <summary>Only on a gateway-only host is the gateway the primary endpoint (#228).</summary>
+    protected override bool ServesNodeHealth(HostContext context) => context.Primary == PrimaryRole.BlobGateway;
+
     protected override IDictionary<string, string?> Configuration(HostContext context)
     {
         var gateway = context.Settings.BlobGateway;
         var network = context.Network!;
-        return new Dictionary<string, string?>
+        var config = new Dictionary<string, string?>
         {
             ["Gateway:ListenPort"] = gateway.Port.ToString(),
             ["Gateway:Region"] = gateway.Region,
@@ -244,5 +248,30 @@ public sealed class BlobGatewayRoleComponent : WebAppComponent
             ["Gateway:Credentials:0:SecretAccessKey"] = context.Secrets.BlobGatewaySecret,
             ["Gateway:Credentials:0:TenantId"] = "dev",
         };
+        AddServiceMetrics(config, network);
+        if (context.Primary == PrimaryRole.BlobGateway)
+        {
+            // The registry holds this gateway's URL (#228): it answers peer handshakes with the node key, like storage and compute.
+            config["Gateway:ServesPrimary"] = "true";
+            RoleNetwork.Add(config, "GatewayNode", context, HostContext.EndpointFor(gateway.AdvertisedEndpoint, gateway.Port));
+        }
+        return config;
+    }
+
+    /// <summary>
+    /// The gateway measures its own epochs and serves the Verifier's probe and signed epoch figure (#221/#225), on
+    /// every network whose reward contracts are known. It never signs a metric report: the Verifier role does.
+    /// </summary>
+    private static void AddServiceMetrics(IDictionary<string, string?> config, NetworkInfo network)
+    {
+        if (string.IsNullOrEmpty(network.RpcUrl) || string.IsNullOrEmpty(network.RewardDistributorAddress) || string.IsNullOrEmpty(network.EpochControllerAddress))
+        {
+            return;
+        }
+
+        config["Gateway:ServiceMetrics:Enabled"] = "true";
+        config["Gateway:ServiceMetrics:RpcUrl"] = network.RpcUrl;
+        config["Gateway:ServiceMetrics:RewardDistributorAddress"] = network.RewardDistributorAddress;
+        config["Gateway:ServiceMetrics:EpochControllerAddress"] = network.EpochControllerAddress;
     }
 }

@@ -33,6 +33,8 @@ public sealed class HostSettings
 
     public AlertSettings Alerts { get; set; } = new();
 
+    public VerifierSettings Verifier { get; set; } = new();
+
     public static HostSettings Defaults(int portOffset) => new()
     {
         Network = new NetworkSettings
@@ -140,6 +142,9 @@ public sealed class BlobGatewaySettings
 
     public string AccessKeyId { get; set; } = "";
 
+    /// <summary>Base URL the Verifier probes this gateway at (#225); empty = http://127.0.0.1:{Port}, which only LocalDev accepts.</summary>
+    public string AdvertisedEndpoint { get; set; } = "";
+
     /// <summary>Uploads succeed once this many storage nodes have the object.</summary>
     public int WriteQuorum { get; set; } = 1;
 
@@ -212,4 +217,16 @@ public sealed class AlertSettings
 
     /// <summary>Sender address; the alert address when empty.</summary>
     public string From { get; set; } = "";
+}
+
+/// <summary>
+/// The Verifier role (#225): measures other nodes' Blob Gateways and, when its key is the network's
+/// <c>reward.metric.signer</c>, signs their reports. Off by default; LocalDev turns it on with the dev key.
+/// </summary>
+public sealed class VerifierSettings
+{
+    public bool Enabled { get; set; }
+
+    /// <summary>Owner-only file holding the metric-signer key; empty = metric-signer.key in the data directory.</summary>
+    public string SignerKeyPath { get; set; } = "";
 }

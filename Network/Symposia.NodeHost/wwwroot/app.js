@@ -134,6 +134,9 @@ async function refresh() {
   const r = s.registry || {};
   $('#registration').innerHTML = r.error ? `<p class="error">${esc(r.error)}</p>` : dl([['Registered', s.registry ? (r.registered ? 'yes' : 'no') : ''],
     ['Endpoint on-chain', r.endpoint], ['Primary endpoint', s.primaryEndpoint], ['Nonce', r.nonce]]);
+  // #228: a loopback primary is only reachable on this machine; peers and the Verifier can't use it.
+  if (s.mode !== 'LocalDev' && /^https?:\/\/(127\.|localhost)/.test(s.primaryEndpoint || ''))
+    $('#registration').innerHTML += `<p class="error">The primary endpoint is ${esc(s.primaryEndpoint)}, which other nodes can't reach. Set an advertised endpoint for the role that serves it.</p>`;
   $('#peers').innerHTML = table(['Endpoint', 'Address', 'Status', 'Reason', 'Last attempt'], s.peers.map((p) =>
     `<tr><td class="mono">${esc(p.endpoint)}</td><td class="mono">${esc(p.address || p.expectedAddress)}</td><td class="status ${esc(p.status)}">${esc(p.status)}</td><td>${p.reason === 'None' ? '' : esc(p.reason)}</td><td>${esc(new Date(p.lastAttempt).toLocaleTimeString())}</td></tr>`));
   $('#members').innerHTML = table(['Address', 'Endpoint'], (r.members || []).map((m) =>
@@ -169,6 +172,33 @@ async function refresh() {
       ['Storage nodes', g.storageNodes != null ? `${g.healthyStorageNodes} reachable of ${g.storageNodes}` : ''],
       ['Waiting for another copy', g.underReplicated]]);
   }
+  refreshVerifier();
+}
+
+// Verifier role (#225 FR7): mode and why, targets with their last probe, each target's latest report.
+const OUTCOMES = ['OK', 'Wrong answer', 'Server error', 'Other status', 'Timeout', 'Connect failed', 'Rate limited', 'Undiscoverable'];
+const REPORT_STATES = ['Measured', 'Observed only', 'Signed', 'Submitted', 'Terminal'];
+const REPORT_FLAGS = [[1, 'bytes capped'], [2, 'bytes missing'], [4, 'bytes signature invalid'], [8, 'low coverage']];
+async function refreshVerifier() {
+  let v;
+  try { v = await api('GET', '/verifier'); } catch { return; }
+  const snap = v.snapshot;
+  $('#verifier-card').hidden = v.status === 'Disabled' && !snap;
+  if (!snap) { $('#verifier').innerHTML = dl([['Status', v.status], ['Detail', v.reason]]); $('#verifier-targets').innerHTML = ''; $('#verifier-reports').innerHTML = ''; return; }
+  const MODES = { Attesting: 'Attesting (signs reports)', ObserveOnly: 'Observe-only (measures, never signs)', Unknown: 'Unknown (signs nothing)' };
+  const d = snap.duty, BATCH = ['pending', 'retrying', 'submitted', 'refused'];
+  $('#verifier').innerHTML = dl([['Mode', MODES[snap.mode] || snap.mode], ['Why', snap.reason], ['Epoch', snap.epoch],
+    ['Discarded minutes this epoch', snap.discardedMinutes],
+    // #227: this node's own Verifier duty.
+    ['Assignments this epoch', d ? d.currentAssignments : ''],
+    ['Last attestations', d?.lastBatch ? `epoch ${d.lastBatch.epoch}: ${d.lastBatch.items} ${BATCH[d.lastBatch.state] || d.lastBatch.state}${d.lastBatch.lastError ? ` (${d.lastBatch.lastError})` : ''}` : ''],
+    ['Coverage / accuracy', d && d.countsEpoch != null ? `epoch ${d.countsEpoch}: ${d.submitted}/${d.assigned} attested, ${d.upheld}/${d.judged} upheld` : '']]);
+  $('#verifier-targets').innerHTML = table(['Gateway', 'URL', 'Last probe', 'Latency'], snap.targets.map((t) =>
+    `<tr><td class="mono">${esc(t.node)}</td><td class="mono">${esc(t.url || t.problem)}</td><td>${t.lastOutcome == null ? 'not yet' : esc(OUTCOMES[t.lastOutcome] || t.lastOutcome)}</td><td>${t.lastLatencyMs == null ? '' : `${t.lastLatencyMs} ms`}</td></tr>`));
+  $('#verifier-reports').innerHTML = table(['Gateway', 'Epoch', 'Uptime / success / p95 / bytes', 'State', 'Notes'], snap.reports.map((r) =>
+    `<tr><td class="mono">${esc(r.target)}</td><td>${r.epoch}</td><td>${(r.values[0] / 100).toFixed(2)}% / ${(r.values[1] / 100).toFixed(2)}% / ${r.values[2]} ms / ${bytes(r.values[3])}</td>
+      <td>${esc(REPORT_STATES[r.state] || r.state)}${r.txHash ? ` <span class="mono">${esc(r.txHash.slice(0, 10))}…</span>` : ''}</td>
+      <td>${esc([...REPORT_FLAGS.filter(([f]) => r.flags & f).map(([, n]) => n), r.lastError].filter(Boolean).join('; '))}</td></tr>`));
 }
 
 // ---------- network dashboard (#198) ----------

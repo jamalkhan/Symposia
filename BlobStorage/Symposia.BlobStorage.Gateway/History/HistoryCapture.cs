@@ -34,6 +34,7 @@ public static class HistoryCapture
 
     public static IApplicationBuilder UseHistoryCapture(this IApplicationBuilder app, IReadOnlyList<IPNetwork> trustedProxies) => app.Use(async (ctx, next) =>
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var failed = false;
         try
         {
@@ -54,10 +55,11 @@ public static class HistoryCapture
                 var status = failed && !ctx.Response.HasStarted ? StatusCodes.Status500InternalServerError : ctx.Response.StatusCode;
                 var userAgent = ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua[..Math.Min(ua.Length, MaxUserAgent)] : null;
                 var now = recorder.Now;
+                var durationMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                 foreach (var op in ops)
                 {
                     recorder.Record(new HistoryEntry(0, now, op.Operation, op.Bucket, op.Key, op.Api, op.Size, op.Etag, op.Cid,
-                        ip, sigv4?.AccessKeyId, sigv4?.TenantId, userAgent, RequestIds.Of(ctx), failed ? "Error" : op.Outcome ?? OutcomeOf(status), status));
+                        ip, sigv4?.AccessKeyId, sigv4?.TenantId, userAgent, RequestIds.Of(ctx), failed ? "Error" : op.Outcome ?? OutcomeOf(status), status, durationMs));
                 }
             }
         }

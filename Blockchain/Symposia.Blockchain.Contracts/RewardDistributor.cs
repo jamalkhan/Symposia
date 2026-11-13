@@ -118,3 +118,31 @@ public sealed class ReserveBalanceOfFunction : FunctionMessage
 {
     [Parameter("address", "node", 1)] public string Account { get; set; } = "";
 }
+
+[Function("metricOf", typeof(MetricRecordOutput))]
+public sealed class MetricOfFunction : FunctionMessage
+{
+    [Parameter("uint256", "epoch", 1)] public BigInteger Epoch { get; set; }
+    [Parameter("address", "node", 2)] public string Account { get; set; } = "";
+}
+
+/// <summary><c>RewardDistributor.MetricRecord</c>: <see cref="Submitted"/> is what eligibility checks first.</summary>
+[FunctionOutput]
+public sealed class MetricRecordOutput : IFunctionOutputDTO
+{
+    [Parameter("uint256", "score", 1)] public BigInteger Score { get; set; }
+    [Parameter("uint256", "heartbeatBps", 2)] public BigInteger HeartbeatBps { get; set; }
+    [Parameter("bool", "submitted", 3)] public bool Submitted { get; set; }
+}
+
+/// <summary>#159/#221: one Node Service's signed per-factor report.</summary>
+[Function("submitServiceFactorMetrics")]
+public sealed class SubmitServiceFactorMetricsFunction : FunctionMessage
+{
+    [Parameter("address", "node", 1)] public string Node { get; set; } = "";
+    [Parameter("uint8", "service", 2)] public byte Service { get; set; }
+    [Parameter("uint256", "epoch", 3)] public BigInteger Epoch { get; set; }
+    [Parameter("uint256[]", "values", 4)] public List<BigInteger> Values { get; set; } = [];
+    [Parameter("uint256", "heartbeatBps", 5)] public BigInteger HeartbeatBps { get; set; }
+    [Parameter("bytes", "signature", 6)] public byte[] Signature { get; set; } = [];
+}

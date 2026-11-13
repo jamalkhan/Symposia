@@ -50,4 +50,7 @@ public interface ILedgerLogSource
 
     /// <summary>Reward reserve currently held for the node's <paramref name="service"/>.</summary>
     Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct);
+
+    /// <summary>Whether a metric report was submitted for the node's <paramref name="service"/> in <paramref name="epoch"/> (#221).</summary>
+    Task<bool> MetricSubmittedAsync(string node, int service, ulong epoch, CancellationToken ct);
 }

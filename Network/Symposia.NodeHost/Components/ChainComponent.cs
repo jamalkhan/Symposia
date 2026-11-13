@@ -516,9 +516,10 @@ public sealed partial class ChainComponent : HostComponent
     /// <summary>
     /// Bump whenever the rewards contracts gain a function the gateway or host calls, so existing local
     /// chains redeploy the rewards stack instead of failing against old bytecode. 1 = #161 (staking
-    /// registry address), 2 = #165/#166 (firstReportBlock, per-service stages, external libraries).
+    /// registry address), 2 = #165/#166 (firstReportBlock, per-service stages, external libraries),
+    /// 3 = #227 (VerifierAssignments, on-chain Verifier scoring).
     /// </summary>
-    internal const int RewardsStackVersion = 2;
+    internal const int RewardsStackVersion = 3;
 
     /// <summary>A gateway's <c>/v1/network</c> descriptor; fields after the registries are absent on older gateways.</summary>
     internal sealed record GatewayNetwork(ulong ChainId, string NodeRegistryAddress, string EpochRootRegistryAddress, string? ProtocolActivationsAddress = null,

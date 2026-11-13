@@ -36,6 +36,12 @@ public sealed class HistoryRecorder : BackgroundService
         _logger = logger;
         _time = time ?? TimeProvider.System;
         Retention = RetentionFor(o);
+        // Until the reporter's first pass says which epoch it still needs, keep everything (up to MaxHold): a
+        // restart mustn't sweep a finished epoch's rows before they're measured (#221).
+        if (o.ServiceMetrics.Enabled)
+        {
+            HoldFrom = DateTimeOffset.MinValue;
+        }
         _sweepInterval = TimeSpan.FromSeconds(Math.Max(1, o.History.SweepIntervalSeconds));
         _queue = Channel.CreateBounded<HistoryEntry>(new BoundedChannelOptions(Math.Max(1, o.History.QueueCapacity))
         {
@@ -55,6 +61,23 @@ public sealed class HistoryRecorder : BackgroundService
 
     /// <summary>How long entries are kept.</summary>
     public TimeSpan Retention { get; }
+
+    /// <summary>
+    /// Rows from here on aren't swept yet, even past retention (#221): the service-metrics reporter sets it to the
+    /// start of the oldest epoch it hasn't measured. Bounded by <see cref="MaxHold"/> so a stuck reporter can't keep
+    /// history forever.
+    /// </summary>
+    public DateTimeOffset? HoldFrom
+    {
+        get => Interlocked.Read(ref _holdFromTicks) is var t and >= 0 ? new DateTimeOffset(t, TimeSpan.Zero) : null;
+        set => Interlocked.Exchange(ref _holdFromTicks, value is { } v ? v.UtcTicks : -1);
+    }
+
+    // Written by the reporter, read by the sweep: one atomic long, never a torn nullable struct.
+    private long _holdFromTicks = -1;
+
+    /// <summary>The longest <see cref="HoldFrom"/> keeps rows past retention.</summary>
+    public static readonly TimeSpan MaxHold = TimeSpan.FromHours(24);
 
     /// <summary>The clock entries are stamped with.</summary>
     public DateTimeOffset Now => _time.GetUtcNow();
@@ -77,6 +100,11 @@ public sealed class HistoryRecorder : BackgroundService
 
     public void Record(HistoryEntry entry)
     {
+        if (entry.Bucket.StartsWith(".symposia-", StringComparison.Ordinal))
+        {
+            return; // reserved system buckets (the probe canary, #225) are never tenant history
+        }
+
         if (_queue.Writer.TryWrite(entry))
         {
             return;
@@ -146,6 +174,12 @@ public sealed class HistoryRecorder : BackgroundService
     internal int Sweep()
     {
         var cutoff = _time.GetUtcNow() - Retention;
+        if (HoldFrom is { } hold && hold < cutoff)
+        {
+            cutoff = hold < cutoff - MaxHold ? cutoff - MaxHold : hold;
+        }
+
+        _store.DeleteLivenessOlderThan(cutoff);
         int deleted, total = 0;
         do
         {

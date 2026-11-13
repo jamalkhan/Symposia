@@ -102,7 +102,7 @@ public static class NodeServiceCatalog
             ],
             MinimumStake: "125,000 SYM (5× the Storage base)",
             Penalties: ["Verification fraud is a node-level violation: slashed and banned", .. NodeLevel],
-            Note: "Not available in NodeHost yet."),
+            Note: "NodeHost's Verifier role runs the network monitor (#225): it probes Blob Gateways and, with the network's metric-signer key, attests their scores. Verifiers themselves aren't scored or paid yet (#227)."),
         new(9, "blockchain-gateway", "Blockchain Gateway",
             "Relays registrations, metric reports, telemetry and epoch seals to the chain and pays their gas.",
             Earns: false, NotDefined,

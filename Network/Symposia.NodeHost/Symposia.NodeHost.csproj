@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Symposia.Network.Node\Symposia.Network.Node.csproj" />
+    <ProjectReference Include="..\Symposia.Network.Verifier\Symposia.Network.Verifier.csproj" />
     <ProjectReference Include="..\..\Blockchain\Symposia.Blockchain.Gateway\Symposia.Blockchain.Gateway.csproj" />
     <ProjectReference Include="..\..\BlobStorage\Symposia.BlobStorage.StorageNode\Symposia.BlobStorage.StorageNode.csproj" />
     <ProjectReference Include="..\..\BlobStorage\Symposia.BlobStorage.Gateway\Symposia.BlobStorage.Gateway.csproj" />

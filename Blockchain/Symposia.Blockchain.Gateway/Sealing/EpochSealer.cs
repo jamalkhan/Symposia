@@ -19,6 +19,18 @@ public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> 
     public async Task<int> RunOnceAsync(CancellationToken ct)
     {
         var sealedCount = 0;
+        try
+        {
+            if (await chain.PrepareVerifierEpochAsync(ct) is { } problem)
+            {
+                logger.LogError("{Problem}", problem); // an unseeded epoch skips Verifier coverage and accuracy: alert
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("Couldn't seed this epoch's Verifier assignments; retrying next pass: {Reason}", ex.Message);
+        }
+
         while (sealedCount < _maxPerPass && !ct.IsCancellationRequested)
         {
             var epoch = await chain.NextSealableEpochAsync(ct);
@@ -65,6 +77,7 @@ public sealed class EpochSealer(IEpochSealChain chain, IOptions<GatewayOptions> 
             var sortedNodes = nodes.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToList();
             try
             {
+                await chain.FinalizeVerifiersAsync(epoch, ct); // #227: the seal waits for Verifier results
                 await chain.SealAsync(epoch, sortedNodes, ct);
                 sealedCount++;
                 logger.LogInformation("Sealed epoch {Epoch} with {Count} nodes.", epoch, sortedNodes.Count);

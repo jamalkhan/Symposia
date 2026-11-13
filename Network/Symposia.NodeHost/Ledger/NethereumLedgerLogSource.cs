@@ -14,6 +14,7 @@ public sealed class NethereumLedgerLogSource(string rpcUrl, string registry, str
 {
     private readonly Web3 _web3 = new(rpcUrl);
     private ulong? _start;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, string> _accounts = new();
 
     public async Task<ulong> LatestBlockAsync(CancellationToken ct) =>
         (ulong)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
@@ -112,6 +113,22 @@ public sealed class NethereumLedgerLogSource(string rpcUrl, string registry, str
             .QueryAsync<string>(distributor, new AccountOfFunction { Node = node, Service = (byte)service });
         return await _web3.Eth.GetContractQueryHandler<ReserveBalanceOfFunction>()
             .QueryAsync<BigInteger>(distributor, new ReserveBalanceOfFunction { Account = account });
+    }
+
+    /// <summary>Read at latest: a sealed epoch's record never changes, and a pruned LocalDev chain (#210) can't answer for old blocks.</summary>
+    public async Task<bool> MetricSubmittedAsync(string node, int service, ulong epoch, CancellationToken ct)
+    {
+        // accountOf is per (node, service), never per epoch, and this source serves one node.
+        if (!_accounts.TryGetValue(service, out var account))
+        {
+            account = await _web3.Eth.GetContractQueryHandler<AccountOfFunction>()
+                .QueryAsync<string>(distributor, new AccountOfFunction { Node = node, Service = (byte)service });
+            _accounts[service] = account;
+        }
+
+        var record = await _web3.Eth.GetContractQueryHandler<MetricOfFunction>()
+            .QueryDeserializingToObjectAsync<MetricRecordOutput>(new MetricOfFunction { Epoch = epoch, Account = account }, distributor);
+        return record.Submitted;
     }
 
     private static ulong Block<T>(EventLog<T> e) => (ulong)e.Log.BlockNumber.Value;
