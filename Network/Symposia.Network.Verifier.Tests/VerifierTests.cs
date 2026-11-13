@@ -57,8 +57,16 @@ public sealed class VerifierTests : IDisposable
         };
     }
 
-    private VerifierEngine Engine(VerifierOptions options) => new(options, new VerifierStore(Path.Combine(_dir, "verifier.db")), _chain, _relay,
-        new HttpClient(_net), NullLogger.Instance, _time, new Random(7));
+    private VerifierEngine Engine(VerifierOptions options, IAttestationSigner? nodeSigner = null) => new(options, new VerifierStore(Path.Combine(_dir, "verifier.db")),
+        _chain, _relay, new HttpClient(_net), NullLogger.Instance, _time, new Random(7), nodeSigner: nodeSigner);
+
+    private sealed class KeySigner(EthECKey key) : IAttestationSigner
+    {
+        public string Address => key.GetPublicAddress();
+
+        public string Sign(string contract, ulong chainId, ulong epoch, IReadOnlyList<VerifierAttestationWire.ItemWire> items) =>
+            VerifierAttestationWire.Sign(key, contract, chainId, epoch, items);
+    }
 
     /// <summary>Ticks every 5 s through epoch 0, as the real loop does, then moves past the measuring grace and the figure wait.</summary>
     private async Task RunEpoch0Async(VerifierEngine engine, Func<DateTimeOffset, Task>? each = null)
@@ -448,6 +456,95 @@ public sealed class VerifierTests : IDisposable
         Assert.Equal("0", Assert.Single(_relay.Sent).Values[0]);
     }
 
+    // ---------- Verifier duty (#227) ----------
+
+    [Fact]
+    public async Task Duty_AttestsEachAssignment_WithWhatWasMeasured_SignedByTheNodeKey()
+    {
+        var measured = AddGateway(bytes: 4321);
+        var unmeasured = EthECKey.GenerateKey().GetPublicAddress(); // assigned, never probed: attested as down
+        _chain.Assignments[0] = [(measured.Node, 1), (unmeasured, 0)];
+        await using var engine = Engine(Options(), new KeySigner(_self));
+        await engine.AttestTickAsync(default); // during epoch 0: joins the pool and records the assignments
+        await RunEpoch0Async(engine);
+
+        await engine.AttestTickAsync(default);
+
+        Assert.Equal(2, _relay.Synced.Count); // once per epoch it ran in
+        Assert.All(_relay.Synced, n => Assert.Equal(_self.GetPublicAddress(), n, ignoreCase: true));
+        var batch = Assert.Single(_relay.Attested);
+        Assert.Equal((0UL, 2), (batch.Epoch, batch.Items.Count));
+        var forMeasured = batch.Items.Single(i => string.Equals(i.Target, measured.Node, StringComparison.OrdinalIgnoreCase));
+        Assert.Equal((byte)1, forMeasured.Slot);
+        Assert.Equal(["10000", "10000"], forMeasured.Values.Take(2));
+        Assert.Equal("4321", forMeasured.Values[3]);
+        Assert.Equal(["0", "0", "0", "0"], batch.Items.Single(i => string.Equals(i.Target, unmeasured, StringComparison.OrdinalIgnoreCase)).Values);
+        Assert.Equal(_self.GetPublicAddress(), VerifierAttestationWire.Recover(FakeChain.Contract, 31337, batch), ignoreCase: true);
+    }
+
+    [Fact]
+    public async Task Duty_SendsOnce_AndWaitsForTheEpochsMeasurement()
+    {
+        AddGateway();
+        _chain.Assignments[0] = [(_net.Gateways[0].Node, 0)];
+        await using var engine = Engine(Options(), new KeySigner(_self));
+        await engine.AttestTickAsync(default);
+        await RunEpoch0Async(engine);
+        _time.Now = Genesis.AddSeconds(EpochSeconds) + VerifierEngine.MeasureGrace + TimeSpan.FromSeconds(1); // before FigureWait
+
+        await engine.AttestTickAsync(default);
+        Assert.Empty(_relay.Attested);
+
+        _time.Now = Genesis.AddSeconds(EpochSeconds) + VerifierEngine.FigureWait + TimeSpan.FromSeconds(1);
+        await engine.AttestTickAsync(default);
+        await engine.AttestTickAsync(default);
+        Assert.Single(_relay.Attested);
+        Assert.Equal(BatchState.Submitted, engine.Snapshot().Duty!.LastBatch!.State);
+    }
+
+    [Fact]
+    public async Task Duty_StartedLate_StillLoadsAndAttestsTheFinishedEpoch()
+    {
+        AddGateway();
+        _chain.Assignments[0] = [(_net.Gateways[0].Node, 2)];
+        await using var engine = Engine(Options(), new KeySigner(_self));
+        await RunEpoch0Async(engine); // no attest tick during epoch 0
+
+        await engine.AttestTickAsync(default);
+
+        Assert.Single(_relay.Attested);
+    }
+
+    [Fact]
+    public async Task Duty_WindowClosed_IsTerminal()
+    {
+        AddGateway();
+        _chain.Assignments[0] = [(_net.Gateways[0].Node, 0)];
+        await using var engine = Engine(Options(), new KeySigner(_self));
+        await engine.AttestTickAsync(default);
+        await RunEpoch0Async(engine);
+        _chain.WindowOpen = false;
+
+        await engine.AttestTickAsync(default);
+
+        Assert.Empty(_relay.Attested);
+        Assert.Equal((BatchState.Terminal, "WindowClosed"), (engine.Snapshot().Duty!.LastBatch!.State, engine.Snapshot().Duty!.LastBatch!.LastError));
+    }
+
+    [Fact]
+    public async Task Duty_WithoutVerifierAssignmentsOnChain_DoesNothing()
+    {
+        AddGateway();
+        _chain.Contract_ = "";
+        await using var engine = Engine(Options(), new KeySigner(_self));
+        await RunEpoch0Async(engine);
+
+        await engine.AttestTickAsync(default);
+
+        Assert.Empty(_relay.Synced);
+        Assert.Empty(_relay.Attested);
+    }
+
     // ---------- fakes ----------
 
     private sealed class MutableTime(DateTimeOffset now) : TimeProvider
@@ -465,6 +562,14 @@ public sealed class VerifierTests : IDisposable
         public bool FailSigner { get; set; }
         public bool WindowOpen { get; set; } = true;
         public List<RegisteredNode> Active { get; } = [];
+        public const string Contract = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
+        public string Contract_ { get; set; } = Contract;
+        public Dictionary<ulong, List<(string Target, byte Slot)>> Assignments { get; } = [];
+
+        public Task<string> AssignmentsContractAsync(CancellationToken ct) => Task.FromResult(Contract_);
+        public Task<bool> SeededAsync(ulong epoch, CancellationToken ct) => Task.FromResult(Assignments.ContainsKey(epoch));
+        public Task<IReadOnlyList<(string Target, byte Slot)>> AssignmentsOfAsync(ulong epoch, string verifier, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<(string, byte)>>(Assignments.GetValueOrDefault(epoch) ?? []);
 
         public Task<ulong> ChainIdAsync(CancellationToken ct) => Task.FromResult(ChainIdValue);
         public Task<ulong> CurrentEpochAsync(CancellationToken ct) => Task.FromResult(Current);
@@ -479,6 +584,24 @@ public sealed class VerifierTests : IDisposable
         public List<Wire.Request> Sent { get; } = [];
 
         public Queue<RelayOutcome> Script { get; } = new();
+        public List<VerifierAttestationWire.Request> Attested { get; } = [];
+        public List<string> Synced { get; } = [];
+
+        public Task<RelayOutcome> AttestAsync(VerifierAttestationWire.Request request, CancellationToken ct)
+        {
+            lock (Attested)
+            {
+                Attested.Add(request);
+            }
+
+            return Task.FromResult(new RelayOutcome(true, false, "0xatt", null));
+        }
+
+        public Task<RelayOutcome> SyncAsync(string node, CancellationToken ct)
+        {
+            Synced.Add(node);
+            return Task.FromResult(new RelayOutcome(true, false, null, null));
+        }
 
         public Task<RelayOutcome> SubmitAsync(Wire.Request request, CancellationToken ct)
         {

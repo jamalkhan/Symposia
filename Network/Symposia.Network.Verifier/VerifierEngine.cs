@@ -43,9 +43,21 @@ public static class FactorMath
     }
 }
 
+/// <summary>Signs this node's Verifier attestation batches with its node key (#227).</summary>
+public interface IAttestationSigner
+{
+    string Address { get; }
+
+    string Sign(string contract, ulong chainId, ulong epoch, IReadOnlyList<VerifierAttestationWire.ItemWire> items);
+}
+
+/// <summary>This host's own Verifier duty (#227 FR5.1): the current epoch's assignments, the last batch, the last counts.</summary>
+public sealed record VerifierDuty(int CurrentAssignments, VerifierBatch? LastBatch, ulong? CountsEpoch, uint Assigned, uint Submitted, uint Judged, uint Upheld);
+
 /// <summary>What the Verifier card shows (#225 FR7): read by the UI, never a database query per page load.</summary>
 public sealed record VerifierSnapshot(
-    VerifierMode Mode, string Reason, ulong Epoch, long DiscardedMinutes, IReadOnlyList<VerifierSnapshot.Target> Targets, IReadOnlyList<VerifierReport> Reports)
+    VerifierMode Mode, string Reason, ulong Epoch, long DiscardedMinutes, IReadOnlyList<VerifierSnapshot.Target> Targets, IReadOnlyList<VerifierReport> Reports,
+    VerifierDuty? Duty = null)
 {
     public sealed record Target(string Node, string? Url, string? Problem, ProbeOutcome? LastOutcome, long? LastLatencyMs, long? LastProbeMs);
 }
@@ -94,6 +106,9 @@ public sealed class VerifierEngine : IAsyncDisposable
     private long _checkedEndMinute = -1;
     private long _lastProbeEndMs;
     private long _samplesThroughMs;
+    private readonly IAttestationSigner? _nodeSigner;
+    private ulong? _syncedEpoch;
+    private VerifierDuty? _duty;
     private CancellationTokenSource? _stop;
     private Task? _loops;
 
@@ -103,8 +118,9 @@ public sealed class VerifierEngine : IAsyncDisposable
     /// <param name="http">References, directories and the relay's client.</param>
     /// <param name="targetHttp">Probes and figures: no redirects, connect-time address checks (<see cref="TargetHttp"/>). Defaults to <paramref name="http"/>.</param>
     public VerifierEngine(VerifierOptions options, VerifierStore store, IVerifierChain chain, IReportRelay relay, HttpClient http, ILogger logger,
-        TimeProvider? time = null, Random? jitter = null, HttpClient? targetHttp = null, IServiceProbe? probe = null)
+        TimeProvider? time = null, Random? jitter = null, HttpClient? targetHttp = null, IServiceProbe? probe = null, IAttestationSigner? nodeSigner = null)
     {
+        _nodeSigner = nodeSigner;
         _options = options;
         _store = store;
         _chain = chain;
@@ -284,6 +300,11 @@ public sealed class VerifierEngine : IAsyncDisposable
             await AdvanceAsync(epoch, open, ct);
         }
 
+        if (_nodeSigner is not null)
+        {
+            await VerifierDutyAsync(current, now, ct);
+        }
+
         foreach (var key in _warned.Keys.Where(k => k.Item1 + Lookback < current))
         {
             _warned.TryRemove(key, out _);
@@ -425,6 +446,104 @@ public sealed class VerifierEngine : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// This node's own Verifier duty (#227): join the pool (a Verifier-only host isn't in the node registry), record the
+    /// current epoch's on-chain assignments once seeded, and after each epoch attest every assignment with what was
+    /// measured (down values when nothing was), in node-key-signed batches. Skipping costs coverage; a wrong value
+    /// costs accuracy.
+    /// </summary>
+    private async Task VerifierDutyAsync(ulong current, DateTimeOffset now, CancellationToken ct)
+    {
+        var signer = _nodeSigner!;
+        var contract = await _chain.AssignmentsContractAsync(ct);
+        if (contract.Length == 0)
+        {
+            return;
+        }
+
+        if (_syncedEpoch != current && (await _relay.SyncAsync(signer.Address, ct)).Submitted)
+        {
+            _syncedEpoch = current;
+        }
+
+        if (_store.GetBatch(current) is null && await _chain.SeededAsync(current, ct))
+        {
+            var mine = await _chain.AssignmentsOfAsync(current, signer.Address, ct);
+            _store.SaveAssignments(current, mine);
+            _logger.LogInformation("Verifier: {Count} assignment(s) in epoch {Epoch}.", mine.Count, current);
+        }
+
+        for (var epoch = current > Lookback ? current - Lookback : 0; epoch < current; epoch++)
+        {
+            if (_store.GetBatch(epoch) is null && await _chain.SeededAsync(epoch, ct))
+            {
+                _store.SaveAssignments(epoch, await _chain.AssignmentsOfAsync(epoch, signer.Address, ct)); // started after the epoch began
+            }
+
+            if (_store.GetBatch(epoch) is not { State: BatchState.Pending or BatchState.Retrying } batch)
+            {
+                continue;
+            }
+
+            var endMs = await _chain.EpochStartAsync(epoch + 1, ct) * 1000;
+            if (!await _chain.AcceptsReportsAsync(epoch, ct))
+            {
+                _store.SaveBatch(batch with { State = BatchState.Terminal, LastError = "WindowClosed" }, now.ToUnixTimeMilliseconds());
+                _logger.LogWarning("Verifier: epoch {Epoch}'s window closed before its attestations were sent.", epoch);
+                continue;
+            }
+
+            // After the epoch's own measurement, so attested values are the ones this host measured and capped.
+            if (now < DateTimeOffset.FromUnixTimeMilliseconds(endMs) + FigureWait || _store.UnreportedTargets(_options.RewardDistributorAddress, Service, epoch).Count > 0)
+            {
+                continue;
+            }
+
+            var items = _store.AssignmentsIn(epoch).Select(a =>
+            {
+                var values = _store.GetReport(_options.RewardDistributorAddress, Service, a.Target, epoch) is { Values.Count: > 0 } r
+                    ? r.Values.Select(v => v.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList()
+                    : ["0", "0", "0", "0"];
+                return new VerifierAttestationWire.ItemWire(a.Target, a.Slot, values);
+            }).ToList();
+
+            string? tx = null;
+            RelayOutcome? failure = null;
+            foreach (var chunk in items.Chunk(VerifierAttestationWire.MaxItems))
+            {
+                var signature = signer.Sign(contract, _options.ChainId, epoch, chunk);
+                var outcome = await _relay.AttestAsync(new VerifierAttestationWire.Request(epoch, signer.Address, chunk, signature), ct);
+                if (!outcome.Submitted)
+                {
+                    failure = outcome;
+                    break;
+                }
+
+                tx = outcome.TransactionHash ?? tx;
+            }
+
+            var next = failure is null ? batch with { State = BatchState.Submitted, TxHash = tx, LastError = null, Attempts = batch.Attempts + 1 }
+                : failure.Terminal ? batch with { State = BatchState.Terminal, LastError = failure.Error, Attempts = batch.Attempts + 1 }
+                : batch with { State = BatchState.Retrying, LastError = failure.Error, Attempts = batch.Attempts + 1 };
+            _store.SaveBatch(next, now.ToUnixTimeMilliseconds());
+            _logger.Log(failure is null ? LogLevel.Information : LogLevel.Warning, "Verifier: epoch {Epoch} attestations ({Count}) {State}{Error}.",
+                epoch, items.Count, next.State, failure is null ? "" : $": {failure.Error}");
+        }
+
+        // The card's counts: the latest epoch whose results are finalized (assigned is counted at finalize).
+        (ulong Epoch, (uint Assigned, uint Submitted, uint Judged, uint Upheld) Counts)? latest = null;
+        for (var epoch = current; epoch > 0 && epoch + Lookback + 2 > current && latest is null; epoch--)
+        {
+            if (await _chain.CountsAsync(epoch - 1, signer.Address, ct) is { Assigned: > 0 } c)
+            {
+                latest = (epoch - 1, c);
+            }
+        }
+
+        Volatile.Write(ref _duty, new VerifierDuty(_store.AssignmentsIn(current).Count, current > 0 ? _store.GetBatch(current - 1) : null,
+            latest?.Epoch, latest?.Counts.Assigned ?? 0, latest?.Counts.Submitted ?? 0, latest?.Counts.Judged ?? 0, latest?.Counts.Upheld ?? 0));
+    }
+
     /// <summary>The card's data: in-memory state plus two primary-key reads.</summary>
     public VerifierSnapshot Snapshot()
     {
@@ -435,7 +554,8 @@ public sealed class VerifierEngine : IAsyncDisposable
             ? new VerifierSnapshot.Target(t.Node, t.Url, t.Problem, l.Outcome, l.LatencyMs, l.AtMs)
             : new VerifierSnapshot.Target(t.Node, t.Url, t.Problem, null, null, null)).ToList();
         var since = view.Epoch is { Epoch: > Lookback } x ? x.Epoch - Lookback : 0;
-        return new VerifierSnapshot(mode, reason, view.Epoch?.Epoch ?? 0, discarded, targets, _store.LatestReports(_options.RewardDistributorAddress, since));
+        return new VerifierSnapshot(mode, reason, view.Epoch?.Epoch ?? 0, discarded, targets, _store.LatestReports(_options.RewardDistributorAddress, since),
+            Volatile.Read(ref _duty));
     }
 
     private MetricReport ReportOf(VerifierReport r) => new(r.Distributor, r.Target, r.Service, r.Epoch, [.. r.Values.Select(v => new System.Numerics.BigInteger(v))], r.HeartbeatBps);

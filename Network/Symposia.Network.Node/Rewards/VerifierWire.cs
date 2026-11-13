@@ -130,3 +130,44 @@ public static class EpochReportSignature
         }
     }
 }
+
+/// <summary>
+/// Verifier attestations through the Blockchain Gateway relay (#227): one node-key-signed batch per Verifier per
+/// epoch (the relay pays the gas), and a self-sync so a Verifier-only host (absent from the node registry) joins
+/// the pool.
+/// </summary>
+public static class VerifierAttestationWire
+{
+    public const string Path = "/v1/relay/verifier-attestations";
+
+    public const string SyncPath = "/v1/relay/verifier-sync";
+
+    /// <summary>Items per relayed tx: about 45k gas each, so 100 is about 4.5M.</summary>
+    public const int MaxItems = 100;
+
+    /// <summary><paramref name="Values"/> are decimal strings (uint256).</summary>
+    public sealed record ItemWire(string Target, byte Slot, IReadOnlyList<string> Values);
+
+    public sealed record Request(ulong Epoch, string Verifier, IReadOnlyList<ItemWire> Items, string Signature);
+
+    public sealed record SyncRequest(string Node);
+
+    public static List<Blockchain.Contracts.AttestationItem> ToItems(IEnumerable<ItemWire> items) =>
+        [.. items.Select(i => new Blockchain.Contracts.AttestationItem { Target = i.Target, Slot = i.Slot, Values = [.. i.Values.Select(BigInteger.Parse)] })];
+
+    /// <summary>Signs a batch with the Verifier's node key, as <c>VerifierAssignments.attest</c> checks.</summary>
+    public static string Sign(EthECKey nodeKey, string contract, ulong chainId, ulong epoch, IReadOnlyList<ItemWire> items) =>
+        new EthereumMessageSigner().Sign(Blockchain.Contracts.AttestationDigest.Hash(contract, chainId, epoch, nodeKey.GetPublicAddress(), ToItems(items)), nodeKey);
+
+    public static string Recover(string contract, ulong chainId, Request r)
+    {
+        try
+        {
+            return new EthereumMessageSigner().EcRecover(Blockchain.Contracts.AttestationDigest.Hash(contract, chainId, r.Epoch, r.Verifier, ToItems(r.Items)), r.Signature);
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException)
+        {
+            return "";
+        }
+    }
+}

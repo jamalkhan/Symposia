@@ -37,6 +37,15 @@ public interface IEpochSealChain
     Task<IReadOnlyCollection<string>> ReportersAsync(ulong epoch, CancellationToken ct);
 
     Task SealAsync(ulong epoch, IReadOnlyList<string> nodes, CancellationToken ct);
+
+    /// <summary>
+    /// #227: syncs every registered node into the Verifier pools and seeds the current epoch, once per epoch, so no
+    /// epoch goes unseeded (unseeded epochs give Verifiers full marks). No-op without VerifierAssignments.
+    /// </summary>
+    Task PrepareVerifierEpochAsync(CancellationToken ct) => Task.CompletedTask;
+
+    /// <summary>#227: runs <c>finalize</c> chunks until the epoch's Verifier results are final, which the seal waits for.</summary>
+    Task FinalizeVerifiersAsync(ulong epoch, CancellationToken ct) => Task.CompletedTask;
 }
 
 /// <summary>
@@ -53,10 +62,23 @@ public sealed class EpochSealChain : IEpochSealChain
 
     private readonly RelayerAccount _relayer;
 
-    public EpochSealChain(IOptions<GatewayOptions> options, RelayerAccount relayer)
+    private readonly string _epochs;
+    private readonly BootstrapChainClient? _nodes;
+    private string? _assignments;
+    private ulong? _seeded;
+
+    /// <summary>Targets judged per finalize tx: about 45k gas each, so 100 is about 4.5M (#227 AC6).</summary>
+    public const int FinalizeChunk = 100;
+
+    /// <summary>Nodes synced per tx.</summary>
+    public const int SyncChunk = 100;
+
+    public EpochSealChain(IOptions<GatewayOptions> options, RelayerAccount relayer, BootstrapChainClient? nodes = null)
     {
         var o = options.Value;
         _relayer = relayer;
+        _nodes = nodes;
+        _epochs = o.EpochControllerAddress;
         _web3 = relayer.Web3;
         _distributor = o.RewardDistributorAddress;
         _telemetry = o.TelemetryRegistryAddress;
@@ -135,6 +157,70 @@ public sealed class EpochSealChain : IEpochSealChain
             throw new InvalidOperationException($"sealEpoch({epoch}) reverted in {receipt.TransactionHash}.");
         }
     }
+
+    /// <summary>VerifierAssignments, from the distributor's config; "" when the network has none.</summary>
+    private async Task<string> AssignmentsAsync()
+    {
+        if (_assignments is { } known)
+        {
+            return known;
+        }
+
+        var config = await _web3.Eth.GetContractQueryHandler<ConfigFunction>().QueryAsync<string>(_distributor, new ConfigFunction());
+        var address = await _web3.Eth.GetContractQueryHandler<GetAddressFunction>().QueryAsync<string>(config, new GetAddressFunction { Key = ConfigKeys.VerifierAssignments });
+        return _assignments = string.IsNullOrEmpty(address) || address == "0x0000000000000000000000000000000000000000" ? "" : address;
+    }
+
+    public async Task PrepareVerifierEpochAsync(CancellationToken ct)
+    {
+        var assignments = await AssignmentsAsync();
+        if (assignments.Length == 0 || _nodes is null || string.IsNullOrEmpty(_epochs))
+        {
+            return;
+        }
+
+        var current = (ulong)await _web3.Eth.GetContractQueryHandler<CurrentEpochFunction>().QueryAsync<BigInteger>(_epochs, new CurrentEpochFunction());
+        if (_seeded == current)
+        {
+            return;
+        }
+
+        var seed = await _web3.Eth.GetContractQueryHandler<SeedOfFunction>().QueryAsync<byte[]>(assignments, new SeedOfFunction { Epoch = current });
+        if (seed.Any(b => b != 0))
+        {
+            _seeded = current;
+            return;
+        }
+
+        var nodes = (await _nodes.ListNodesAsync()).Select(n => n.Node).ToList();
+        foreach (var chunk in nodes.Chunk(SyncChunk))
+        {
+            await Ensure(await _relayer.SendAsync(assignments, new SyncManyFunction { Nodes = [.. chunk] }, ct), $"syncMany for epoch {current}");
+        }
+
+        await Ensure(await _relayer.SendAsync(assignments, new SeedEpochFunction { Epoch = current }, ct), $"seedEpoch({current})");
+        _seeded = current;
+    }
+
+    public async Task FinalizeVerifiersAsync(ulong epoch, CancellationToken ct)
+    {
+        var assignments = await AssignmentsAsync();
+        if (assignments.Length == 0)
+        {
+            return;
+        }
+
+        var finalized = _web3.Eth.GetContractQueryHandler<IsVerifierEpochFinalizedFunction>();
+        while (!ct.IsCancellationRequested && !await finalized.QueryAsync<bool>(assignments, new IsVerifierEpochFinalizedFunction { Epoch = epoch }))
+        {
+            await Ensure(await _relayer.SendAsync(assignments, new FinalizeVerifierEpochFunction { Epoch = epoch, MaxTargets = FinalizeChunk }, ct),
+                $"finalize({epoch})");
+        }
+    }
+
+    private static Task Ensure(TransactionReceipt receipt, string what) => receipt.Status?.Value == 1
+        ? Task.CompletedTask
+        : throw new InvalidOperationException($"{what} reverted in {receipt.TransactionHash}.");
 
     /// <summary>Log queries are paged so a long chain never exceeds a provider's block-range or result cap.</summary>
     private const ulong LogPageBlocks = 5_000;

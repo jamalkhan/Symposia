@@ -62,6 +62,19 @@ public interface IVerifierChain
 
     /// <summary>Every registered node with <paramref name="service"/> Active, and its on-chain primary endpoint.</summary>
     Task<IReadOnlyList<RegisteredNode>> ActiveAsync(byte service, CancellationToken ct);
+
+    /// <summary>VerifierAssignments (#227); "" when the network has none.</summary>
+    Task<string> AssignmentsContractAsync(CancellationToken ct) => Task.FromResult("");
+
+    Task<bool> SeededAsync(ulong epoch, CancellationToken ct) => Task.FromResult(false);
+
+    /// <summary>This Verifier's (target, slot) assignments for <paramref name="epoch"/>, all pages.</summary>
+    Task<IReadOnlyList<(string Target, byte Slot)>> AssignmentsOfAsync(ulong epoch, string verifier, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<(string, byte)>>([]);
+
+    /// <summary>Assigned / submitted / judged / upheld for the card.</summary>
+    Task<(uint Assigned, uint Submitted, uint Judged, uint Upheld)?> CountsAsync(ulong epoch, string verifier, CancellationToken ct) =>
+        Task.FromResult<(uint, uint, uint, uint)?>(null);
 }
 
 public sealed class NethereumVerifierChain(VerifierOptions options, INodeRegistryClient registry) : IVerifierChain
@@ -90,6 +103,58 @@ public sealed class NethereumVerifierChain(VerifierOptions options, INodeRegistr
         return await _web3.Eth.GetContractQueryHandler<GetAddressFunction>().QueryAsync<string>(config, new GetAddressFunction { Key = MetricSignerKey });
     }
 
+    private string? _assignments;
+
+    public async Task<string> AssignmentsContractAsync(CancellationToken ct)
+    {
+        if (_assignments is { } known)
+        {
+            return known;
+        }
+
+        var config = await _web3.Eth.GetContractQueryHandler<ConfigFunction>().QueryAsync<string>(options.RewardDistributorAddress, new ConfigFunction());
+        var address = await _web3.Eth.GetContractQueryHandler<GetAddressFunction>().QueryAsync<string>(config, new GetAddressFunction { Key = ConfigKeys.VerifierAssignments });
+        return _assignments = string.IsNullOrEmpty(address) || address == "0x0000000000000000000000000000000000000000" ? "" : address;
+    }
+
+    public async Task<bool> SeededAsync(ulong epoch, CancellationToken ct) => await AssignmentsContractAsync(ct) is { Length: > 0 } a
+        && (await _web3.Eth.GetContractQueryHandler<SeedOfFunction>().QueryAsync<byte[]>(a, new SeedOfFunction { Epoch = epoch })).Any(b => b != 0);
+
+    public async Task<IReadOnlyList<(string Target, byte Slot)>> AssignmentsOfAsync(ulong epoch, string verifier, CancellationToken ct)
+    {
+        var contract = await AssignmentsContractAsync(ct);
+        var found = new List<(string, byte)>();
+        if (contract.Length == 0)
+        {
+            return found;
+        }
+
+        var total = (ulong)await _web3.Eth.GetContractQueryHandler<VerifierTargetCountFunction>()
+            .QueryAsync<BigInteger>(contract, new VerifierTargetCountFunction { Epoch = epoch });
+        const ulong page = 250; // fits the default eth_call gas cap (#227 arch §4)
+        for (ulong offset = 0; offset < total; offset += page)
+        {
+            var result = await _web3.Eth.GetContractQueryHandler<AssignmentsOfFunction>().QueryDeserializingToObjectAsync<AssignmentsPageOutput>(
+                new AssignmentsOfFunction { Epoch = epoch, Verifier = verifier, Offset = offset, Limit = page }, contract);
+            found.AddRange(result.Targets.Zip(result.Slots, (t, s) => (t, s)));
+        }
+
+        return found;
+    }
+
+    public async Task<(uint Assigned, uint Submitted, uint Judged, uint Upheld)?> CountsAsync(ulong epoch, string verifier, CancellationToken ct)
+    {
+        var contract = await AssignmentsContractAsync(ct);
+        if (contract.Length == 0)
+        {
+            return null;
+        }
+
+        var c = await _web3.Eth.GetContractQueryHandler<VerifierCountsOfFunction>().QueryDeserializingToObjectAsync<VerifierCountsOutput>(
+            new VerifierCountsOfFunction { Epoch = epoch, Verifier = verifier }, contract);
+        return (c.Assigned, c.Submitted, c.Judged, c.Upheld);
+    }
+
     public async Task<IReadOnlyList<RegisteredNode>> ActiveAsync(byte service, CancellationToken ct)
     {
         var nodes = await registry.ListNodesAsync(ct);
@@ -114,16 +179,31 @@ public sealed record RelayOutcome(bool Submitted, bool Terminal, string? Transac
 public interface IReportRelay
 {
     Task<RelayOutcome> SubmitAsync(Wire.Request request, CancellationToken ct);
+
+    /// <summary>A Verifier attestation batch (#227).</summary>
+    Task<RelayOutcome> AttestAsync(Symposia.Network.Node.Rewards.VerifierAttestationWire.Request request, CancellationToken ct) =>
+        Task.FromResult(new RelayOutcome(false, true, null, "not supported"));
+
+    /// <summary>Syncs this node into the Verifier pools (#227); a Verifier-only host isn't in the node registry.</summary>
+    Task<RelayOutcome> SyncAsync(string node, CancellationToken ct) => Task.FromResult(new RelayOutcome(true, false, null, null));
 }
 
 /// <summary>Posts reports to the Blockchain Gateway's relay (#221), which pays the gas.</summary>
 public sealed class HttpReportRelay(HttpClient http) : IReportRelay
 {
-    public async Task<RelayOutcome> SubmitAsync(Wire.Request request, CancellationToken ct)
+    public Task<RelayOutcome> SubmitAsync(Wire.Request request, CancellationToken ct) => PostAsync(Wire.Path, request, ct);
+
+    public Task<RelayOutcome> AttestAsync(Symposia.Network.Node.Rewards.VerifierAttestationWire.Request request, CancellationToken ct) =>
+        PostAsync(Symposia.Network.Node.Rewards.VerifierAttestationWire.Path, request, ct);
+
+    public Task<RelayOutcome> SyncAsync(string node, CancellationToken ct) =>
+        PostAsync(Symposia.Network.Node.Rewards.VerifierAttestationWire.SyncPath, new Symposia.Network.Node.Rewards.VerifierAttestationWire.SyncRequest(node), ct);
+
+    private async Task<RelayOutcome> PostAsync<T>(string path, T request, CancellationToken ct)
     {
         try
         {
-            using var response = await http.PostAsJsonAsync(Wire.Path, request, ct);
+            using var response = await http.PostAsJsonAsync(path, request, ct);
             Wire.Response? body = null;
             try
             {

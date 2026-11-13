@@ -55,6 +55,17 @@ public enum ReportFlags
     LowCoverage = 8,
 }
 
+/// <summary>An epoch's attestation batch (#227): Pending until sent; Submitted or Terminal are final.</summary>
+public enum BatchState
+{
+    Pending = 0,
+    Retrying = 1,
+    Submitted = 2,
+    Terminal = 3,
+}
+
+public sealed record VerifierBatch(ulong Epoch, BatchState State, int Items, string? TxHash, string? LastError, int Attempts);
+
 public sealed record VerifierReport(
     string Distributor, byte Service, string Target, ulong Epoch, IReadOnlyList<long> Values, uint HeartbeatBps, long? BytesClaimed,
     ReportFlags Flags, ReportState State, string? Signer, string? Signature, string? TxHash, string? LastError, int Attempts, long UpdatedMs);
@@ -119,6 +130,22 @@ public sealed class VerifierStore
                 epoch   INTEGER NOT NULL,
                 url     TEXT    NOT NULL,
                 PRIMARY KEY (service, target, epoch)
+            ) WITHOUT ROWID;
+            -- #227: this Verifier's on-chain assignments per epoch, and each epoch's attestation batch state.
+            CREATE TABLE IF NOT EXISTS verifier_assignment (
+                epoch  INTEGER NOT NULL,
+                target TEXT    NOT NULL,
+                slot   INTEGER NOT NULL,
+                PRIMARY KEY (epoch, target)
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS verifier_batch (
+                epoch      INTEGER PRIMARY KEY,
+                state      INTEGER NOT NULL,
+                items      INTEGER NOT NULL,
+                tx_hash    TEXT,
+                last_error TEXT,
+                attempts   INTEGER NOT NULL DEFAULT 0,
+                updated_ms INTEGER NOT NULL
             ) WITHOUT ROWID;
             -- The highest directory seq seen per node: a captured older directory can't roll a URL back.
             CREATE TABLE IF NOT EXISTS directory_seen (
@@ -364,6 +391,74 @@ public sealed class VerifierStore
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>Records <paramref name="epoch"/>'s assignments once (an empty list is recorded as a batch with no items).</summary>
+    public void SaveAssignments(ulong epoch, IReadOnlyList<(string Target, byte Slot)> assignments)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR IGNORE INTO verifier_assignment (epoch, target, slot) VALUES ($e, $t, $s)";
+        var (e, t, sl) = (cmd.Parameters.Add("$e", SqliteType.Integer), cmd.Parameters.Add("$t", SqliteType.Text), cmd.Parameters.Add("$s", SqliteType.Integer));
+        foreach (var (target, slot) in assignments)
+        {
+            (e.Value, t.Value, sl.Value) = ((long)epoch, target.ToLowerInvariant(), (long)slot);
+            cmd.ExecuteNonQuery();
+        }
+
+        cmd.Parameters.Clear();
+        cmd.CommandText = "INSERT OR IGNORE INTO verifier_batch (epoch, state, items, updated_ms) VALUES ($e, $st, $n, 0)";
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        cmd.Parameters.AddWithValue("$st", (long)BatchState.Pending);
+        cmd.Parameters.AddWithValue("$n", (long)assignments.Count);
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
+    public IReadOnlyList<(string Target, byte Slot)> AssignmentsIn(ulong epoch)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT target, slot FROM verifier_assignment WHERE epoch = $e ORDER BY target";
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        using var r = cmd.ExecuteReader();
+        var list = new List<(string, byte)>();
+        while (r.Read())
+        {
+            list.Add((r.GetString(0), (byte)r.GetInt32(1)));
+        }
+
+        return list;
+    }
+
+    public VerifierBatch? GetBatch(ulong epoch)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT epoch, state, items, tx_hash, last_error, attempts FROM verifier_batch WHERE epoch = $e";
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        using var r = cmd.ExecuteReader();
+        return r.Read() ? new VerifierBatch((ulong)r.GetInt64(0), (BatchState)r.GetInt32(1), r.GetInt32(2), Text(r, 3), Text(r, 4), r.GetInt32(5)) : null;
+    }
+
+    /// <summary>Moves a batch forward (never back from Submitted or Terminal).</summary>
+    public void SaveBatch(VerifierBatch b, long nowMs)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE verifier_batch SET state = $st, tx_hash = $tx, last_error = $err, attempts = $a, updated_ms = $u
+            WHERE epoch = $e AND state NOT IN (2, 3)
+            """;
+        cmd.Parameters.AddWithValue("$e", (long)b.Epoch);
+        cmd.Parameters.AddWithValue("$st", (long)b.State);
+        cmd.Parameters.AddWithValue("$tx", (object?)b.TxHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$err", (object?)b.LastError ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$a", (long)b.Attempts);
+        cmd.Parameters.AddWithValue("$u", nowMs);
+        cmd.ExecuteNonQuery();
+    }
+
     public long DirectorySeq(string node)
     {
         using var conn = Open();
@@ -396,6 +491,8 @@ public sealed class VerifierStore
             DELETE FROM verifier_target WHERE epoch < $e;
             DELETE FROM monitor_minute WHERE minute_ms < $m;
             DELETE FROM verifier_report WHERE state IN (3, 4) AND epoch < $old;
+            DELETE FROM verifier_assignment WHERE epoch < $e;
+            DELETE FROM verifier_batch WHERE epoch < $old;
             """;
         cmd.Parameters.AddWithValue("$old", (long)epoch - ReportRetentionEpochs);
         cmd.Parameters.AddWithValue("$e", (long)epoch);

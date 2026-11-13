@@ -69,6 +69,9 @@ public sealed class LedgerService(
 
     public const string IneligibleWithReport = "Not eligible: not Active, not verified in time, or stake below minimum";
 
+    /// <summary>#227: a Verifier is scored on-chain, and its uptime comes from the node's telemetry heartbeat record.</summary>
+    public const string NoVerifierRecord = "No telemetry heartbeat record for this epoch (Verifier uptime)";
+
     public async Task<LedgerSnapshot> SnapshotAsync(CancellationToken ct)
     {
         if (unavailableReason() is { } reason)
@@ -281,7 +284,7 @@ public sealed class LedgerService(
         }
 
         return [.. _entries.Select(e => KeyOf(e) is { } k && _reported.TryGetValue(k, out var reported)
-            ? e with { Detail = reported ? IneligibleWithReport : NoMetricReport }
+            ? e with { Detail = reported ? IneligibleWithReport : k.Service == 5 ? NoVerifierRecord : NoMetricReport }
             : e)];
     }
 

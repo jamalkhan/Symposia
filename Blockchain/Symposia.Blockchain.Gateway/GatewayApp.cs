@@ -57,6 +57,7 @@ public static class GatewayApp
         app.MapNodeEndpoints();
         app.MapTelemetryRelay();
         app.MapServiceMetricsRelay();
+        app.MapVerifierRelay();
         if (gateway.RpcProxy.Enabled)
         {
             app.MapRpcProxy();

@@ -186,8 +186,13 @@ async function refreshVerifier() {
   $('#verifier-card').hidden = v.status === 'Disabled' && !snap;
   if (!snap) { $('#verifier').innerHTML = dl([['Status', v.status], ['Detail', v.reason]]); $('#verifier-targets').innerHTML = ''; $('#verifier-reports').innerHTML = ''; return; }
   const MODES = { Attesting: 'Attesting (signs reports)', ObserveOnly: 'Observe-only (measures, never signs)', Unknown: 'Unknown (signs nothing)' };
+  const d = snap.duty, BATCH = ['pending', 'retrying', 'submitted', 'refused'];
   $('#verifier').innerHTML = dl([['Mode', MODES[snap.mode] || snap.mode], ['Why', snap.reason], ['Epoch', snap.epoch],
-    ['Discarded minutes this epoch', snap.discardedMinutes]]);
+    ['Discarded minutes this epoch', snap.discardedMinutes],
+    // #227: this node's own Verifier duty.
+    ['Assignments this epoch', d ? d.currentAssignments : ''],
+    ['Last attestations', d?.lastBatch ? `epoch ${d.lastBatch.epoch}: ${d.lastBatch.items} ${BATCH[d.lastBatch.state] || d.lastBatch.state}${d.lastBatch.lastError ? ` (${d.lastBatch.lastError})` : ''}` : ''],
+    ['Coverage / accuracy', d && d.countsEpoch != null ? `epoch ${d.countsEpoch}: ${d.submitted}/${d.assigned} attested, ${d.upheld}/${d.judged} upheld` : '']]);
   $('#verifier-targets').innerHTML = table(['Gateway', 'URL', 'Last probe', 'Latency'], snap.targets.map((t) =>
     `<tr><td class="mono">${esc(t.node)}</td><td class="mono">${esc(t.url || t.problem)}</td><td>${t.lastOutcome == null ? 'not yet' : esc(OUTCOMES[t.lastOutcome] || t.lastOutcome)}</td><td>${t.lastLatencyMs == null ? '' : `${t.lastLatencyMs} ms`}</td></tr>`));
   $('#verifier-reports').innerHTML = table(['Gateway', 'Epoch', 'Uptime / success / p95 / bytes', 'State', 'Notes'], snap.reports.map((r) =>

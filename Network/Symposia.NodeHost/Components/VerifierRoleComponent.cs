@@ -74,8 +74,15 @@ public sealed class VerifierRoleComponent : HostComponent
         _targets = TargetHttp.Create(options); // probes and directories: no redirects, connect-time address checks off LocalDev
         var logger = context.CreateLogger(Name, "Symposia.Network.Verifier");
         _engine = new VerifierEngine(options, new VerifierStore(Path.Combine(options.DataDir, "verifier.db")),
-            new NethereumVerifierChain(options, new NodeRegistryClient(_gateway)), new HttpReportRelay(_gateway), _http, logger, targetHttp: _targets);
+            new NethereumVerifierChain(options, new NodeRegistryClient(_gateway)), new HttpReportRelay(_gateway), _http, logger, targetHttp: _targets,
+            nodeSigner: new NodeAttestationSigner(identity));
         _engine.Start();
+
+        // #227: on LocalDev the Verifier service stakes like the other roles (#200), so it's Active and paid.
+        if (IsLocalDev(context, network))
+        {
+            context.LocalDevStaking?.Request(5, 0);
+        }
         return Task.CompletedTask;
     }
 
@@ -100,4 +107,13 @@ public sealed class VerifierRoleComponent : HostComponent
 
     private static bool IsLocalDev(HostContext context, NetworkInfo network) =>
         context.Settings.Network.Mode == NetworkMode.LocalDev && network.ChainId == Symposia.Network.Node.Staking.DevFunding.LocalDevChainId;
+}
+
+/// <summary>Signs Verifier attestation batches with this host's node key (#227).</summary>
+internal sealed class NodeAttestationSigner(NodeIdentity identity) : IAttestationSigner
+{
+    public string Address => identity.NodeId;
+
+    public string Sign(string contract, ulong chainId, ulong epoch, IReadOnlyList<Symposia.Network.Node.Rewards.VerifierAttestationWire.ItemWire> items) =>
+        identity.SignVerifierAttestation(contract, chainId, epoch, items);
 }
