@@ -502,7 +502,7 @@ contract AllActiveRegistry {
     }
 }
 
-/// @notice #227 AC6: 100 Verifiers × 1,000 targets at k=3 stays within half a 30M block per transaction.
+/// @notice #227 AC6: 100 Verifiers × 1,000 targets at k=5 (the default) stays within half a 30M block per transaction.
 contract VerifierAssignmentsGasTest is CoreProtocolTestBase {
     uint256 internal constant HALF_BLOCK = 15_000_000;
 
@@ -516,7 +516,7 @@ contract VerifierAssignmentsGasTest is CoreProtocolTestBase {
         va = VerifierAssignments(_deployProxy(address(new VerifierAssignments()), abi.encodeCall(VerifierAssignments.initialize, (cfg))));
         vm.startPrank(configOwner);
         cfg.setAddress(ConfigKeys.REGISTRY_ADDRESS, address(new AllActiveRegistry()));
-        cfg.setUint(ConfigKeys.VERIFIER_K, 3);
+        cfg.setUint(ConfigKeys.VERIFIER_K, 5); // the deployed default
         cfg.setUint(ConfigKeys.VERIFIER_TOLERANCE_REL_BPS, 1_000);
         vm.stopPrank();
     }
@@ -536,7 +536,7 @@ contract VerifierAssignmentsGasTest is CoreProtocolTestBase {
         assertEq(va.verifierCount(0), 100);
         assertEq(va.targetCount(0), 1_000);
 
-        // One verifier's whole epoch as one tx (about 30 items: 1,000 targets × 3 slots over 100 verifiers).
+        // One verifier's whole epoch as one tx (about 50 items: 1,000 targets × 5 slots over 100 verifiers).
         address v = verifiers[0];
         (address[] memory targets, uint8[] memory slots, ) = va.assignmentsOf(0, v, 0, 1_000);
         VerifierAssignments.Item[] memory items = new VerifierAssignments.Item[](targets.length);
