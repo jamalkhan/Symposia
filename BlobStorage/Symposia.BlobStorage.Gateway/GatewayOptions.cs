@@ -112,6 +112,9 @@ public sealed class GatewayOptions
 
     /// <summary>How often the registry is re-read for storage nodes (seconds).</summary>
     public int RegistryRefreshSeconds { get; set; } = 10;
+
+    /// <summary>Per-epoch factor reports for Blob Gateway rewards (#221); LocalDev only for now.</summary>
+    public Rewards.ServiceMetricsOptions ServiceMetrics { get; set; } = new();
 }
 
 public enum NodeSourceKind

@@ -15,6 +15,7 @@ import {TelemetryCheckpointRegistry} from "../src/TelemetryCheckpointRegistry.so
 import {NetworkRewardsEmission} from "../src/NetworkRewardsEmission.sol";
 import {EpochController} from "../src/EpochController.sol";
 import {ScoringWeights} from "../src/ScoringWeights.sol";
+import {VerifierAssignments} from "../src/VerifierAssignments.sol";
 import {IEpochClock} from "../src/interfaces/IEpochClock.sol";
 import {IFeeTreasury} from "../src/interfaces/IFeeTreasury.sol";
 import {ISYMMinter} from "../src/interfaces/ISYMMinter.sol";
@@ -75,6 +76,7 @@ contract DeployRewards is Script {
         ReliabilityRegistry reliability;
         TelemetryCheckpointRegistry telemetry;
         NetworkRewardsEmission emission;
+        VerifierAssignments assignments;
     }
 
     error PredictedAddressMismatch(address predicted, address actual);
@@ -125,6 +127,8 @@ contract DeployRewards is Script {
         );
         d.token = SYMToken(_proxy(tokenImpl, _tokenInit(roles, address(d.emission), deployer)));
         if (address(d.token) != predictedToken) revert PredictedAddressMismatch(predictedToken, address(d.token));
+
+        d.assignments = VerifierAssignments(_proxy(address(new VerifierAssignments()), abi.encodeCall(VerifierAssignments.initialize, (cfg))));
 
         _configure(d, roles);
     }
@@ -188,6 +192,16 @@ contract DeployRewards is Script {
         cfg.setUint(ConfigKeys.rewardFactorWeightBps(0, 6), 700); // used storage
         cfg.setUint(ConfigKeys.rewardStagePenaltyBps(1), 7_000);
         cfg.setUint(ConfigKeys.rewardStagePenaltyBps(2), 4_000);
+
+        // Verifier check assignments (#227): k = 5 per Blob Gateway, judged against the median within 10% or an
+        // absolute floor (bps factors 200, p95 50 ms; bytes relative only). Every entry point is permissionless.
+        cfg.setAddress(ConfigKeys.REWARD_VERIFIER_ASSIGNMENTS, address(d.assignments));
+        cfg.setUint(ConfigKeys.VERIFIER_K, 5);
+        cfg.setUint(ConfigKeys.VERIFIER_TARGET_SERVICE, 8);
+        cfg.setUint(ConfigKeys.VERIFIER_TOLERANCE_REL_BPS, 1_000);
+        cfg.setUint(ConfigKeys.verifierToleranceAbs(0), 200);
+        cfg.setUint(ConfigKeys.verifierToleranceAbs(1), 200);
+        cfg.setUint(ConfigKeys.verifierToleranceAbs(2), 50);
 
         // Reliability (#79). The distributor finalizes each sealed epoch.
         cfg.setAddress(ConfigKeys.RELIABILITY_CHALLENGER, roles.challenger);
@@ -274,6 +288,7 @@ contract DeployRewards is Script {
         console.log("ReliabilityRegistry:", address(d.reliability));
         console.log("TelemetryCheckpointRegistry:", address(d.telemetry));
         console.log("NetworkRewardsEmission:", address(d.emission));
+        console.log("VerifierAssignments:", address(d.assignments));
     }
 
     function _writeJson(Deployment memory d, string memory path) internal {
@@ -288,6 +303,7 @@ contract DeployRewards is Script {
         vm.serializeAddress(k, "RewardDistributor", address(d.rewards));
         vm.serializeAddress(k, "ReliabilityRegistry", address(d.reliability));
         vm.serializeAddress(k, "TelemetryCheckpointRegistry", address(d.telemetry));
+        vm.serializeAddress(k, "VerifierAssignments", address(d.assignments));
         vm.writeJson(vm.serializeAddress(k, "NetworkRewardsEmission", address(d.emission)), path);
     }
 }

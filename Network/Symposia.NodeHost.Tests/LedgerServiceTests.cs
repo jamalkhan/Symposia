@@ -39,6 +39,20 @@ public sealed class LedgerServiceTests
             : Task.FromResult(block > Latest ? "" : $"0x{HashSalt}{block}"); // "" = the chain has no such block
 
         public Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct) => Task.FromResult(service == 0 ? 3 * Sym : BigInteger.Zero);
+
+        public HashSet<(int Service, ulong Epoch)> Reported { get; } = [];
+
+        public int FailMetricLookups { get; set; }
+
+        public int MetricLookups { get; private set; }
+
+        public Task<bool> MetricSubmittedAsync(string node, int service, ulong epoch, CancellationToken ct)
+        {
+            MetricLookups++;
+            return FailMetricLookups-- > 0
+                ? throw new HttpRequestException("502 Bad Gateway")
+                : Task.FromResult(Reported.Contains((service, epoch)));
+        }
     }
 
     private static (LedgerService Ledger, FakeSource Source) Create(string? unavailable = null)
@@ -79,11 +93,43 @@ public sealed class LedgerServiceTests
         Assert.Equal("-50", snap.Entries[1].Amount);
         var earned = snap.Entries[2];
         Assert.Equal((LedgerCategory.Reward, "+12", 0UL), (earned.Category, "+" + earned.Amount, earned.Epoch!.Value));
-        Assert.Equal(("Blob Gateway", "Ineligible"), (snap.Entries[3].Service, snap.Entries[3].Detail));
+        Assert.Equal(("Blob Gateway", LedgerService.NoMetricReport), (snap.Entries[3].Service, snap.Entries[3].Detail));
         Assert.Equal((LedgerCategory.Penalty, "-10"), (snap.Entries[4].Category, snap.Entries[4].Amount));
         Assert.Equal(LedgerCategory.Penalty, snap.Entries[5].Category);
         Assert.Equal("0", snap.Entries[6].Amount);
         Assert.Equal(1_700_000_001L, reg.Timestamp);
+    }
+
+    [Fact]
+    public async Task Ineligible_WithAReport_SaysWhichOtherChecksApply()
+    {
+        var (ledger, source) = Create();
+        source.Latest = 10;
+        SeedLifecycle(source);
+        source.Reported.Add((8, 0));
+
+        var snap = await ledger.SnapshotAsync(default);
+
+        Assert.Equal(LedgerService.IneligibleWithReport, snap.Entries[3].Detail);
+    }
+
+    [Fact]
+    public async Task Ineligible_LookupFails_KeepsRawReason_AndRetriesNextSnapshot()
+    {
+        var (ledger, source) = Create();
+        source.Latest = 10;
+        SeedLifecycle(source);
+        source.FailMetricLookups = 1;
+
+        var first = await ledger.SnapshotAsync(default);
+        var second = await ledger.SnapshotAsync(default);
+        var third = await ledger.SnapshotAsync(default);
+
+        Assert.True(first.Available);
+        Assert.Equal("Ineligible", first.Entries[3].Detail);
+        Assert.Equal(LedgerService.NoMetricReport, second.Entries[3].Detail);
+        Assert.Equal(LedgerService.NoMetricReport, third.Entries[3].Detail);
+        Assert.Equal(2, source.MetricLookups); // the success is cached, the failure wasn't
     }
 
     [Fact]
@@ -291,6 +337,8 @@ public sealed class LedgerScanSafetyTests
         public Task<string> BlockHashAsync(ulong block, CancellationToken ct) => Task.FromResult($"0x{block}");
 
         public Task<BigInteger> ReserveAsync(string node, int service, CancellationToken ct) => Task.FromResult(BigInteger.Zero);
+
+        public Task<bool> MetricSubmittedAsync(string node, int service, ulong epoch, CancellationToken ct) => Task.FromResult(false);
     }
 
     [Fact]

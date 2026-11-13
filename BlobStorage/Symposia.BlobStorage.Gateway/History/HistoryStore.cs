@@ -48,8 +48,51 @@ public sealed class HistoryStore
             );
             CREATE INDEX IF NOT EXISTS idx_history_object ON object_history (bucket, key, id);
             CREATE INDEX IF NOT EXISTS idx_history_ts ON object_history (ts_ms);
+            -- #221: one row per minute the gateway was up, for the uptime factor.
+            CREATE TABLE IF NOT EXISTS gateway_liveness (minute_ms INTEGER PRIMARY KEY);
+            -- #221/#225: each epoch's own factors, measured once and never changed. Keyed by the distributor
+            -- too: a reset LocalDev chain starts over at epoch 0 under a new one. The gateway never signs
+            -- these as a metric report; the Verifier reads the signed bytes-served figure (#225 FR3.4).
+            CREATE TABLE IF NOT EXISTS epoch_measurement (
+                distributor  TEXT NOT NULL,
+                epoch        INTEGER NOT NULL,
+                start_ms     INTEGER NOT NULL,
+                end_ms       INTEGER NOT NULL,
+                uptime_bps   INTEGER NOT NULL,
+                success_bps  INTEGER NOT NULL,
+                p95_ms       INTEGER NOT NULL,
+                bytes_served INTEGER NOT NULL,
+                requests     INTEGER NOT NULL,
+                measured_ms  INTEGER NOT NULL,
+                PRIMARY KEY (distributor, epoch)
+            ) WITHOUT ROWID;
             """;
         cmd.ExecuteNonQuery();
+
+        // #221: request duration, for the p95 latency factor. Rows written before this have none.
+        cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('object_history') WHERE name = 'duration_ms'";
+        if (Convert.ToInt64(cmd.ExecuteScalar()) == 0)
+        {
+            cmd.CommandText = "ALTER TABLE object_history ADD COLUMN duration_ms INTEGER";
+            cmd.ExecuteNonQuery();
+        }
+
+        // #225: #221's epoch_report carried signing state the gateway no longer has. Keep what it measured.
+        cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'epoch_report'";
+        if (Convert.ToInt64(cmd.ExecuteScalar()) > 0)
+        {
+            using var tx = conn.BeginTransaction();
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                INSERT OR IGNORE INTO epoch_measurement (distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms)
+                SELECT distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, updated_ms
+                FROM epoch_report WHERE NOT (state = 'Terminal' AND requests = 0 AND uptime_bps = 0);
+                DROP TABLE epoch_report;
+                """;
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+            cmd.Transaction = null;
+        }
     }
 
     /// <summary>The database file, for disk accounting.</summary>
@@ -68,16 +111,16 @@ public sealed class HistoryStore
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO object_history (ts_ms, operation, bucket, key, api, size_bytes, etag, cid, client_ip, access_key_id, tenant_id, user_agent, request_id, outcome, status)
-            VALUES ($ts, $op, $b, $k, $api, $size, $etag, $cid, $ip, $ak, $tenant, $ua, $rid, $outcome, $status)
+            INSERT INTO object_history (ts_ms, operation, bucket, key, api, size_bytes, etag, cid, client_ip, access_key_id, tenant_id, user_agent, request_id, outcome, status, duration_ms)
+            VALUES ($ts, $op, $b, $k, $api, $size, $etag, $cid, $ip, $ak, $tenant, $ua, $rid, $outcome, $status, $dur)
             """;
-        var integers = new HashSet<string> { "$ts", "$size", "$status" };
-        var p = new[] { "$ts", "$op", "$b", "$k", "$api", "$size", "$etag", "$cid", "$ip", "$ak", "$tenant", "$ua", "$rid", "$outcome", "$status" }
+        var integers = new HashSet<string> { "$ts", "$size", "$status", "$dur" };
+        var p = new[] { "$ts", "$op", "$b", "$k", "$api", "$size", "$etag", "$cid", "$ip", "$ak", "$tenant", "$ua", "$rid", "$outcome", "$status", "$dur" }
             .Select(n => cmd.Parameters.Add(n, integers.Contains(n) ? SqliteType.Integer : SqliteType.Text)).ToArray();
         foreach (var e in entries)
         {
             object?[] values = [e.Timestamp.ToUnixTimeMilliseconds(), e.Operation, e.Bucket, e.Key, e.Api, e.Size, e.Etag, e.Cid, e.ClientIp,
-                e.AccessKeyId, e.TenantId, e.UserAgent, e.RequestId, e.Outcome, e.Status];
+                e.AccessKeyId, e.TenantId, e.UserAgent, e.RequestId, e.Outcome, e.Status, e.DurationMs];
             for (var i = 0; i < p.Length; i++)
             {
                 p[i].Value = values[i] ?? DBNull.Value;
@@ -148,6 +191,137 @@ public sealed class HistoryStore
         cmd.Parameters.AddWithValue("$n", batch);
         return cmd.ExecuteNonQuery();
     }
+
+    /// <summary>Marks the minute containing <paramref name="now"/> as up (#221); idempotent.</summary>
+    public void RecordLiveness(DateTimeOffset now)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO gateway_liveness (minute_ms) VALUES ($m)";
+        cmd.Parameters.AddWithValue("$m", now.ToUnixTimeMilliseconds() / 60_000 * 60_000);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// The Blob Gateway factors over [<paramref name="startMs"/>, <paramref name="endMs"/>) (#221), in one read
+    /// transaction. Success rate and p95 are per request (a multi-object request writes a row per object, all with
+    /// its status and duration); bytes served is per object read. Every range scan uses <c>idx_history_ts</c>; the
+    /// per-request grouping and the p95 sort are temp B-trees over the range, once per epoch, off the request path.
+    /// </summary>
+    public EpochFactors Aggregate(long startMs, long endMs)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction(deferred: true);
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.Parameters.AddWithValue("$s", startMs);
+        cmd.Parameters.AddWithValue("$e", endMs);
+
+        cmd.CommandText = """
+            SELECT COUNT(*), COALESCE(SUM(failed), 0), COUNT(duration_ms)
+            FROM (SELECT MAX(status >= 500) AS failed, MAX(duration_ms) AS duration_ms
+                  FROM object_history WHERE ts_ms >= $s AND ts_ms < $e GROUP BY request_id)
+            """;
+        long requests, failures, timed;
+        using (var r = cmd.ExecuteReader())
+        {
+            r.Read();
+            (requests, failures, timed) = (r.GetInt64(0), r.GetInt64(1), r.GetInt64(2));
+        }
+
+        cmd.CommandText = "SELECT COALESCE(SUM(size_bytes), 0) FROM object_history WHERE ts_ms >= $s AND ts_ms < $e AND operation = 'view' AND status < 400";
+        var bytes = Convert.ToInt64(cmd.ExecuteScalar());
+
+        long p95 = 0;
+        if (timed > 0)
+        {
+            // Nearest rank: the ceil(0.95 n)-th smallest.
+            cmd.CommandText = """
+                SELECT d FROM (SELECT MAX(duration_ms) AS d FROM object_history WHERE ts_ms >= $s AND ts_ms < $e GROUP BY request_id)
+                WHERE d IS NOT NULL ORDER BY d LIMIT 1 OFFSET $k
+                """;
+            cmd.Parameters.AddWithValue("$k", ((timed * 95) + 99) / 100 - 1);
+            p95 = Convert.ToInt64(cmd.ExecuteScalar());
+        }
+
+        // Minutes overlapping the epoch, counted the same way on both sides: chain epochs needn't start on a minute.
+        cmd.CommandText = "SELECT COUNT(*) FROM gateway_liveness WHERE minute_ms > $s - 60000 AND minute_ms < $e";
+        var upMinutes = Convert.ToInt64(cmd.ExecuteScalar());
+        var epochMinutes = Math.Max(1, ((endMs - 1) / 60_000) - (startMs / 60_000) + 1);
+
+        tx.Commit();
+        return new EpochFactors(
+            UptimeBps: (uint)Math.Min(10_000, upMinutes * 10_000 / epochMinutes),
+            SuccessBps: requests == 0 ? 10_000u : (uint)((requests - failures) * 10_000 / requests),
+            P95Ms: p95,
+            BytesServed: bytes,
+            Requests: requests);
+    }
+
+    public EpochMeasurement? GetMeasurement(string distributor, ulong epoch)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {MeasurementColumns} FROM epoch_measurement WHERE distributor = $d AND epoch = $e";
+        cmd.Parameters.AddWithValue("$d", distributor.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$e", (long)epoch);
+        using var r = cmd.ExecuteReader();
+        return r.Read() ? ReadMeasurement(r) : null;
+    }
+
+    /// <summary>The most recent measurement, for diagnostics.</summary>
+    public EpochMeasurement? LatestMeasurement()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {MeasurementColumns} FROM epoch_measurement ORDER BY measured_ms DESC LIMIT 1"; // a few hundred rows at most (see SaveMeasurement)
+        using var r = cmd.ExecuteReader();
+        return r.Read() ? ReadMeasurement(r) : null;
+    }
+
+    /// <summary>
+    /// Stores a measurement once; a second save for the same epoch is ignored (measurements are immutable). Keeps
+    /// <see cref="MeasurementRetention"/>: long past any report window, and enough for the Verifier's figure fetches.
+    /// </summary>
+    public void SaveMeasurement(EpochMeasurement m)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR IGNORE INTO epoch_measurement (distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms)
+            VALUES ($dist, $epoch, $s, $e, $up, $ok, $p95, $bytes, $n, $at);
+            DELETE FROM epoch_measurement WHERE measured_ms < $at - $keep;
+            """;
+        cmd.Parameters.AddWithValue("$keep", (long)MeasurementRetention.TotalMilliseconds);
+        object[] values = [m.Distributor.ToLowerInvariant(), (long)m.Epoch, m.StartMs, m.EndMs, (long)m.Factors.UptimeBps, (long)m.Factors.SuccessBps,
+            m.Factors.P95Ms, m.Factors.BytesServed, m.Factors.Requests, m.MeasuredMs];
+        string[] names = ["$dist", "$epoch", "$s", "$e", "$up", "$ok", "$p95", "$bytes", "$n", "$at"];
+        for (var i = 0; i < names.Length; i++)
+        {
+            cmd.Parameters.AddWithValue(names[i], values[i]);
+        }
+
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Deletes liveness minutes older than <paramref name="cutoff"/>.</summary>
+    public int DeleteLivenessOlderThan(DateTimeOffset cutoff)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM gateway_liveness WHERE minute_ms < $cutoff";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToUnixTimeMilliseconds());
+        return cmd.ExecuteNonQuery();
+    }
+
+    public static readonly TimeSpan MeasurementRetention = TimeSpan.FromDays(30);
+
+    private const string MeasurementColumns =
+        "distributor, epoch, start_ms, end_ms, uptime_bps, success_bps, p95_ms, bytes_served, requests, measured_ms";
+
+    private static EpochMeasurement ReadMeasurement(SqliteDataReader r) => new(
+        r.GetString(0), (ulong)r.GetInt64(1), r.GetInt64(2), r.GetInt64(3),
+        new EpochFactors((uint)r.GetInt64(4), (uint)r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8)), r.GetInt64(9));
 
     /// <summary>The database's size on disk, including its WAL.</summary>
     public long SizeBytes => new[] { DatabasePath, DatabasePath + "-wal" }.Sum(f => File.Exists(f) ? new FileInfo(f).Length : 0);

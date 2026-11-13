@@ -17,7 +17,14 @@ public sealed record HistoryEntry(
     string? UserAgent,
     string RequestId,
     string Outcome,
-    int Status);
+    int Status,
+    long? DurationMs = null);
+
+/// <summary>One epoch's Blob Gateway factors (#221), in ScoringWeights order bar <see cref="Requests"/>.</summary>
+public sealed record EpochFactors(uint UptimeBps, uint SuccessBps, long P95Ms, long BytesServed, long Requests);
+
+/// <summary>One epoch's own measurement (#221/#225): taken once, after the epoch ends, and never changed.</summary>
+public sealed record EpochMeasurement(string Distributor, ulong Epoch, long StartMs, long EndMs, EpochFactors Factors, long MeasuredMs);
 
 /// <summary>Operation types recorded per object.</summary>
 public static class HistoryOperation

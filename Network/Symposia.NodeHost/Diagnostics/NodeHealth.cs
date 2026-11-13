@@ -45,7 +45,7 @@ public sealed record NodeHealthReport(string Node, StorageHealth Storage, Comput
 /// </summary>
 public sealed class NodeHealth(ComponentSupervisor supervisor, string nodeAddress)
 {
-    public const string Path = "/v1/node/health";
+    public const string Path = Symposia.Network.Node.PrimaryEndpointPaths.Health;
 
     public const double StorageWarnFreeFraction = 0.40;
     public const double StorageBadFreeFraction = 0.20;

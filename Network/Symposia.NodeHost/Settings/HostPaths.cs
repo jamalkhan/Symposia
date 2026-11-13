@@ -9,6 +9,9 @@ public sealed record HostPaths(string DataDir)
 
     public string NodeKey => Path.Combine(DataDir, "node.key");
 
+    /// <summary>The Verifier role's default metric-signer key (#225).</summary>
+    public string MetricSignerKey => Path.Combine(DataDir, "metric-signer.key");
+
     public string Deployment => Path.Combine(DataDir, "network.json");
 
     public string AnvilState => Path.Combine(DataDir, "anvil-state.json");

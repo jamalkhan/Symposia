@@ -119,6 +119,60 @@ public sealed class SettingsTests : IDisposable
     }
 
     // FR-D2 / FR-E3: a settings change restarts only what depends on it.
+    [Theory]
+    [InlineData(true, false, true, true, "Storage")]
+    [InlineData(false, true, true, true, "Compute")]
+    [InlineData(false, false, true, true, "BlobGateway")]
+    [InlineData(false, false, true, false, "None")] // no secret: the gateway can't start, so it isn't registered
+    [InlineData(false, false, false, true, "None")]
+    public void PrimaryRole_StorageThenComputeThenARunnableGateway(bool storage, bool compute, bool gateway, bool secret, string expected)
+    {
+        var s = HostSettings.Defaults(0);
+        (s.Storage.Enabled, s.Compute.Enabled, s.BlobGateway.Enabled, s.BlobGateway.AccessKeyId) = (storage, compute, gateway, "AK");
+
+        Assert.Equal(expected, HostContext.PrimaryRoleFor(s, secret).ToString());
+        Assert.Equal(expected == "BlobGateway" ? $"http://127.0.0.1:{s.BlobGateway.Port}" : null,
+            expected == "BlobGateway" ? HostContext.PrimaryEndpointFor(s, secret) : expected == "None" ? HostContext.PrimaryEndpointFor(s, secret) : null);
+    }
+
+    [Fact]
+    public void Supervisor_MovingThePrimary_RestartsOldAndNewPrimary()
+    {
+        var secrets = new SecretStore(Paths);
+        secrets.SetBlobGatewaySecret("s3cret");
+        var supervisor = new ComponentSupervisor(new HostContext(Paths, secrets, new LogBuffer()), new SettingsStore(Paths, 0, Env()));
+        var gatewayOnly = HostSettings.Defaults(0);
+        (gatewayOnly.BlobGateway.Enabled, gatewayOnly.BlobGateway.AccessKeyId) = (true, "AK");
+        var withStorage = HostSettings.Defaults(0);
+        (withStorage.BlobGateway.Enabled, withStorage.BlobGateway.AccessKeyId, withStorage.Storage.Enabled) = (true, "AK", true);
+
+        var affected = supervisor.Affected(gatewayOnly, withStorage);
+
+        Assert.Contains(supervisor.Network, affected);
+        Assert.Contains(supervisor.Storage, affected);
+        Assert.Contains(supervisor.BlobGateway, affected); // drops its handshake and directory
+    }
+
+    [Fact]
+    public async Task Supervisor_AddingTheGatewaySecret_MovesThePrimaryToTheGateway()
+    {
+        var secrets = new SecretStore(Paths);
+        var store = new SettingsStore(Paths, 0, Env());
+        var gatewayOnly = HostSettings.Defaults(0);
+        (gatewayOnly.BlobGateway.Enabled, gatewayOnly.BlobGateway.AccessKeyId) = (true, "AK");
+        store.Save(gatewayOnly);
+        var supervisor = new ComponentSupervisor(new HostContext(Paths, secrets, new LogBuffer()), store);
+        await supervisor.SaveAndApplyAsync(gatewayOnly, default); // no secret yet: no primary
+        Assert.Equal(PrimaryRole.None, supervisor.Context.Primary);
+
+        secrets.SetBlobGatewaySecret("s3cret");
+        var restarted = await supervisor.SaveAndApplyAsync(gatewayOnly, default);
+
+        Assert.Equal(PrimaryRole.BlobGateway, supervisor.Context.Primary);
+        Assert.Contains(supervisor.Network, restarted);
+        Assert.Contains(supervisor.BlobGateway, restarted);
+    }
+
     [Fact]
     public void Supervisor_RestartsOnlyAffectedComponents()
     {
@@ -150,6 +204,18 @@ public sealed class SettingsTests : IDisposable
         gatewayDiscoveryNext.BlobGateway.Enabled = true;
         gatewayDiscoveryNext.Discovery.IntervalSeconds = 30;
         Assert.Equal([supervisor.Network, supervisor.BlobGateway], supervisor.Affected(gatewayDiscovery, gatewayDiscoveryNext));
+
+        // #225: the primary role serves the signed service directory listing the gateway, so it restarts too.
+        var withStorage = HostSettings.Defaults(0);
+        withStorage.Storage.Enabled = true;
+        var withStorageGateway = HostSettings.Defaults(0);
+        withStorageGateway.Storage.Enabled = true;
+        withStorageGateway.BlobGateway.Enabled = true;
+        Assert.Equal([supervisor.BlobGateway, supervisor.Storage], supervisor.Affected(withStorage, withStorageGateway).OrderBy(c => c.Name));
+
+        var verifier = HostSettings.Defaults(0);
+        verifier.Verifier.Enabled = true;
+        Assert.Equal([supervisor.Verifier], supervisor.Affected(before, verifier));
 
         // Review (Carl 5): a change that doesn't move the primary endpoint leaves the network alone.
         var capacity = HostSettings.Defaults(0);

@@ -63,6 +63,14 @@ public sealed class LedgerService(
     private LedgerStore? _store;
     private ulong? _cursor;
     private (ulong Block, IReadOnlyDictionary<int, BigInteger> Reserves)? _reserves;
+    private readonly Dictionary<(ulong Epoch, int Service), bool> _reported = [];
+
+    public const string NoMetricReport = "No metric report for this epoch";
+
+    public const string IneligibleWithReport = "Not eligible: not Active, not verified in time, or stake below minimum";
+
+    /// <summary>#227: a Verifier is scored on-chain, and its uptime comes from the node's telemetry heartbeat record.</summary>
+    public const string NoVerifierRecord = "No telemetry heartbeat record for this epoch (Verifier uptime)";
 
     public async Task<LedgerSnapshot> SnapshotAsync(CancellationToken ct)
     {
@@ -87,6 +95,7 @@ public sealed class LedgerService(
                 _entries.Clear();
                 _cursor = null;
                 _reserves = null;
+                _reported.Clear();
                 _store = storeFor?.Invoke();
                 try
                 {
@@ -100,7 +109,7 @@ public sealed class LedgerService(
             }
 
             await ScanAsync(source, ct);
-            return new LedgerSnapshot(true, null, _entries.ToList(), await TotalsAsync(source, ct), _cursor ?? 0);
+            return new LedgerSnapshot(true, null, await ExplainIneligibleAsync(source, ct), await TotalsAsync(source, ct), _cursor ?? 0);
         }
         finally
         {
@@ -230,6 +239,56 @@ public sealed class LedgerService(
                 return null;
         }
     }
+
+    /// <summary>
+    /// Says why an Ineligible settlement got nothing (#221): most often no metric report was submitted, which
+    /// isn't the operator's doing. Persisted rows keep the raw reason; this is applied per snapshot. Only
+    /// successful lookups are cached (the answer can't change after the seal); a failed one keeps the raw text.
+    /// Uncached lookups run <see cref="LookupConcurrency"/> at a time, and the first failure stops the rest for this
+    /// snapshot, so a down RPC costs one timeout per load, not one per row.
+    /// </summary>
+    private async Task<List<LedgerEntry>> ExplainIneligibleAsync(ILedgerLogSource source, CancellationToken ct)
+    {
+        (ulong Epoch, int Service)? KeyOf(LedgerEntry e) =>
+            e is { Category: LedgerCategory.Reward, Type: "No reward", Epoch: { } epoch } && e.Detail == SettlementReasons[3]
+            && NodeServiceCatalog.All.FirstOrDefault(s => s.Name == e.Service)?.Id is { } service ? (epoch, service) : null;
+
+        var missing = _entries.Select(KeyOf).OfType<(ulong Epoch, int Service)>().Where(k => !_reported.ContainsKey(k)).Distinct().ToList();
+        if (missing.Count > 0)
+        {
+            using var failed = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var found = new System.Collections.Concurrent.ConcurrentDictionary<(ulong, int), bool>();
+            try
+            {
+                await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = LookupConcurrency, CancellationToken = failed.Token },
+                    async (k, token) =>
+                    {
+                        try
+                        {
+                            found[k] = await source.MetricSubmittedAsync(node, k.Service, k.Epoch, token);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            failed.Cancel();
+                        }
+                    });
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+            }
+
+            foreach (var (k, v) in found)
+            {
+                _reported[k] = v;
+            }
+        }
+
+        return [.. _entries.Select(e => KeyOf(e) is { } k && _reported.TryGetValue(k, out var reported)
+            ? e with { Detail = reported ? IneligibleWithReport : k.Service == 5 ? NoVerifierRecord : NoMetricReport }
+            : e)];
+    }
+
+    public const int LookupConcurrency = 4;
 
     private async Task<IReadOnlyList<ServiceTotals>> TotalsAsync(ILedgerLogSource source, CancellationToken ct)
     {

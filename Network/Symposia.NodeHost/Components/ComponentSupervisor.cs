@@ -24,9 +24,11 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
 
     public BlobGatewayRoleComponent BlobGateway { get; } = new();
 
+    public VerifierRoleComponent Verifier { get; } = new();
+
     public HostContext Context => context;
 
-    public IReadOnlyList<HostComponent> All => [Chain, Gateway, Network, Storage, Compute, BlobGateway];
+    public IReadOnlyList<HostComponent> All => [Chain, Gateway, Network, Storage, Compute, BlobGateway, Verifier];
 
     public async Task StartAllAsync(CancellationToken ct)
     {
@@ -69,8 +71,21 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
             var previous = settings.Effective;
             settings.Save(updated);
             var next = settings.Effective;
-            var affected = Affected(previous, next);
+            var affected = Affected(previous, next).ToList();
             context.Settings = next;
+            // A secret saved alongside settings can move the primary too (#228): compare with what was last applied.
+            if (context.Primary != _appliedPrimary)
+            {
+                foreach (var c in new[] { Network, RoleComponent(_appliedPrimary), RoleComponent(context.Primary) })
+                {
+                    if (c is not null && !affected.Contains(c))
+                    {
+                        affected.Add(c);
+                    }
+                }
+
+                affected = [.. All.Where(affected.Contains)];
+            }
             await StopAsync(affected);
             await StartAsync(affected, ct);
             return affected;
@@ -105,8 +120,40 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         }
     }
 
-    /// <summary>Restarts the blob gateway so a replaced secret takes effect (no settings change involved).</summary>
-    public Task RestartBlobGatewayAsync(CancellationToken ct) => RestartAsync(BlobGateway.Name, ct);
+    /// <summary>
+    /// Restarts the blob gateway so a replaced secret takes effect (no settings change involved). Adding or removing
+    /// the secret can also decide whether a gateway-only host's gateway is the primary endpoint (#228): then the
+    /// network component and the old primary restart too, so registration and the handshake follow.
+    /// </summary>
+    public async Task RestartBlobGatewayAsync(CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            context.Settings = settings.Effective;
+            var now = context.Primary;
+            List<HostComponent> affected = [BlobGateway];
+            if (now != _appliedPrimary)
+            {
+                affected.Add(Network);
+                if (RoleComponent(_appliedPrimary) is { } old)
+                {
+                    affected.Add(old);
+                }
+            }
+
+            IReadOnlyList<HostComponent> ordered = [.. All.Where(affected.Contains)];
+            await StopAsync(ordered);
+            await StartAsync(ordered, ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>The primary role as of the last start or apply, so a secret change can tell it moved.</summary>
+    private PrimaryRole _appliedPrimary;
 
     public async Task RestartAsync(string name, CancellationToken ct)
     {
@@ -138,10 +185,25 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
         var affected = new List<HostComponent>();
         var storageChanged = Changed(previous.Storage, next.Storage);
         var computeChanged = Changed(previous.Compute, next.Compute);
-        if (HostContext.PrimaryEndpointFor(previous) != HostContext.PrimaryEndpointFor(next) || Changed(previous.Discovery, next.Discovery))
+        var secret = context.Secrets.HasBlobGatewaySecret;
+        if (HostContext.PrimaryEndpointFor(previous, secret) != HostContext.PrimaryEndpointFor(next, secret) || Changed(previous.Discovery, next.Discovery))
         {
             // Only these change what the network component registers or how it discovers.
             affected.Add(Network);
+        }
+
+        // The primary role serves the handshake, health and service directory (#228): when it moves, both the old and
+        // the new primary restart, so the paths move with it.
+        var (was, now) = (HostContext.PrimaryRoleFor(previous, secret), HostContext.PrimaryRoleFor(next, secret));
+        if (was != now)
+        {
+            foreach (var role in new[] { was, now })
+            {
+                if (RoleComponent(role) is { } component && !affected.Contains(component))
+                {
+                    affected.Add(component);
+                }
+            }
         }
 
         if (storageChanged)
@@ -160,14 +222,35 @@ public sealed class ComponentSupervisor(HostContext context, SettingsStore setti
             affected.Add(BlobGateway);
         }
 
-        return affected;
+        // The primary role serves the signed service directory, which lists the gateway's URL (#225).
+        if (Changed(previous.BlobGateway, next.BlobGateway) && !affected.Contains(Storage) && !affected.Contains(Compute)
+            && (next.Storage.Enabled ? Storage : next.Compute.Enabled ? (HostComponent)Compute : null) is { } primary)
+        {
+            affected.Add(primary);
+        }
+
+        if (Changed(previous.Verifier, next.Verifier))
+        {
+            affected.Add(Verifier);
+        }
+
+        return [.. affected.Distinct()];
     }
+
+    private HostComponent? RoleComponent(PrimaryRole role) => role switch
+    {
+        PrimaryRole.Storage => Storage,
+        PrimaryRole.Compute => Compute,
+        PrimaryRole.BlobGateway => BlobGateway,
+        _ => null,
+    };
 
     private static bool Changed<T>(T a, T b) =>
         System.Text.Json.JsonSerializer.Serialize(a, SecureFile.Json) != System.Text.Json.JsonSerializer.Serialize(b, SecureFile.Json);
 
     private async Task StartAsync(IReadOnlyList<HostComponent> components, CancellationToken ct)
     {
+        _appliedPrimary = context.Primary;
         foreach (var component in All.Where(components.Contains))
         {
             if (component == Chain)
