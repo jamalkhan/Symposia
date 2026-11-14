@@ -115,6 +115,28 @@ public sealed class GatewayOptions
 
     /// <summary>Per-epoch factor reports for Blob Gateway rewards (#221); LocalDev only for now.</summary>
     public Rewards.ServiceMetricsOptions ServiceMetrics { get; set; } = new();
+
+    /// <summary>
+    /// Operator bearer token for <c>GET /metrics</c> (#1 FR-26). Not a tenant credential. Empty = every
+    /// scrape is refused with 401.
+    /// </summary>
+    public string MetricsBearerToken { get; set; } = "";
+
+    /// <summary>
+    /// How long <c>/ready</c> reports draining before the server stops accepting connections (#1 FR-28),
+    /// so the load balancer takes this instance out of rotation first. In-flight requests then get
+    /// <see cref="ShutdownTimeoutSeconds"/> to finish.
+    /// </summary>
+    public int DrainNoticeSeconds { get; set; }
+
+    /// <summary>How long in-flight requests may run after shutdown starts before the host stops (#1 FR-28).</summary>
+    public int ShutdownTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Per-tenant storage quotas in bytes (#1 FR-2): a write that would take the tenant past its quota is
+    /// refused with 507 before any node is contacted. Tenants not listed are unlimited.
+    /// </summary>
+    public Dictionary<string, long> TenantQuotaBytes { get; set; } = [];
 }
 
 public enum NodeSourceKind

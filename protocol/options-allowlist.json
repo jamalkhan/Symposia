@@ -4,6 +4,10 @@
     {
       "property": "Symposia.BlobStorage.StorageNode.StorageNodeOptions.RequireCallerAuth",
       "reason": "Node-local: whether this storage node demands signed calls from registered members (#140). It is advertised as storage.rpc.auth.v1 and does not decide which peers a gateway accepts."
+    },
+    {
+      "property": "Symposia.BlobStorage.StorageNode.StorageNodeOptions.RequireRegionVerification",
+      "reason": "Node-local: whether this storage node's own /ready waits for its region to be verified (BlobStorage #1 FR-25). It changes only what the node reports to its load balancer or orchestrator, never which peers anyone accepts."
     }
   ]
 }

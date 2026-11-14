@@ -67,6 +67,11 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         get { lock (_lock) return [.._nodes]; }
     }
 
+    public bool CacheLoaded
+    {
+        get { lock (_lock) return _nodes.Count > 0 && _nodes.All(n => n.LastProbeAttemptAt != DateTimeOffset.MinValue); }
+    }
+
     public IReadOnlyList<NodeConnection> Healthy
     {
         get
@@ -297,6 +302,18 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private async Task ProbeAsync(NodeConnection node)
     {
         var wasHealthy = node.IsHealthy;
+        try
+        {
+            await ProbeOnceAsync(node, wasHealthy);
+        }
+        finally
+        {
+            node.LastProbeAttemptAt = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private async Task ProbeOnceAsync(NodeConnection node, bool wasHealthy)
+    {
         try
         {
             var response = await node.Client.ProbeAsync(new ProbeRequest(),

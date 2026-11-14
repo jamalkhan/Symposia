@@ -59,6 +59,16 @@ public static class BlobGatewayApp
         builder.Services.AddHostedService(sp => sp.GetRequiredService<NodeRegistry>());
 
         builder.Services.AddScoped<QuorumWriter>();
+        builder.Services.AddSingleton<TenantQuota>();
+        builder.Services.AddSingleton<IWriteQuorumRequirement, ConfiguredWriteQuorum>();
+
+        // Health, readiness, metrics and drain (#1).
+        builder.Services.AddSingleton<Health.GatewayMetrics>();
+        builder.Services.AddSingleton<Health.ShutdownState>();
+        builder.Services.AddSingleton<Health.MetadataIndexMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<Health.MetadataIndexMonitor>());
+        builder.Services.Configure<HostOptions>(host =>
+            host.ShutdownTimeout = TimeSpan.FromSeconds(Math.Max(1, gatewayConfig.ShutdownTimeoutSeconds)));
 
         // Repair / resilience services.
         builder.Services.AddSingleton<RepairQueue>();
@@ -148,6 +158,23 @@ public static class BlobGatewayApp
         // ── Init ──────────────────────────────────────────────────────────────────────
 
         app.Services.GetRequiredService<GatewayMetadataStore>().Initialize();
+        app.Services.GetRequiredService<Health.MetadataIndexMonitor>().Check();
+        ClaimUnownedBuckets(app);
+
+        // Drain (#1 FR-28): /ready goes 503 first, so the load balancer stops sending new connections
+        // during the notice period; Kestrel then stops listening and in-flight requests finish within
+        // HostOptions.ShutdownTimeout.
+        var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            app.Services.GetRequiredService<Health.ShutdownState>().BeginDrain();
+            var notice = gatewayConfig.DrainNoticeSeconds;
+            if (notice > 0)
+            {
+                app.Logger.LogInformation("Draining: reporting not ready for {Notice}s before closing listeners.", notice);
+                Thread.Sleep(TimeSpan.FromSeconds(notice));
+            }
+        });
 
         // A node coming online (new, or back from an outage) gets missing copies straight away (issue #135).
         var replicationMonitor = app.Services.GetRequiredService<ReplicationMonitor>();
@@ -158,6 +185,7 @@ public static class BlobGatewayApp
         // ── SigV4 middleware ──────────────────────────────────────────────────────────
 
         app.UseRequestIds();
+        Health.RequestLog.UseRequestLog(app);
         if (servesPrimary)
         {
             app.UseNodeNetwork();
@@ -167,7 +195,7 @@ public static class BlobGatewayApp
         app.Use(async (ctx, next) =>
         {
             var path = ctx.Request.Path.Value ?? "";
-            if (path.StartsWith("/healthz/", StringComparison.Ordinal) ||
+            if (Health.HealthEndpoints.IsHealthPath(path) ||
                 path.StartsWith("/admin/", StringComparison.Ordinal) ||
                 path == BlobApiEndpoints.OpenApiPath ||
                 (servesPrimary && Symposia.Network.Node.PrimaryEndpointPaths.Contains(path)))
@@ -204,15 +232,7 @@ public static class BlobGatewayApp
 
         // ── Health endpoints ──────────────────────────────────────────────────────────
 
-        app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));
-
-        app.MapGet("/healthz/ready", (INodeRegistry nodes) =>
-        {
-            var healthy = nodes.Healthy;
-            return healthy.Count > 0
-                ? Results.Ok(new { status = "ready", nodes = healthy.Count })
-                : Results.StatusCode(503);
-        });
+        Health.HealthEndpoints.Map(app);
 
         // ── Admin endpoints ───────────────────────────────────────────────────────────
 
@@ -241,6 +261,21 @@ public static class BlobGatewayApp
         ObjectEndpoints.Map(app);
         BucketEndpoints.Map(app);
         return app;
+    }
+
+    /// <summary>
+    /// Buckets created before ownership existed have no tenant. A single-tenant deployment (one tenant in
+    /// its configured credentials) adopts them on upgrade, so its existing buckets stay usable under tenant
+    /// isolation (#3); with several tenants the operator assigns them, and they stay unusable until then.
+    /// </summary>
+    private static void ClaimUnownedBuckets(WebApplication app)
+    {
+        var tenants = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.Credentials
+            .Select(c => c.TenantId).Where(t => t.Length > 0).Distinct().ToList();
+        if (tenants.Count == 1 && app.Services.GetRequiredService<GatewayMetadataStore>().ClaimUnownedBuckets(tenants[0]) is var claimed and > 0)
+        {
+            app.Logger.LogInformation("Assigned {Count} bucket(s) created before bucket ownership to tenant {Tenant}.", claimed, tenants[0]);
+        }
     }
 
     /// <summary>

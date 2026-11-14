@@ -154,6 +154,8 @@ public sealed partial class GatewayMetadataStore
             );
             CREATE INDEX IF NOT EXISTS idx_multipart_parts_cid ON multipart_parts (cid);
             """);
+
+        InitializeTenancy(conn);
     }
 
     public bool BucketExists(string name)
@@ -232,11 +234,17 @@ public sealed partial class GatewayMetadataStore
     {
         (string Cid, string[] NodeIds)? previous = null;
         bool existed;
-        using (var old = Query(conn, "SELECT cid, node_ids FROM objects WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key)))
+        long previousSize = 0;
+        using (var old = Query(conn, "SELECT cid, node_ids, size_bytes FROM objects WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key)))
         {
             old.Transaction = tx;
             using var r = old.ExecuteReader();
             existed = r.Read();
+            if (existed)
+            {
+                previousSize = r.GetInt64(2);
+            }
+
             if (existed && r.GetString(0) != record.Cid)
             {
                 previous = (r.GetString(0), SplitNodeIds(r.GetString(1)));
@@ -262,6 +270,7 @@ public sealed partial class GatewayMetadataStore
             ("$rc", record.NodeIds.Count),
             ("$eo", (object?)record.EtagOverride ?? DBNull.Value));
         CancelPendingDeletion(conn, tx, record.Cid);
+        AdjustUsage(conn, tx, record.Bucket, record.SizeBytes - previousSize);
         if (previous is { } p)
         {
             CollectIfUnreferenced(conn, tx, p.Cid, p.NodeIds);
@@ -336,6 +345,7 @@ public sealed partial class GatewayMetadataStore
             }
         }
 
+        AdjustUsage(conn, tx, bucket, -record.SizeBytes);
         CollectIfUnreferenced(conn, tx, record.Cid, record.NodeIds);
         tx.Commit();
         return record;
@@ -345,9 +355,23 @@ public sealed partial class GatewayMetadataStore
     public bool DeleteObject(string bucket, string key)
     {
         using var conn = Open();
-        return Execute(Query(conn,
-            "DELETE FROM objects WHERE bucket = $b AND key = $k",
-            ("$b", bucket), ("$k", key))) > 0;
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        long? size;
+        using (var read = Query(conn, "SELECT size_bytes FROM objects WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key)))
+        {
+            read.Transaction = tx;
+            size = read.ExecuteScalar() as long?;
+        }
+
+        if (size is null)
+        {
+            return false;
+        }
+
+        Run(conn, tx, "DELETE FROM objects WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key));
+        AdjustUsage(conn, tx, bucket, -size.Value);
+        tx.Commit();
+        return true;
     }
 
     // ── CID reference counting ────────────────────────────────────────────────

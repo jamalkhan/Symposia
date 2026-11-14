@@ -27,6 +27,7 @@ public static class NodeNetworkExtensions
         services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<NodeIdentity>();
         services.AddSingleton<PeerTable>();
+        services.TryAddSingleton<NodeNetworkStatus>();
         services.AddSingleton<PeerVerifier>();
         services.AddSingleton<PeerDiscoveryService>();
 

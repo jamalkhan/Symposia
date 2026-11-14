@@ -107,6 +107,21 @@ public sealed class NodeConnection : IDisposable
     /// <summary>Time of the last successful probe.</summary>
     public DateTimeOffset LastProbeTime { get; set; } = DateTimeOffset.MinValue;
 
+    /// <summary>Time of the last probe attempt, successful or not (#1: the health cache counts as loaded once every node has one).</summary>
+    public DateTimeOffset LastProbeAttemptAt { get; set; } = DateTimeOffset.MinValue;
+
+    // The health cache's other inputs (#1 FR-21): P2P gossip and the on-chain registry each epoch. Their
+    // producers land separately; these are where they write, and null means "no data from that source yet".
+
+    /// <summary>When gossip last reported this node alive.</summary>
+    public DateTimeOffset? GossipLastSeen { get; set; }
+
+    /// <summary>Performance tier from the on-chain registry for the current epoch.</summary>
+    public int? RegistryTier { get; set; }
+
+    /// <summary>Stake from the on-chain registry for the current epoch, in the token's smallest unit.</summary>
+    public System.Numerics.BigInteger? RegistryStake { get; set; }
+
     /// <summary>A node is considered healthy if it responded to a probe in the last 90 seconds.</summary>
     public bool IsHealthy =>
         LastProbe?.Healthy == true &&

@@ -28,14 +28,14 @@ public static class BlobApiEndpoints
         v1.MapGet("/buckets", (GatewayMetadataStore store) =>
             Results.Ok(new { buckets = store.ListBuckets().Select(b => new { name = b.Name, createdAt = b.CreatedAt }) }));
 
-        v1.MapPut("/buckets/{bucket}", (string bucket, GatewayMetadataStore store) =>
+        v1.MapPut("/buckets/{bucket}", (string bucket, HttpContext ctx, GatewayMetadataStore store) =>
         {
             if (!BucketNames.IsValid(bucket))
             {
                 return Error(400, "InvalidBucketName", BucketNames.Rule);
             }
 
-            store.CreateBucket(bucket); // idempotent, as in S3
+            store.CreateBucket(bucket, ctx.Items["TenantId"] as string ?? ""); // idempotent, as in S3; the creator owns it
             return Results.Ok(new { name = bucket });
         });
 
@@ -118,6 +118,7 @@ public static class BlobApiEndpoints
             {
                 ServeOutcome.NotFound => NoSuchKey(key),
                 ServeOutcome.NoReplica => Unavailable(),
+                ServeOutcome.Lost => Error(503, "ObjectDataLost", "Every replica of this object reports it missing; the data is lost, not temporarily unavailable."),
                 _ => Results.Empty,
             };
         });
@@ -210,7 +211,7 @@ public static class BlobApiEndpoints
 
     private static IResult NoSuchKey(string key) => Error(404, "NoSuchKey", $"The key '{key}' does not exist.");
 
-    private static IResult Unavailable() => Error(503, "ServiceUnavailable", "No storage node could serve the request; try again.");
+    private static IResult Unavailable() => S3Xml.WithRetryAfter(Error(503, "ServiceUnavailable", "No storage node could serve the request; try again."));
 
     private static object Describe(ObjectRecord r) => new
     {

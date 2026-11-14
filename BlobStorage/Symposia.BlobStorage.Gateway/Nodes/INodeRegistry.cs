@@ -12,6 +12,12 @@ public interface INodeRegistry
     IReadOnlyList<NodeConnection> Writable(long? sizeBytes = null) =>
         Healthy.Where(n => n.IsWritable && n.CanFit(sizeBytes)).ToList();
     NodeConnection? SelectForRead(IEnumerable<string> nodeUrls);
+
+    /// <summary>
+    /// Every known node has been probed at least once, so health data reflects reality rather than the
+    /// startup assumption (#1 FR-24 <c>node_cache_not_loaded</c>). Registries without probing are always loaded.
+    /// </summary>
+    bool CacheLoaded => true;
     NodeConnection AddNode(string url);
     bool RemoveNode(string url);
 }

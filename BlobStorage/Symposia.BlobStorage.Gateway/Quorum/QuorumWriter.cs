@@ -20,10 +20,12 @@ public sealed class QuorumWriter
     private readonly int _quorumCount;
     private readonly int _minCopies;
     private readonly Repair.RepairQueue _repairQueue;
+    private readonly Health.GatewayMetrics? _metrics;
 
     public QuorumWriter(INodeRegistry nodes, GatewayMetadataStore metadata, IOptions<GatewayOptions> options,
-        Repair.RepairQueue repairQueue)
+        Repair.RepairQueue repairQueue, Health.GatewayMetrics? metrics = null)
     {
+        _metrics = metrics;
         _nodes = nodes;
         _metadata = metadata;
         _quorumCount = options.Value.WriteQuorumCount;
@@ -89,6 +91,7 @@ public sealed class QuorumWriter
         if (targetNodes.Count == 0)
             return null;
 
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var header = new WriteBlobHeader { TenantId = tenantId, Bucket = bucket, Key = key, ExpectedSizeBytes = expectedSize ?? 0 };
         var sessions = targetNodes.Select(n => new NodeWriteSession(n)).ToList();
 
@@ -125,9 +128,20 @@ public sealed class QuorumWriter
             refused.Node.MarkReadOnly();
         }
 
+        foreach (var failed in sessions.Where(s => s.Response is null && !s.RefusedReadOnly))
+        {
+            _metrics?.NodeErrors.WithLabels(failed.Node.Id, "write").Inc();
+        }
+
         var successes = sessions.Where(s => s.Response is not null).ToList();
         if (successes.Count < _quorumCount)
+        {
+            _metrics?.WriteQuorumFailed.Inc();
             return null; // Quorum not reached.
+        }
+
+        _metrics?.WriteQuorumReached.Inc();
+        _metrics?.WriteFanoutDuration.Observe(System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds);
 
         return new BlobWriteResult(
             successes[0].Response!.Cid,
@@ -141,7 +155,7 @@ public sealed class QuorumWriter
     /// </summary>
     private sealed class NodeWriteSession
     {
-        private readonly global::Grpc.Core.AsyncClientStreamingCall<WriteBlobChunk, WriteBlobResponse> _call;
+        private global::Grpc.Core.AsyncClientStreamingCall<WriteBlobChunk, WriteBlobResponse> _call;
         private bool _active = true;
         private bool _aborted;
 
@@ -157,12 +171,38 @@ public sealed class QuorumWriter
         /// <summary>The node refused the write for disk space (#199), not a fault.</summary>
         public bool RefusedReadOnly { get; private set; }
 
+        /// <summary>
+        /// Opens the node's stream with the header, retrying once on a transient error (#1 FR-10) before
+        /// the node counts as failed. Only the header can be retried: the body streams through unbuffered,
+        /// so once data has been sent a failed node is out of this write and repair tops up its copy.
+        /// </summary>
         public async Task SendHeaderAsync(WriteBlobHeader header, CancellationToken ct)
         {
             if (!_active) return;
-            try { await _call.RequestStream.WriteAsync(new WriteBlobChunk { Header = header }, ct); }
-            catch { _active = false; }
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await _call.RequestStream.WriteAsync(new WriteBlobChunk { Header = header }, ct);
+                    return;
+                }
+                catch (Exception ex) when (attempt == 0 && IsTransient(ex) && !ct.IsCancellationRequested)
+                {
+                    _call.Dispose();
+                    _call = Node.Client.WriteBlob();
+                }
+                catch
+                {
+                    _active = false;
+                    return;
+                }
+            }
         }
+
+        private static bool IsTransient(Exception ex) => ex is global::Grpc.Core.RpcException
+        {
+            StatusCode: global::Grpc.Core.StatusCode.Unavailable or global::Grpc.Core.StatusCode.DeadlineExceeded,
+        } or IOException or HttpRequestException;
 
         public async Task SendChunkAsync(WriteBlobChunk chunk, CancellationToken ct)
         {

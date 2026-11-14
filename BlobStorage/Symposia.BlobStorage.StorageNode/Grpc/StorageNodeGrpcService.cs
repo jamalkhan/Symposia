@@ -23,13 +23,16 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
     private readonly ManifestStore _manifestStore;
     private readonly NodeIdentity _nodeIdentity;
     private readonly StorageCapacityMonitor _capacity;
+    private readonly Health.NodeMetrics _metrics;
 
     public StorageNodeGrpcService(
         LocalBlobStore blobStore,
         ManifestStore manifestStore,
         NodeIdentity nodeIdentity,
-        StorageCapacityMonitor capacity)
+        StorageCapacityMonitor capacity,
+        Health.NodeMetrics metrics)
     {
+        _metrics = metrics;
         _blobStore = blobStore;
         _manifestStore = manifestStore;
         _nodeIdentity = nodeIdentity;
@@ -50,6 +53,14 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         }
 
         var header = requestStream.Current.Header;
+        using var inFlight = _metrics.Begin();
+        _metrics.WriteOp();
+        // Repair copies arrive as ordinary writes from the gateway's RepairWorker (tenant "repair").
+        var isRepair = header.TenantId == "repair";
+        if (isRepair)
+        {
+            _metrics.ReplicationTasksActive.Inc();
+        }
 
         // Admission (#199): refuse up front while read-only or when the stated size can't fit; a body
         // of unknown size reserves as it streams.
@@ -79,6 +90,12 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
                     }
 
                     received += chunk.Data.Length;
+                    _metrics.Wrote(chunk.Data.Length);
+                    if (isRepair)
+                    {
+                        _metrics.ReplicationBytes.Inc(chunk.Data.Length);
+                    }
+
                     if (received > reserved)
                     {
                         var more = received - reserved;
@@ -138,6 +155,10 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         finally
         {
             _capacity.Release(reserved, stored);
+            if (isRepair)
+            {
+                _metrics.ReplicationTasksActive.Dec();
+            }
         }
     }
 
@@ -150,6 +171,8 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         ReadBlobRequest request, IServerStreamWriter<ReadBlobChunk> responseStream, ServerCallContext context)
     {
         var (cid, remaining, offset) = ResolveRange(request.Cid, request.Offset, request.Length);
+        using var inFlight = _metrics.Begin();
+        _metrics.ReadOp();
 
         await using var stream = _blobStore.OpenRead(cid, offset);
         var buffer = new byte[ChunkSizeBytes];
@@ -163,6 +186,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
                 break;
             }
 
+            _metrics.Read(read);
             await responseStream.WriteAsync(
                 new ReadBlobChunk { Data = ByteString.CopyFrom(buffer, 0, read) }, context.CancellationToken);
             remaining -= read;

@@ -25,13 +25,16 @@ public sealed class IntegritySelfCheckWorker : BackgroundService
     private readonly ManifestStore _manifest;
     private readonly IOptions<StorageNodeOptions> _options;
     private readonly ILogger<IntegritySelfCheckWorker> _logger;
+    private readonly Health.NodeMetrics? _metrics;
 
     public IntegritySelfCheckWorker(
         LocalBlobStore blobStore,
         ManifestStore manifest,
         IOptions<StorageNodeOptions> options,
-        ILogger<IntegritySelfCheckWorker> logger)
+        ILogger<IntegritySelfCheckWorker> logger,
+        Health.NodeMetrics? metrics = null)
     {
+        _metrics = metrics;
         _blobStore = blobStore;
         _manifest = manifest;
         _options = options;
@@ -81,6 +84,7 @@ public sealed class IntegritySelfCheckWorker : BackgroundService
             {
                 _logger.LogWarning("Blob {Cid} is in manifest but missing from disk; marking Orphaned.", record.Cid);
                 _manifest.SetStatus(record.Cid, BlobStatus.Orphaned);
+                _metrics?.IntegrityFailures.Inc();
                 missing++;
                 continue;
             }
@@ -97,6 +101,7 @@ public sealed class IntegritySelfCheckWorker : BackgroundService
                     "Blob {Cid} is CORRUPT (computed {Actual}); marking Orphaned for network repair.",
                     record.Cid, actualHex);
                 _manifest.SetStatus(record.Cid, BlobStatus.Orphaned);
+                _metrics?.IntegrityFailures.Inc();
                 corrupt++;
             }
 

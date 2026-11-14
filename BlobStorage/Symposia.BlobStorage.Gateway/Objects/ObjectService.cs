@@ -18,6 +18,12 @@ public enum ServeOutcome
 
     /// <summary>No such object; nothing has been written to the response.</summary>
     NotFound,
+
+    /// <summary>
+    /// Every replica answered that it doesn't hold the blob (#8 FR7.2): the data is lost, not just
+    /// unreachable. Nothing has been written to the response.
+    /// </summary>
+    Lost,
 }
 
 /// <summary>
@@ -27,7 +33,7 @@ public enum ServeOutcome
 /// its own history entry here, the one hook point, and the adapters only map results to XML or JSON.
 /// </summary>
 public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry nodes, RepairQueue repairQueue, Quorum.QuorumWriter writer,
-    ILogger<ObjectService> logger)
+    Quorum.TenantQuota quota, Health.GatewayMetrics metrics, ILogger<ObjectService> logger)
 {
     /// <summary>Reads an object (or a range of it) into the response, recording a view.</summary>
     public Task<ServeOutcome> GetAsync(HttpContext ctx, string bucket, string key)
@@ -48,11 +54,14 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         // Labelled from a pre-read only in case the write fails; a commit relabels it from the truth.
         var written = History.HistoryCapture.Mark(ctx, store.GetObject(bucket, key) is null ? History.HistoryOperation.Insert : History.HistoryOperation.Update,
             bucket, key, History.HistoryCapture.ApiOf(ctx));
-        var (record, replaced) = await writer.WriteObjectAsync(ctx.Items["TenantId"] as string ?? "", bucket, key, contentType, body, ctx.RequestAborted,
-            S3.UploadBody.ExpectedLength(ctx.Request));
+        var tenantId = ctx.Items["TenantId"] as string ?? "";
+        var expected = S3.UploadBody.ExpectedLength(ctx.Request);
+        quota.EnsureRoom(tenantId, expected); // before placement or any node contact (#1 FR-2)
+        var (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected);
         if (record is not null)
         {
             Fill(written, record, replaced);
+            Health.RequestLog.SelectedNode(ctx, string.Join(',', record.NodeIds));
         }
 
         return record;
@@ -107,18 +116,28 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
     {
         long offset = 0, length = 0;
         var isRange = rangeHeader is not null && TryParseRange(rangeHeader, record.SizeBytes, out offset, out length);
+        var total = isRange ? length : record.SizeBytes;
         var request = new ReadBlobRequest { Cid = record.Cid, Offset = offset, Length = isRange ? length : 0 };
 
         // Try each replica (healthy ones first) until one starts streaming (#135); shared with Complete (#5).
-        var opened = await ReplicaReader.OpenAsync(ReplicaReader.Order(nodes, record.NodeIds), request, logger, ctx.RequestAborted,
-            onNotFound: missing => repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes));
+        var replicas = ReplicaReader.Order(nodes, record.NodeIds);
+        var notFound = 0;
+        var opened = await ReplicaReader.OpenAsync(replicas, request, logger, ctx.RequestAborted,
+            onNotFound: missing =>
+            {
+                notFound++;
+                repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes);
+            });
         if (opened?.Node is not { } node || opened.Call is not { } call)
         {
-            logger.LogWarning("No replica of {Bucket}/{Key} (CID {Cid}) could be read.", record.Bucket, record.Key, record.Cid);
-            return ServeOutcome.NoReplica;
+            // Every replica says the blob is gone: lost, not merely unreachable (#8 FR7.2).
+            var lost = notFound == replicas.Count;
+            logger.LogWarning("No replica of {Bucket}/{Key} (CID {Cid}) could be read{Lost}.", record.Bucket, record.Key, record.Cid,
+                lost ? "; every replica reports it missing" : "");
+            Health.RequestLog.Error(ctx, lost ? "replicas lost" : "no replica reachable");
+            return lost ? ServeOutcome.Lost : ServeOutcome.NoReplica;
         }
 
-        using var activeCall = call;
         if (view is not null)
         {
             (view.Size, view.Etag, view.Cid) = (0, record.ETag, record.Cid);
@@ -141,44 +160,85 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         // Stream to client while computing SHA-256 for CID verification.
         // Per Requirements/BlobStorage/redundancy-and-data-integrity.md: a read returning data
         // that doesn't match the stored CID fails immediately and triggers read repair.
-        // We can only detect the mismatch at end-of-stream; at that point we abort the connection
-        // so the client SDK sees a broken transfer and retries. The corrupt replica is then
-        // flagged for removal and re-replication.
+        // A node failing mid-stream is not client-visible (#1 FR-17): the read resumes from the next
+        // replica at the byte it reached, and the running hash continues across replicas. Only a CID
+        // mismatch, detectable at end of stream once bytes are sent, aborts the connection so the
+        // client SDK sees a broken transfer and retries.
         using var hasher = isRange ? null : IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var tried = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { node.Id };
+        var served = new List<string> { node.Id };
+        long sent = 0;
+        var more = opened.HasFirst;
         try
         {
-            var more = opened.HasFirst;
-            while (more)
+            while (true)
             {
-                var chunk = call.ResponseStream.Current;
-                hasher?.AppendData(chunk.Data.Span);
-                await ctx.Response.Body.WriteAsync(chunk.Data.Memory, ctx.RequestAborted);
-                if (view is not null)
+                try
                 {
-                    view.Size += chunk.Data.Length; // bytes actually served (#204)
-                }
+                    while (more)
+                    {
+                        var chunk = call.ResponseStream.Current;
+                        hasher?.AppendData(chunk.Data.Span);
+                        await ctx.Response.Body.WriteAsync(chunk.Data.Memory, ctx.RequestAborted);
+                        sent += chunk.Data.Length;
+                        if (view is not null)
+                        {
+                            view.Size += chunk.Data.Length; // bytes actually served (#204)
+                        }
 
-                more = await call.ResponseStream.MoveNext(ctx.RequestAborted);
+                        more = await call.ResponseStream.MoveNext(ctx.RequestAborted);
+                    }
+
+                    call.Dispose();
+                    break;
+                }
+                catch (RpcException ex) when (!ctx.RequestAborted.IsCancellationRequested)
+                {
+                    call.Dispose();
+                    metrics.NodeErrors.WithLabels(node.Id, ex.StatusCode.ToString()).Inc();
+                    if (ex.StatusCode == StatusCode.NotFound)
+                    {
+                        logger.LogWarning("Node {Url} returned NotFound for CID {Cid} mid-stream; flagging for repair.", node.Url, record.Cid);
+                        repairQueue.EnqueueMissingReplica(record, node.Id, store, nodes);
+                    }
+                    else
+                    {
+                        logger.LogWarning("Read of CID {Cid} from {Url} failed mid-stream ({Status}) after {Sent} bytes; failing over.",
+                            record.Cid, node.Url, ex.StatusCode, sent);
+                        node.MarkUnhealthy();
+                    }
+
+                    if (sent >= total)
+                    {
+                        break; // every byte arrived before the error: nothing to resume
+                    }
+
+                    var resume = new ReadBlobRequest { Cid = record.Cid, Offset = offset + sent, Length = total - sent };
+                    var next = await ReplicaReader.OpenAsync(
+                        replicas.Where(r => !tried.Contains(r.Id)).ToList(), resume, logger, ctx.RequestAborted,
+                        onNotFound: missing => repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes));
+                    if (next is null)
+                    {
+                        // Headers are already sent and no replica is left: the client gets a broken transfer and retries.
+                        Health.RequestLog.Error(ctx, $"all replicas failed mid-stream after {sent} bytes");
+                        ctx.Abort();
+                        if (view is not null) view.Outcome = "Error";
+                        return ServeOutcome.Served;
+                    }
+
+                    metrics.ReadFailovers.Inc();
+                    (node, call, more) = (next.Node, next.Call, next.HasFirst);
+                    tried.Add(node.Id);
+                    served.Add(node.Id);
+                }
             }
         }
-        catch (RpcException ex) when (ex.StatusCode != StatusCode.NotFound && !ctx.RequestAborted.IsCancellationRequested)
+        finally
         {
-            // Headers are already sent: the client gets a broken transfer and retries.
-            logger.LogWarning("Read of CID {Cid} from {Url} failed mid-stream ({Status}); aborting.", record.Cid, node.Url, ex.StatusCode);
-            node.MarkUnhealthy();
-            ctx.Abort();
-            if (view is not null) view.Outcome = "Error";
-            return ServeOutcome.Served;
+            call.Dispose(); // idempotent; covers a client abort mid-copy
         }
-        catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
-        {
-            // Node claims it doesn't have the blob — it's missing from this replica.
-            logger.LogWarning("Node {Url} returned NotFound for CID {Cid}; flagging for repair.", node.Url, record.Cid);
-            repairQueue.EnqueueMissingReplica(record, node.Id, store, nodes);
-            ctx.Abort();
-            if (view is not null) view.Outcome = "Error";
-            return ServeOutcome.Served;
-        }
+
+        Health.RequestLog.SelectedNode(ctx, string.Join(',', served));
 
         // Full-object CID verification (skipped for range requests; partial hash is meaningless).
         if (hasher is not null)
@@ -186,12 +246,23 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
             var actualHex = Convert.ToHexStringLower(hasher.GetHashAndReset());
             if (!actualHex.Equals(record.Cid, StringComparison.Ordinal))
             {
+                // With a failover the bad bytes may have come from any replica that served part of the
+                // stream; each is challenged by repair rather than all evicted on suspicion.
                 logger.LogError(
                     "CID mismatch on GET {Bucket}/{Key}: expected {Expected}, got {Actual}. " +
                     "Aborting connection and flagging node {Url} for repair.",
                     record.Bucket, record.Key, record.Cid, actualHex, node.Url);
-                repairQueue.EnqueueCorruptReplica(record, node.Id, store, nodes);
+                if (served.Count == 1)
+                {
+                    repairQueue.EnqueueCorruptReplica(record, node.Id, store, nodes);
+                }
+                else
+                {
+                    repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.CorruptReplica));
+                }
+
                 // Abort the underlying connection — the client receives a broken transfer and must retry.
+                Health.RequestLog.Error(ctx, "CID mismatch");
                 ctx.Abort();
                 if (view is not null) view.Outcome = "Error";
             }

@@ -97,6 +97,8 @@ internal static class MultipartEndpoints
         BlobWriteResult? blob;
         try
         {
+            // Each part is checked against quota before placement (#1 FR-2).
+            ctx.RequestServices.GetRequiredService<TenantQuota>().EnsureRoom(tenantId, UploadBody.ExpectedLength(ctx.Request));
             body = UploadBody.Open(ctx);
             blob = await writer.WriteBlobAsync(tenantId, bucket, key, body, ctx.RequestAborted, UploadBody.ExpectedLength(ctx.Request));
         }

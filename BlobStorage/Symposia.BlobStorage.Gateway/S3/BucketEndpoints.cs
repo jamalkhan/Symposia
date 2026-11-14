@@ -25,8 +25,8 @@ internal static class BucketEndpoints
         if (!TenantId(ctx, out var tenantId)) return S3Xml.AccessDenied();
         if (!BucketNames.IsValid(bucket)) return S3Xml.Error(400, "InvalidBucketName", BucketNames.Rule);
 
-        // S3 CreateBucket is idempotent for the same owner — just ensure it exists.
-        store.CreateBucket(bucket);
+        // S3 CreateBucket is idempotent for the same owner — just ensure it exists. The creator owns it (#1 quota, #3).
+        store.CreateBucket(bucket, tenantId);
 
         ctx.Response.Headers.Location = $"/{bucket}";
         return Results.Ok();
