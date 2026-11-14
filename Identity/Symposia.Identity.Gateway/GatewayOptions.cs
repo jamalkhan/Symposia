@@ -19,4 +19,10 @@ public sealed class GatewayOptions
     /// transactions on the individual's behalf (the individual's authority comes from their
     /// own signature, not from this key).</summary>
     public string RelayerPrivateKey { get; set; } = "";
+
+    /// <summary>How long a write waits for its receipt before answering 202 pending with the tx hash (#222).</summary>
+    public TimeSpan ReceiptTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>How often the receipt is polled while waiting.</summary>
+    public TimeSpan ReceiptPollInterval { get; set; } = TimeSpan.FromSeconds(1);
 }

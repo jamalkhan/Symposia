@@ -1,6 +1,10 @@
 using System.Numerics;
 using Microsoft.Extensions.Options;
+using Nethereum.ABI.FunctionEncoding;
 using Nethereum.Contracts;
+using Nethereum.Hex.HexConvertors.Extensions;
+using Nethereum.JsonRpc.Client;
+using Nethereum.Util;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
 using Nethereum.Web3.Accounts;
@@ -19,16 +23,32 @@ namespace Symposia.Identity.Gateway.Chain;
 public sealed class EthereumChainClient : IChainClient
 {
     private readonly Web3 _web3;
+    private readonly IChainTransport _transport;
     private readonly string _consentRegistryAddress;
     private readonly string _capabilityRegistryAddress;
+    private readonly TimeSpan _receiptTimeout;
+    private readonly TimeSpan _receiptPollInterval;
+    private readonly TimeProvider _time;
+    private readonly ILogger _logger;
 
-    public EthereumChainClient(IOptions<GatewayOptions> options)
+    // Signing and broadcast share one nonce sequence; the receipt wait happens outside the gate (as RelayerAccount, #163).
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
+    public EthereumChainClient(IOptions<GatewayOptions> options, ILogger<EthereumChainClient> logger)
+        : this(options.Value, new NethereumChainTransport(options.Value.RelayerPrivateKey, options.Value.ChainRpcUrl), TimeProvider.System, logger)
     {
-        var o = options.Value;
-        var account = new Account(o.RelayerPrivateKey);
-        _web3 = new Web3(account, o.ChainRpcUrl);
+    }
+
+    internal EthereumChainClient(GatewayOptions o, IChainTransport transport, TimeProvider time, ILogger logger)
+    {
+        _transport = transport;
+        _web3 = transport is NethereumChainTransport n ? n.Web3 : new Web3(o.ChainRpcUrl);
         _consentRegistryAddress = o.ConsentRegistryAddress;
         _capabilityRegistryAddress = o.CapabilityRegistryAddress;
+        _receiptTimeout = o.ReceiptTimeout;
+        _receiptPollInterval = o.ReceiptPollInterval;
+        _time = time;
+        _logger = logger;
     }
 
     public async Task<ulong> GetNonceAsync(WalletAddress wallet)
@@ -47,7 +67,8 @@ public sealed class EthereumChainClient : IChainClient
         byte[] grantWordingHash,
         ulong nonce,
         ulong deadline,
-        byte[] signature)
+        byte[] signature,
+        CancellationToken ct = default)
     {
         var function = new GrantConsentFunction
         {
@@ -61,7 +82,7 @@ public sealed class EthereumChainClient : IChainClient
             Signature = signature,
         };
 
-        return await SendAsync(_consentRegistryAddress, function);
+        return (await WriteAsync(_consentRegistryAddress, function, typeof(GrantConsentFunction).Name, $"{typeof(GrantConsentFunction).Name} reverted", ct)).TransactionHash;
     }
 
     public async Task<string> RevokeConsentAsync(
@@ -70,7 +91,8 @@ public sealed class EthereumChainClient : IChainClient
         IReadOnlyList<Permission> permissions,
         ulong nonce,
         ulong deadline,
-        byte[] signature)
+        byte[] signature,
+        CancellationToken ct = default)
     {
         var function = new RevokeConsentFunction
         {
@@ -82,7 +104,7 @@ public sealed class EthereumChainClient : IChainClient
             Signature = signature,
         };
 
-        return await SendAsync(_consentRegistryAddress, function);
+        return (await WriteAsync(_consentRegistryAddress, function, typeof(RevokeConsentFunction).Name, $"{typeof(RevokeConsentFunction).Name} reverted", ct)).TransactionHash;
     }
 
     public async Task<bool> HasActiveConsentAsync(WalletAddress wallet, byte[] tenantId, Permission permission)
@@ -108,71 +130,182 @@ public sealed class EthereumChainClient : IChainClient
         return (result.Granted, grantedAt, result.GrantSourceHash, result.GrantWordingHash);
     }
 
-    public async Task<ulong> IssueCapabilityAsync(WalletAddress wallet, byte[] tenantId, Permission permission)
+    public async Task<ulong> IssueCapabilityAsync(WalletAddress wallet, byte[] tenantId, Permission permission, CancellationToken ct = default)
     {
         var function = new IssueCapabilityFunction { Wallet = wallet.Value, TenantId = tenantId, Permission = (byte)permission };
-        var handler = _web3.Eth.GetContractTransactionHandler<IssueCapabilityFunction>();
-
-        TransactionReceipt receipt;
-        try
-        {
-            receipt = await handler.WithHeadroomAsync(_capabilityRegistryAddress, function,
-                () => handler.SendRequestAndWaitForReceiptAsync(_capabilityRegistryAddress, function));
-        }
-        catch (Exception ex)
-        {
-            throw new ChainCallException($"CapabilityRegistry.issueCapability reverted: {ex.Message}");
-        }
-
-        if (receipt.Status?.Value != 1)
-        {
-            throw new ChainCallException(await FailureMessageAsync(receipt, "issueCapability", "CapabilityRegistry: no active consent"));
-        }
-
-        var decoded = receipt.DecodeAllEvents<CapabilityIssuedEventDto>();
-        var tokenIdHex = decoded.FirstOrDefault()?.Event.TokenId
-            ?? throw new ChainCallException("CapabilityRegistry: issued event missing from receipt");
-        return (ulong)tokenIdHex;
+        var receipt = await WriteAsync(_capabilityRegistryAddress, function, "issueCapability", "CapabilityRegistry: no active consent", ct);
+        return TokenIdOf(receipt)
+            ?? throw new ChainCallException("CapabilityRegistry: issued event missing from receipt", ChainFailureKind.Rejected, receipt.TransactionHash);
     }
 
-    private async Task<string> SendAsync<TFunction>(string contractAddress, TFunction function)
+    public async Task<ChainTransactionStatus?> GetTransactionStatusAsync(string txHash, CancellationToken ct = default)
+    {
+        var receipt = await _transport.GetReceiptAsync(txHash, ct);
+        if (receipt is null)
+        {
+            return await _transport.GetTransactionAsync(txHash, ct) is null ? null : new ChainTransactionStatus("pending");
+        }
+
+        if (receipt.Status?.Value == 1)
+        {
+            var tokenId = string.Equals(receipt.To, _capabilityRegistryAddress, StringComparison.OrdinalIgnoreCase) ? TokenIdOf(receipt) : null;
+            return new ChainTransactionStatus("confirmed", TokenId: tokenId);
+        }
+
+        var tx = await _transport.GetTransactionAsync(txHash, ct);
+        var kind = GasHeadroom.RanOutOfGas(receipt.GasUsed.Value, tx?.Gas?.Value) ? ChainFailureKind.OutOfGas : ChainFailureKind.Rejected;
+        return new ChainTransactionStatus("failed", Code: Code(kind));
+    }
+
+    /// <summary>The wire code for a failure kind, shared by the write endpoints and the status endpoint.</summary>
+    public static string Code(ChainFailureKind kind) => kind switch
+    {
+        ChainFailureKind.OutOfGas => "out_of_gas",
+        ChainFailureKind.ChainUnavailable => "chain_unavailable",
+        ChainFailureKind.Pending => "pending",
+        _ => "rejected",
+    };
+
+    private static ulong? TokenIdOf(TransactionReceipt receipt) =>
+        receipt.DecodeAllEvents<CapabilityIssuedEventDto>().FirstOrDefault() is { } issued ? (ulong)issued.Event.TokenId : null;
+
+    /// <summary>
+    /// Signs (the hash is known from here on), broadcasts, and waits up to ReceiptTimeout for a successful receipt
+    /// (#222). Before the broadcast a failure is <see cref="ChainFailureKind.Rejected"/> or
+    /// <see cref="ChainFailureKind.ChainUnavailable"/>; after it, anything short of a receipt is
+    /// <see cref="ChainFailureKind.Pending"/>, because the transaction may still mine.
+    /// </summary>
+    private async Task<TransactionReceipt> WriteAsync<TFunction>(string contract, TFunction function, string name, string revertMessage, CancellationToken ct)
         where TFunction : FunctionMessage, new()
     {
-        var handler = _web3.Eth.GetContractTransactionHandler<TFunction>();
+        string hash;
+        await _gate.WaitAsync(ct);
         try
         {
-            var receipt = await handler.WithHeadroomAsync(contractAddress, function,
-                () => handler.SendRequestAndWaitForReceiptAsync(contractAddress, function));
-            if (receipt.Status?.Value != 1)
+            string signed;
+            try
             {
-                throw new ChainCallException(await FailureMessageAsync(receipt, typeof(TFunction).Name, $"{typeof(TFunction).Name} reverted"));
+                signed = await _transport.SignAsync(contract, function);
+            }
+            catch (Exception ex)
+            {
+                await ResetNonceQuietlyAsync();
+                var kind = ClassifyPreBroadcast(ex);
+                throw Logged(new ChainCallException(kind == ChainFailureKind.Rejected ? $"{name} reverted: {ex.Message}" : $"{name}: chain unavailable: {ex.Message}", kind), name);
             }
 
-            return receipt.TransactionHash;
+            hash = HashOf(signed);
+            try
+            {
+                await _transport.SendRawAsync(signed, ct);
+            }
+            catch (Exception ex)
+            {
+                // The node may have it even though the call failed (a timeout after it was received). Ask once.
+                if (await KnownAsync(hash))
+                {
+                    throw Logged(new ChainCallException($"{name} was broadcast; its outcome isn't known yet", ChainFailureKind.Pending, hash), name);
+                }
+
+                await ResetNonceQuietlyAsync();
+                throw Logged(new ChainCallException($"{name}: chain unavailable: {ex.Message}", ChainFailureKind.ChainUnavailable, hash), name);
+            }
         }
-        catch (ChainCallException)
+        finally
         {
-            throw;
+            _gate.Release();
         }
-        catch (Exception ex)
+
+        var receipt = await WaitForReceiptAsync(hash, ct)
+            ?? throw Logged(new ChainCallException($"{name} was broadcast; no receipt after {_receiptTimeout.TotalSeconds:0}s", ChainFailureKind.Pending, hash), name);
+        if (receipt.Status?.Value != 1)
         {
-            throw new ChainCallException($"{typeof(TFunction).Name} reverted: {ex.Message}");
+            var tx = await TryGetTransactionAsync(hash);
+            var outOfGas = GasHeadroom.RanOutOfGas(receipt.GasUsed.Value, tx?.Gas?.Value);
+            throw Logged(new ChainCallException(FailureMessage(name, revertMessage, receipt.GasUsed.Value, tx?.Gas?.Value),
+                outOfGas ? ChainFailureKind.OutOfGas : ChainFailureKind.Rejected, hash), name);
+        }
+
+        return receipt;
+    }
+
+    /// <summary>Polls for the receipt until ReceiptTimeout; a lookup error is retried, since the transaction may still mine. Null on timeout.</summary>
+    private async Task<TransactionReceipt?> WaitForReceiptAsync(string hash, CancellationToken ct)
+    {
+        var deadline = _time.GetUtcNow() + _receiptTimeout;
+        while (true)
+        {
+            try
+            {
+                if (await _transport.GetReceiptAsync(hash, ct) is { } receipt)
+                {
+                    return receipt;
+                }
+            }
+            catch (Exception) when (!ct.IsCancellationRequested)
+            {
+            }
+
+            if (_time.GetUtcNow() >= deadline)
+            {
+                return null;
+            }
+
+            await Task.Delay(_receiptPollInterval, _time, ct);
         }
     }
 
-    private async Task<string> FailureMessageAsync(TransactionReceipt receipt, string name, string revertMessage)
+    private async Task<bool> KnownAsync(string hash) => await TryGetTransactionAsync(hash) is not null;
+
+    private async Task<Transaction?> TryGetTransactionAsync(string hash)
     {
         try
         {
-            var tx = await _web3.Eth.Transactions.GetTransactionByHash.SendRequestAsync(receipt.TransactionHash);
-            return FailureMessage(name, revertMessage, receipt.GasUsed.Value, tx?.Gas?.Value);
+            return await _transport.GetTransactionAsync(hash, CancellationToken.None);
         }
         catch (Exception)
         {
-            // Only the wording depends on this lookup; it must not turn the failure into a different error.
-            return revertMessage;
+            // Only the classification depends on this lookup; it must not turn the failure into a different error.
+            return null;
         }
     }
+
+    private async Task ResetNonceQuietlyAsync()
+    {
+        try
+        {
+            await _transport.ResetNonceAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Identity chain: nonce reset failed: {Reason}", ex.Message);
+        }
+    }
+
+    private ChainCallException Logged(ChainCallException ex, string name)
+    {
+        if (ex.Kind != ChainFailureKind.Rejected)
+        {
+            _logger.LogWarning("Identity chain: {Function} {Kind} (tx {TxHash}): {Reason}", name, Code(ex.Kind), ex.TxHash ?? "none", ex.Message);
+        }
+
+        return ex;
+    }
+
+    /// <summary>A transaction's hash is the keccak of its signed bytes, for legacy and typed transactions alike.</summary>
+    internal static string HashOf(string signedTx) => "0x" + Sha3Keccack.Current.CalculateHashFromHex(signedTx.EnsureHexPrefix());
+
+    /// <summary>
+    /// A failure before broadcast: a revert (the estimate ran the call and it reverted) is the caller's;
+    /// anything else, including an exception this doesn't recognize, is the chain's, never reported as a rejection.
+    /// </summary>
+    internal static ChainFailureKind ClassifyPreBroadcast(Exception ex) => ex switch
+    {
+        SmartContractRevertException or SmartContractCustomErrorRevertException => ChainFailureKind.Rejected,
+        RpcResponseException r when r.RpcError?.Code == 3 || r.RpcError?.Data is not null
+            || (r.RpcError?.Message ?? r.Message).Contains("revert", StringComparison.OrdinalIgnoreCase) => ChainFailureKind.Rejected,
+        _ => ChainFailureKind.ChainUnavailable,
+    };
 
     /// <summary>
     /// The error for a failed receipt: likely out of gas when it used its whole limit (#219), so a gas problem isn't

@@ -11,7 +11,7 @@ public static class ConsentEndpoints
     {
         // FR4, FR6, AC2, AC3: submit a signed consent grant. The chain — not this
         // endpoint — decides whether the signature is valid (TC-3.2, TC-3.3, TC-3.4).
-        app.MapPost("/v1/consent/grants", async (GrantRequest request, IChainClient chain) =>
+        app.MapPost("/v1/consent/grants", async (GrantRequest request, IChainClient chain, HttpContext http) =>
         {
             if (!WalletAddress.TryParse(request.Wallet, out var wallet))
             {
@@ -43,18 +43,19 @@ public static class ConsentEndpoints
                     Keccak(request.GrantWording),
                     request.Nonce,
                     request.Deadline,
-                    Convert.FromHexString(request.Signature.Replace("0x", "", StringComparison.OrdinalIgnoreCase)));
+                    Convert.FromHexString(request.Signature.Replace("0x", "", StringComparison.OrdinalIgnoreCase)),
+                    http.RequestAborted);
 
                 return Results.Ok(new { txHash });
             }
             catch (ChainCallException ex)
             {
-                return Results.Json(new { error = ex.Message }, statusCode: 422);
+                return ChainResults.ToResult(ex, http);
             }
         });
 
         // FR6, TC-5.6: revocation requires the same wallet-signature proof as granting.
-        app.MapPost("/v1/consent/revocations", async (RevokeRequest request, IChainClient chain) =>
+        app.MapPost("/v1/consent/revocations", async (RevokeRequest request, IChainClient chain, HttpContext http) =>
         {
             if (!WalletAddress.TryParse(request.Wallet, out var wallet))
             {
@@ -79,13 +80,14 @@ public static class ConsentEndpoints
                     permissions,
                     request.Nonce,
                     request.Deadline,
-                    Convert.FromHexString(request.Signature.Replace("0x", "", StringComparison.OrdinalIgnoreCase)));
+                    Convert.FromHexString(request.Signature.Replace("0x", "", StringComparison.OrdinalIgnoreCase)),
+                    http.RequestAborted);
 
                 return Results.Ok(new { txHash });
             }
             catch (ChainCallException ex)
             {
-                return Results.Json(new { error = ex.Message }, statusCode: 422);
+                return ChainResults.ToResult(ex, http);
             }
         });
 
@@ -118,7 +120,7 @@ public static class ConsentEndpoints
 
         // FR4, FR5, AC4: marketer requests a capability token. The chain re-validates
         // consent at mint time (TC-4.2, TC-4.3, TC-4.4); this endpoint just relays.
-        app.MapPost("/v1/capability-tokens", async (CapabilityRequest request, IChainClient chain) =>
+        app.MapPost("/v1/capability-tokens", async (CapabilityRequest request, IChainClient chain, HttpContext http) =>
         {
             if (!WalletAddress.TryParse(request.Wallet, out var wallet))
             {
@@ -137,12 +139,12 @@ public static class ConsentEndpoints
 
             try
             {
-                var tokenId = await chain.IssueCapabilityAsync(wallet, Keccak(request.TenantId), permission);
+                var tokenId = await chain.IssueCapabilityAsync(wallet, Keccak(request.TenantId), permission, http.RequestAborted);
                 return Results.Ok(new { tokenId });
             }
             catch (ChainCallException ex)
             {
-                return Results.Json(new { error = ex.Message }, statusCode: 422);
+                return ChainResults.ToResult(ex, http);
             }
         });
     }

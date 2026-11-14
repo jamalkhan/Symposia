@@ -25,6 +25,7 @@ app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));
 
 IdentityEndpoints.Map(app);
 ConsentEndpoints.Map(app);
+TransactionEndpoints.Map(app);
 
 app.Run();
 
