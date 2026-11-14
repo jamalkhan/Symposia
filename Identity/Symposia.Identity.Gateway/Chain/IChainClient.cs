@@ -57,24 +57,49 @@ public enum ChainFailureKind
     /// <summary>It ran out of gas: a server-side fault. Nothing was written, so a retry is safe.</summary>
     OutOfGas,
 
-    /// <summary>The RPC failed before the transaction reached the node. Nothing was written, so a retry is safe.</summary>
+    /// <summary>The transaction never reached the node, or the node refused it. Nothing was written, so a retry is safe.</summary>
     ChainUnavailable,
 
-    /// <summary>Broadcast, but no receipt yet: it may still mine. Poll the status, never resubmit.</summary>
+    /// <summary>Broadcast (or possibly broadcast), no receipt yet: it may still mine. Poll the status, never resubmit.</summary>
     Pending,
+
+    /// <summary>It mined, but not as the gateway expects (a success receipt without its event): a server-side fault.</summary>
+    Fault,
+}
+
+public static class ChainFailureKindExtensions
+{
+    /// <summary>The wire code, shared by the write endpoints and the status endpoint. Exhaustive: a new kind must be mapped.</summary>
+    public static string ToWireName(this ChainFailureKind kind) => kind switch
+    {
+        ChainFailureKind.Rejected => "rejected",
+        ChainFailureKind.OutOfGas => "out_of_gas",
+        ChainFailureKind.ChainUnavailable => "chain_unavailable",
+        ChainFailureKind.Pending => "pending",
+        ChainFailureKind.Fault => "chain_fault",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "unmapped chain failure kind"),
+    };
 }
 
 /// <summary>
 /// A relayed write that didn't confirm (#222). <see cref="ChainFailureKind.Pending"/> isn't a failure, but it travels
 /// the same way so every write endpoint maps every outcome in one place; <see cref="TxHash"/> is set whenever the
-/// transaction was signed.
+/// transaction was signed. The kind is required, so no failure becomes a 422 without someone deciding it should.
 /// </summary>
-public sealed class ChainCallException(string message, ChainFailureKind kind = ChainFailureKind.Rejected, string? txHash = null) : Exception(message)
+public sealed class ChainCallException(ChainFailureKind kind, string message, string? txHash = null, Exception? inner = null)
+    : Exception(message, inner)
 {
     public ChainFailureKind Kind { get; } = kind;
 
     public string? TxHash { get; } = txHash;
 }
 
-/// <summary>A relayed write's state: <c>pending</c>, <c>confirmed</c> or <c>failed</c> (with <see cref="Code"/>).</summary>
-public sealed record ChainTransactionStatus(string Status, string? Code = null, ulong? TokenId = null);
+public enum ChainTxState
+{
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+/// <summary>A relayed write's state; <see cref="Failure"/> says why when it failed, <see cref="TokenId"/> is a capability's token.</summary>
+public sealed record ChainTransactionStatus(ChainTxState State, ChainFailureKind? Failure = null, ulong? TokenId = null);

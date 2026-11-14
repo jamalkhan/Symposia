@@ -24,14 +24,14 @@ public sealed class EthereumChainClient : IChainClient
 {
     private readonly Web3 _web3;
     private readonly IChainTransport _transport;
+    private readonly GatewayOptions _options;
     private readonly string _consentRegistryAddress;
     private readonly string _capabilityRegistryAddress;
-    private readonly TimeSpan _receiptTimeout;
-    private readonly TimeSpan _receiptPollInterval;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
 
     // Signing and broadcast share one nonce sequence; the receipt wait happens outside the gate (as RelayerAccount, #163).
+    // One process per relayer key: the gate doesn't span replicas.
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public EthereumChainClient(IOptions<GatewayOptions> options, ILogger<EthereumChainClient> logger)
@@ -39,14 +39,19 @@ public sealed class EthereumChainClient : IChainClient
     {
     }
 
-    internal EthereumChainClient(GatewayOptions o, IChainTransport transport, TimeProvider time, ILogger logger)
+    internal EthereumChainClient(GatewayOptions options, NethereumChainTransport transport, TimeProvider time, ILogger logger)
+        : this(options, transport, transport.Web3, time, logger)
     {
+    }
+
+    /// <param name="reads">Queries (nonces, consent state); writes go through <paramref name="transport"/> only.</param>
+    internal EthereumChainClient(GatewayOptions options, IChainTransport transport, Web3 reads, TimeProvider time, ILogger logger)
+    {
+        _options = options;
         _transport = transport;
-        _web3 = transport is NethereumChainTransport n ? n.Web3 : new Web3(o.ChainRpcUrl);
-        _consentRegistryAddress = o.ConsentRegistryAddress;
-        _capabilityRegistryAddress = o.CapabilityRegistryAddress;
-        _receiptTimeout = o.ReceiptTimeout;
-        _receiptPollInterval = o.ReceiptPollInterval;
+        _web3 = reads;
+        _consentRegistryAddress = options.ConsentRegistryAddress;
+        _capabilityRegistryAddress = options.CapabilityRegistryAddress;
         _time = time;
         _logger = logger;
     }
@@ -82,7 +87,7 @@ public sealed class EthereumChainClient : IChainClient
             Signature = signature,
         };
 
-        return (await WriteAsync(_consentRegistryAddress, function, typeof(GrantConsentFunction).Name, $"{typeof(GrantConsentFunction).Name} reverted", ct)).TransactionHash;
+        return (await WriteAsync(_consentRegistryAddress, function, typeof(GrantConsentFunction).Name, typeof(GrantConsentFunction).Name, $"{typeof(GrantConsentFunction).Name} reverted", ct)).TransactionHash;
     }
 
     public async Task<string> RevokeConsentAsync(
@@ -104,7 +109,7 @@ public sealed class EthereumChainClient : IChainClient
             Signature = signature,
         };
 
-        return (await WriteAsync(_consentRegistryAddress, function, typeof(RevokeConsentFunction).Name, $"{typeof(RevokeConsentFunction).Name} reverted", ct)).TransactionHash;
+        return (await WriteAsync(_consentRegistryAddress, function, typeof(RevokeConsentFunction).Name, typeof(RevokeConsentFunction).Name, $"{typeof(RevokeConsentFunction).Name} reverted", ct)).TransactionHash;
     }
 
     public async Task<bool> HasActiveConsentAsync(WalletAddress wallet, byte[] tenantId, Permission permission)
@@ -133,9 +138,11 @@ public sealed class EthereumChainClient : IChainClient
     public async Task<ulong> IssueCapabilityAsync(WalletAddress wallet, byte[] tenantId, Permission permission, CancellationToken ct = default)
     {
         var function = new IssueCapabilityFunction { Wallet = wallet.Value, TenantId = tenantId, Permission = (byte)permission };
-        var receipt = await WriteAsync(_capabilityRegistryAddress, function, "issueCapability", "CapabilityRegistry: no active consent", ct);
-        return TokenIdOf(receipt)
-            ?? throw new ChainCallException("CapabilityRegistry: issued event missing from receipt", ChainFailureKind.Rejected, receipt.TransactionHash);
+        var receipt = await WriteAsync(_capabilityRegistryAddress, function, "issueCapability", "CapabilityRegistry.issueCapability",
+            "CapabilityRegistry: no active consent", ct);
+        // It mined and spent gas: the caller did nothing wrong, so this is a server fault, never a rejection.
+        return TokenIdOf(receipt) ?? throw Logged(new ChainCallException(ChainFailureKind.Fault,
+            "CapabilityRegistry: issued event missing from receipt", receipt.TransactionHash), "issueCapability");
     }
 
     public async Task<ChainTransactionStatus?> GetTransactionStatusAsync(string txHash, CancellationToken ct = default)
@@ -143,72 +150,73 @@ public sealed class EthereumChainClient : IChainClient
         var receipt = await _transport.GetReceiptAsync(txHash, ct);
         if (receipt is null)
         {
-            return await _transport.GetTransactionAsync(txHash, ct) is null ? null : new ChainTransactionStatus("pending");
+            return await _transport.GetTransactionAsync(txHash, ct) is null ? null : new ChainTransactionStatus(ChainTxState.Pending);
         }
 
         if (receipt.Status?.Value == 1)
         {
             var tokenId = string.Equals(receipt.To, _capabilityRegistryAddress, StringComparison.OrdinalIgnoreCase) ? TokenIdOf(receipt) : null;
-            return new ChainTransactionStatus("confirmed", TokenId: tokenId);
+            return new ChainTransactionStatus(ChainTxState.Confirmed, TokenId: tokenId);
         }
 
         var tx = await _transport.GetTransactionAsync(txHash, ct);
         var kind = GasHeadroom.RanOutOfGas(receipt.GasUsed.Value, tx?.Gas?.Value) ? ChainFailureKind.OutOfGas : ChainFailureKind.Rejected;
-        return new ChainTransactionStatus("failed", Code: Code(kind));
+        return new ChainTransactionStatus(ChainTxState.Failed, kind);
     }
-
-    /// <summary>The wire code for a failure kind, shared by the write endpoints and the status endpoint.</summary>
-    public static string Code(ChainFailureKind kind) => kind switch
-    {
-        ChainFailureKind.OutOfGas => "out_of_gas",
-        ChainFailureKind.ChainUnavailable => "chain_unavailable",
-        ChainFailureKind.Pending => "pending",
-        _ => "rejected",
-    };
 
     private static ulong? TokenIdOf(TransactionReceipt receipt) =>
         receipt.DecodeAllEvents<CapabilityIssuedEventDto>().FirstOrDefault() is { } issued ? (ulong)issued.Event.TokenId : null;
 
     /// <summary>
     /// Signs (the hash is known from here on), broadcasts, and waits up to ReceiptTimeout for a successful receipt
-    /// (#222). Before the broadcast a failure is <see cref="ChainFailureKind.Rejected"/> or
-    /// <see cref="ChainFailureKind.ChainUnavailable"/>; after it, anything short of a receipt is
-    /// <see cref="ChainFailureKind.Pending"/>, because the transaction may still mine.
+    /// (#222). Only a failure known to have left nothing behind (a revert or RPC fault while signing, a send the node
+    /// never received or refused) is reported as such; once bytes may have reached the node, anything short of a
+    /// receipt is <see cref="ChainFailureKind.Pending"/>, because the transaction may still mine. The client's
+    /// cancellation never cuts a broadcast short; it ends the receipt wait, as Pending.
     /// </summary>
-    private async Task<TransactionReceipt> WriteAsync<TFunction>(string contract, TFunction function, string name, string revertMessage, CancellationToken ct)
+    /// <param name="name">For logs and the receipt-failure wording (#219).</param>
+    /// <param name="revertPrefix">The pre-broadcast revert wording, kept as before for clients matching on it.</param>
+    private async Task<TransactionReceipt> WriteAsync<TFunction>(string contract, TFunction function, string name, string revertPrefix,
+        string revertMessage, CancellationToken ct)
         where TFunction : FunctionMessage, new()
     {
+        if (!await _gate.WaitAsync(_options.GateTimeout, ct))
+        {
+            throw Logged(new ChainCallException(ChainFailureKind.ChainUnavailable, $"{name}: chain unavailable: relayer busy"), name);
+        }
+
         string hash;
-        await _gate.WaitAsync(ct);
         try
         {
             string signed;
             try
             {
-                signed = await _transport.SignAsync(contract, function);
+                using var step = new CancellationTokenSource(_options.RpcStepTimeout, _time);
+                signed = await _transport.SignAsync(contract, function, step.Token);
             }
             catch (Exception ex)
             {
                 await ResetNonceQuietlyAsync();
-                var kind = ClassifyPreBroadcast(ex);
-                throw Logged(new ChainCallException(kind == ChainFailureKind.Rejected ? $"{name} reverted: {ex.Message}" : $"{name}: chain unavailable: {ex.Message}", kind), name);
+                var kind = ex is OperationCanceledException ? ChainFailureKind.ChainUnavailable : ClassifyPreBroadcast(ex);
+                throw Logged(new ChainCallException(kind,
+                    kind == ChainFailureKind.Rejected ? $"{revertPrefix} reverted: {ex.Message}" : $"{name}: chain unavailable: {ex.Message}", null, ex), name);
             }
 
             hash = HashOf(signed);
             try
             {
-                await _transport.SendRawAsync(signed, ct);
+                using var step = new CancellationTokenSource(_options.RpcStepTimeout, _time);
+                await _transport.SendRawAsync(signed, step.Token);
+            }
+            catch (Exception ex) when (ClassifySend(ex) == SendOutcome.NotSent)
+            {
+                await ResetNonceQuietlyAsync();
+                throw Logged(new ChainCallException(ChainFailureKind.ChainUnavailable, $"{name}: chain unavailable: {ex.Message}", hash, ex), name);
             }
             catch (Exception ex)
             {
-                // The node may have it even though the call failed (a timeout after it was received). Ask once.
-                if (await KnownAsync(hash))
-                {
-                    throw Logged(new ChainCallException($"{name} was broadcast; its outcome isn't known yet", ChainFailureKind.Pending, hash), name);
-                }
-
-                await ResetNonceQuietlyAsync();
-                throw Logged(new ChainCallException($"{name}: chain unavailable: {ex.Message}", ChainFailureKind.ChainUnavailable, hash), name);
+                // The node may have it: wait for it like any broadcast. Never reset the nonce or report it as safe to retry.
+                _logger.LogWarning("Identity chain: {Function} send of {TxHash} ended ambiguously, waiting for it: {Reason}", name, hash, ex.Message);
             }
         }
         finally
@@ -216,42 +224,62 @@ public sealed class EthereumChainClient : IChainClient
             _gate.Release();
         }
 
-        var receipt = await WaitForReceiptAsync(hash, ct)
-            ?? throw Logged(new ChainCallException($"{name} was broadcast; no receipt after {_receiptTimeout.TotalSeconds:0}s", ChainFailureKind.Pending, hash), name);
+        var receipt = await WaitForReceiptAsync(hash, ct);
+        if (receipt is null)
+        {
+            if (!ct.IsCancellationRequested && !await KnownAsync(hash))
+            {
+                // Dropped (or never received): its nonce would hold every later write behind a gap. Re-read it from the
+                // chain. If the transaction lands after all, a write reusing its nonce fails cleanly; nothing doubles.
+                await ResetNonceUnderGateAsync();
+                _logger.LogWarning("Identity chain: {Function} {TxHash} is unknown to the node after {Seconds:0}s; nonce re-read from the chain.",
+                    name, hash, _options.ReceiptTimeout.TotalSeconds);
+            }
+
+            throw Logged(new ChainCallException(ChainFailureKind.Pending,
+                $"{name} was broadcast; no receipt after {_options.ReceiptTimeout.TotalSeconds:0}s", hash), name);
+        }
+
         if (receipt.Status?.Value != 1)
         {
             var tx = await TryGetTransactionAsync(hash);
             var outOfGas = GasHeadroom.RanOutOfGas(receipt.GasUsed.Value, tx?.Gas?.Value);
-            throw Logged(new ChainCallException(FailureMessage(name, revertMessage, receipt.GasUsed.Value, tx?.Gas?.Value),
-                outOfGas ? ChainFailureKind.OutOfGas : ChainFailureKind.Rejected, hash), name);
+            throw Logged(new ChainCallException(outOfGas ? ChainFailureKind.OutOfGas : ChainFailureKind.Rejected,
+                FailureMessage(name, revertMessage, receipt.GasUsed.Value, tx?.Gas?.Value), hash), name);
         }
 
         return receipt;
     }
 
-    /// <summary>Polls for the receipt until ReceiptTimeout; a lookup error is retried, since the transaction may still mine. Null on timeout.</summary>
+    /// <summary>
+    /// Polls for the receipt until ReceiptTimeout, every call bounded by it; a lookup error is retried, since the
+    /// transaction may still mine. Null on timeout or when the caller goes away.
+    /// </summary>
     private async Task<TransactionReceipt?> WaitForReceiptAsync(string hash, CancellationToken ct)
     {
-        var deadline = _time.GetUtcNow() + _receiptTimeout;
-        while (true)
+        using var timeout = new CancellationTokenSource(_options.ReceiptTimeout, _time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        try
         {
-            try
+            while (true)
             {
-                if (await _transport.GetReceiptAsync(hash, ct) is { } receipt)
+                try
                 {
-                    return receipt;
+                    if (await _transport.GetReceiptAsync(hash, linked.Token) is { } receipt)
+                    {
+                        return receipt;
+                    }
                 }
-            }
-            catch (Exception) when (!ct.IsCancellationRequested)
-            {
-            }
+                catch (Exception) when (!linked.IsCancellationRequested)
+                {
+                }
 
-            if (_time.GetUtcNow() >= deadline)
-            {
-                return null;
+                await Task.Delay(_options.ReceiptPollInterval, _time, linked.Token);
             }
-
-            await Task.Delay(_receiptPollInterval, _time, ct);
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+            return null;
         }
     }
 
@@ -261,12 +289,28 @@ public sealed class EthereumChainClient : IChainClient
     {
         try
         {
-            return await _transport.GetTransactionAsync(hash, CancellationToken.None);
+            using var step = new CancellationTokenSource(_options.RpcStepTimeout, _time);
+            return await _transport.GetTransactionAsync(hash, step.Token);
         }
         catch (Exception)
         {
-            // Only the classification depends on this lookup; it must not turn the failure into a different error.
+            // Only the classification depends on this lookup; it must not turn the outcome into a different error.
             return null;
+        }
+    }
+
+    private async Task ResetNonceUnderGateAsync()
+    {
+        if (await _gate.WaitAsync(_options.GateTimeout))
+        {
+            try
+            {
+                await ResetNonceQuietlyAsync();
+            }
+            finally
+            {
+                _gate.Release();
+            }
         }
     }
 
@@ -286,7 +330,7 @@ public sealed class EthereumChainClient : IChainClient
     {
         if (ex.Kind != ChainFailureKind.Rejected)
         {
-            _logger.LogWarning("Identity chain: {Function} {Kind} (tx {TxHash}): {Reason}", name, Code(ex.Kind), ex.TxHash ?? "none", ex.Message);
+            _logger.LogWarning("Identity chain: {Function} {Kind} (tx {TxHash}): {Reason}", name, ex.Kind.ToWireName(), ex.TxHash ?? "none", ex.Message);
         }
 
         return ex;
@@ -296,16 +340,52 @@ public sealed class EthereumChainClient : IChainClient
     internal static string HashOf(string signedTx) => "0x" + Sha3Keccack.Current.CalculateHashFromHex(signedTx.EnsureHexPrefix());
 
     /// <summary>
-    /// A failure before broadcast: a revert (the estimate ran the call and it reverted) is the caller's;
-    /// anything else, including an exception this doesn't recognize, is the chain's, never reported as a rejection.
+    /// A failure before broadcast: a revert (the estimate ran the call and it reverted) is the caller's; anything
+    /// else, including an exception this doesn't recognize, is the chain's, never reported as a rejection.
     /// </summary>
     internal static ChainFailureKind ClassifyPreBroadcast(Exception ex) => ex switch
     {
         SmartContractRevertException or SmartContractCustomErrorRevertException => ChainFailureKind.Rejected,
-        RpcResponseException r when r.RpcError?.Code == 3 || r.RpcError?.Data is not null
-            || (r.RpcError?.Message ?? r.Message).Contains("revert", StringComparison.OrdinalIgnoreCase) => ChainFailureKind.Rejected,
+        RpcResponseException { RpcError: { } e } when e.Code == 3
+            || (e.Data?.Type == Newtonsoft.Json.Linq.JTokenType.String && ((string?)e.Data)!.StartsWith("0x", StringComparison.Ordinal))
+            || (e.Code == -32000 && (e.Message ?? "").Contains("revert", StringComparison.OrdinalIgnoreCase)) => ChainFailureKind.Rejected,
         _ => ChainFailureKind.ChainUnavailable,
     };
+
+    /// <summary>An RPC or transport fault (the node, not the gateway's code): what the status endpoint answers 503 for.</summary>
+    internal static bool IsRpcFault(Exception ex) =>
+        ex is RpcResponseException or RpcClientUnknownException or RpcClientTimeoutException or HttpRequestException or TimeoutException;
+
+    internal enum SendOutcome
+    {
+        /// <summary>The node never got it (no connection) or answered with a refusal: nothing will mine.</summary>
+        NotSent,
+
+        /// <summary>It may have reached the node (a timeout, a reset, "already known").</summary>
+        Unknown,
+    }
+
+    /// <summary>
+    /// A failed broadcast is "not sent" only when that's certain: the connection was never made, or the node answered
+    /// with an error other than already having it. Everything else (timeouts, resets, cancellation) may have landed.
+    /// </summary>
+    internal static SendOutcome ClassifySend(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            switch (e)
+            {
+                case RpcResponseException r:
+                    var message = r.RpcError?.Message ?? r.Message;
+                    return message.Contains("already known", StringComparison.OrdinalIgnoreCase)
+                        || message.Contains("known transaction", StringComparison.OrdinalIgnoreCase) ? SendOutcome.Unknown : SendOutcome.NotSent;
+                case HttpRequestException { HttpRequestError: HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError }:
+                    return SendOutcome.NotSent;
+            }
+        }
+
+        return SendOutcome.Unknown;
+    }
 
     /// <summary>
     /// The error for a failed receipt: likely out of gas when it used its whole limit (#219), so a gas problem isn't

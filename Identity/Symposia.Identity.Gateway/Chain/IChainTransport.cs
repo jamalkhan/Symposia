@@ -15,7 +15,7 @@ namespace Symposia.Identity.Gateway.Chain;
 internal interface IChainTransport
 {
     /// <summary>Estimates (reverting here means the chain refuses it), adds <see cref="GasHeadroom"/>, and signs with the next nonce.</summary>
-    Task<string> SignAsync<TFunction>(string contract, TFunction function)
+    Task<string> SignAsync<TFunction>(string contract, TFunction function, CancellationToken ct)
         where TFunction : FunctionMessage, new();
 
     Task SendRawAsync(string signedTx, CancellationToken ct);
@@ -41,13 +41,14 @@ internal sealed class NethereumChainTransport : IChainTransport
 
     public Web3 Web3 { get; }
 
-    public Task<string> SignAsync<TFunction>(string contract, TFunction function)
+    public Task<string> SignAsync<TFunction>(string contract, TFunction function, CancellationToken ct)
         where TFunction : FunctionMessage, new()
     {
         var handler = Web3.Eth.GetContractTransactionHandler<TFunction>();
-        return handler.WithHeadroomAsync(contract, function, () => handler.SignTransactionAsync(contract, function));
+        return handler.WithHeadroomAsync(contract, function, () => handler.SignTransactionAsync(contract, function)).WaitAsync(ct);
     }
 
+    /// <summary><paramref name="ct"/> only stops the wait: the request may still reach the node, so a cancelled send's outcome is unknown.</summary>
     public Task SendRawAsync(string signedTx, CancellationToken ct) =>
         Web3.Eth.Transactions.SendRawTransaction.SendRequestAsync(signedTx.EnsureHexPrefix()).WaitAsync(ct);
 
