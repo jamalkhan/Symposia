@@ -13,7 +13,7 @@ namespace Symposia.BlobStorage.Gateway.Api;
 /// placement) now, operation history (#204) next. <c>/v1</c> can't collide with S3 paths because
 /// S3 bucket names are at least three characters. Auth is SigV4 with the gateway's access keys.
 /// </summary>
-public static class BlobApiEndpoints
+public static partial class BlobApiEndpoints
 {
     public const string Prefix = "/v1";
     public const string OpenApiPath = "/v1/openapi.json";
@@ -111,6 +111,9 @@ public static class BlobApiEndpoints
                 {
                     bucket = record.Bucket, key = record.Key, size = record.SizeBytes, contentType = record.ContentType,
                     etag = record.ETag, cid = record.Cid, lastModified = record.LastModified, replicas = record.NodeIds,
+                    // #7 FR5: "quorum" until every target copy has confirmed, then "full".
+                    replication = record.Replication == ReplicationState.Full ? "full" : "quorum",
+                    targetCopies = record.TargetCopies, regions = record.Regions,
                 });
             }
 
@@ -135,6 +138,35 @@ public static class BlobApiEndpoints
             ctx.Response.ContentType = record.ContentType;
             ctx.Response.ContentLength = record.SizeBytes;
             return Results.Ok();
+        });
+
+        // Region assignment (#7 FR1/FR3, #8 FR1.1): where the bucket's new objects are placed and which
+        // regions their write quorum must include. Applies to writes from now on; existing objects keep theirs.
+        v1.MapGet("/buckets/{bucket}/regions", (string bucket, HttpContext ctx, GatewayMetadataStore store) =>
+            !OwnsBucket(ctx, store, bucket) ? NoSuchBucket(bucket) : Results.Ok(new { regions = store.BucketRegions(bucket) }));
+
+        v1.MapPut("/buckets/{bucket}/regions", (string bucket, RegionAssignment body, HttpContext ctx, GatewayMetadataStore store,
+            Microsoft.Extensions.Options.IOptions<GatewayOptions> options) =>
+        {
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            var regions = (body.Regions ?? []).Select(r => r.Trim().ToLowerInvariant()).Distinct().ToList();
+            if (regions.FirstOrDefault(r => !RegionCode().IsMatch(r)) is { } bad)
+            {
+                return Error(400, "InvalidArgument", $"'{bad}' is not a region code (lowercase letters, digits and dashes, up to 32).");
+            }
+
+            if (regions.Count > 0 && options.Value.Redundancy.Mode != RedundancyMode.Network)
+            {
+                // Bootstrap clusters don't place by region; accepting the setting would promise a constraint nobody enforces.
+                return Error(409, "RegionsNotEnforced", "This gateway runs in bootstrap redundancy mode and does not place by region.");
+            }
+
+            store.SetBucketRegions(bucket, regions);
+            return Results.Ok(new { regions });
         });
 
         v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects) =>
@@ -203,6 +235,15 @@ public static class BlobApiEndpoints
             nextCursor = rows.Count > max ? EncodeCursor(page[^1].Id.ToString(System.Globalization.CultureInfo.InvariantCulture)) : null,
         });
     }
+
+    /// <summary>Whether the caller's tenant owns <paramref name="bucket"/>; a stranger's bucket reads as absent.</summary>
+    private static bool OwnsBucket(HttpContext ctx, GatewayMetadataStore store, string bucket) =>
+        store.BucketExists(bucket) && store.BucketTenant(bucket) == ctx.Items["TenantId"] as string;
+
+    private sealed record RegionAssignment(string[]? Regions);
+
+    [System.Text.RegularExpressions.GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]
+    private static partial System.Text.RegularExpressions.Regex RegionCode();
 
     /// <summary>A JSON error, <c>{"error":{"code","message","requestId"}}</c>, with S3's codes and statuses.</summary>
     public static IResult Error(int status, string code, string message) => new ErrorResult(status, code, message);

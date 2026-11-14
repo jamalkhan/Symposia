@@ -452,7 +452,8 @@ public sealed class GatewayFixture : IAsyncLifetime
     /// <summary>An S3 client talking to <paramref name="server"/> in memory.</summary>
     internal static AmazonS3Client S3ClientFor(TestServer server,
         string accessKey = "AKIAIOSFODNN7EXAMPLE",
-        string secretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+        string secretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        int? maxErrorRetry = null)
     {
         // AWSSDK v4 builds URIs with DangerousDisablePathAndQueryCanonicalization, which
         // ASP.NET Core's TestHost.ClientHandler cannot parse. Wrap with a normalizing handler
@@ -473,6 +474,7 @@ public sealed class GatewayFixture : IAsyncLifetime
                 HttpClientFactory = new FixedHttpClientFactory(httpClient),
                 DisableLogging = true,
                 Timeout = TimeSpan.FromSeconds(30),
+                MaxErrorRetry = maxErrorRetry ?? 4,
             });
     }
 

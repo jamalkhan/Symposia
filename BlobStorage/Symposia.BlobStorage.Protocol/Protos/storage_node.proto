@@ -77,6 +77,8 @@ message ProbeResponse {
   bool read_only = 6;
   int64 volume_free_bytes = 7;
   int64 reserve_bytes = 8;
+  // The region this node serves (#7 region-aware quorum); empty = not configured.
+  string region = 9;
 }
 
 message IntegrityChallengeRequest {

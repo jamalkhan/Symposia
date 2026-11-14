@@ -115,7 +115,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
             var existing = _nodes.FirstOrDefault(n => n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
             if (existing is not null) return existing;
 
-            var conn = new NodeConnection(url);
+            var conn = new NodeConnection(url) { ConfiguredRegion = ConfiguredRegion(url, url) };
             _nodes.Add(conn);
             _store.PersistNode(url, "admin");
             _ = ProbeAsync(conn); // probe immediately so health is known
@@ -205,7 +205,11 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                     squatter.Dispose();
                 }
 
-                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint) { LastSeenInSource = now };
+                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint)
+                {
+                    LastSeenInSource = now,
+                    ConfiguredRegion = ConfiguredRegion(d.Url, d.Id),
+                };
                 if (existing is not null)
                 {
                     _logger.LogInformation("Storage node {Node} changed from {Old} to {New} (certificate {Fingerprint}).",
@@ -256,6 +260,13 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         {
             _ = ProbeAsync(conn);
         }
+    }
+
+    private string? ConfiguredRegion(string url, string id)
+    {
+        var regions = _options.Value.Redundancy.NodeRegions;
+        return (regions.FirstOrDefault(r => r.Node.Equals(id, StringComparison.OrdinalIgnoreCase))
+            ?? regions.FirstOrDefault(r => r.Node.TrimEnd('/').Equals(url, StringComparison.OrdinalIgnoreCase)))?.Region;
     }
 
     /// <summary>Raised when a node becomes healthy (new or back online); used to start a repair sweep at once.</summary>

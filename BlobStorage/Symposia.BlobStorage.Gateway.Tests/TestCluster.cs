@@ -47,7 +47,8 @@ internal sealed class TestCluster : IDisposable
         Registry = new ClusterRegistry(Connections);
         Gateway = new GatewayFactory(_ => Registry, config, services);
         Http = Gateway.CreateClient();
-        S3 = GatewayFixture.S3ClientFor(Gateway.Server);
+        // No SDK retries: a test asserting a 503 must see the first answer, not the last of several.
+        S3 = GatewayFixture.S3ClientFor(Gateway.Server, maxErrorRetry: 0);
     }
 
     public List<NodeConnection> Connections { get; } = [];
@@ -181,5 +182,8 @@ internal sealed class BlackHoleHandler : DelegatingHandler
     public Func<HttpRequestMessage, bool> Matches { get; set; } = _ => true;
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
-        Enabled && Matches(request) ? throw new HttpRequestException("node unreachable (test)") : base.SendAsync(request, ct);
+        // What a refused connection looks like: gRPC maps it to Unavailable (a bare HttpRequestException is Internal).
+        Enabled && Matches(request)
+            ? throw new HttpRequestException("node unreachable (test)", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused))
+            : base.SendAsync(request, ct);
 }

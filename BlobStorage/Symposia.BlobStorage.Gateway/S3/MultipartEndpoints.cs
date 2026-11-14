@@ -129,6 +129,14 @@ internal static class MultipartEndpoints
 
         // A replaced part's old blob was queued for deletion in the same transaction, if unreferenced.
         _ = replaced;
+        // Copies confirming after quorum join the part's replicas as they land (#7 FR5).
+        _ = blob.Remainder.ContinueWith(late =>
+        {
+            foreach (var nodeId in late.Result)
+            {
+                store.AddPartReplica(upload.UploadId, partNumber, blob.Cid, nodeId);
+            }
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
         store.TouchUpload(upload.UploadId, DateTimeOffset.UtcNow + Options(ctx).MultipartUploadTtl);
         Logger(ctx).LogDebug("Upload {UploadId} part {Part}: {Size} bytes, CID {Cid}.", upload.UploadId, partNumber, blob.SizeBytes, blob.Cid);
 
@@ -281,8 +289,9 @@ internal static class MultipartEndpoints
             }
 
             // Quota (quota-management.md) would be enforced here once a quota engine exists; descoped (#5 addendum).
-            var record = new ObjectRecord(upload.Bucket, upload.Key, blob.Cid, blob.SizeBytes, upload.ContentType,
-                DateTimeOffset.UtcNow, blob.NodeIds, finalEtag);
+            // The same object row and post-commit path as a single PUT (#7 FR10): no divergent multipart variant.
+            var writer = services.GetRequiredService<QuorumWriter>();
+            var record = QuorumWriter.ToRecord(blob, upload.Bucket, upload.Key, upload.ContentType, finalEtag);
             switch (store.CompleteUpload(upload.UploadId, record, finalEtag, CommittedJson(parts.Select(p => (p.PartNumber, p.Cid))), ifNoneMatch, out var replaced))
             {
                 case CompleteOutcome.PreconditionFailed:
@@ -292,7 +301,7 @@ internal static class MultipartEndpoints
             }
 
             committed = true;
-            services.GetRequiredService<QuorumWriter>().RepairIfShort(blob);
+            writer.AfterCommit(blob, upload.Bucket, upload.Key);
             logger.LogInformation("Multipart upload {UploadId} completed: {Parts} parts, {Size} bytes, CID {Cid}, in {ElapsedMs} ms.",
                 upload.UploadId, parts.Count, blob.SizeBytes, blob.Cid, started.ElapsedMilliseconds);
             return (true, 200, "", "", replaced);

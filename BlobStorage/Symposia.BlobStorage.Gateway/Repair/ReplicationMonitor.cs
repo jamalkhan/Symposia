@@ -14,7 +14,7 @@ namespace Symposia.BlobStorage.Gateway.Repair;
 ///  a. Removes node_ids that are no longer in the live registry (departed nodes).
 ///  b. Issues an IntegrityChallenge to each replica to verify the blob is intact.
 ///  c. Removes replicas that fail the challenge.
-///  d. Counts healthy replicas; if below MinCopiesPerObject, enqueues an UnderReplicated repair.
+///  d. Counts healthy replicas; if below the object's own copy target, enqueues an UnderReplicated repair.
 ///
 /// This is the network-wide enforcement of the redundancy rules defined in
 /// Requirements/BlobStorage/redundancy-and-data-integrity.md.
@@ -105,25 +105,25 @@ public sealed class ReplicationMonitor : BackgroundService
     }
 
     /// <summary>
-    /// Queues a repair for every object recorded on fewer than MinCopiesPerObject nodes. Index-backed
-    /// (replica_count), so it's cheap enough to run whenever a node comes online or a write lands short.
+    /// Queues a repair for every object recorded on fewer nodes than its own copy target (#7: targets follow
+    /// each object's region assignment). Index-backed (idx_objects_short), so it's cheap enough to run
+    /// whenever a node comes online or a write lands short.
     /// </summary>
     private void SweepUnderReplicated()
     {
-        var minCopies = _options.Value.MinCopiesPerObject;
         if (_nodes.All.Count(n => n.IsHealthy) <= 1)
         {
             _logger.LogDebug("ReplicationMonitor: no second healthy node to copy to yet; skipping sweep.");
             return;
         }
 
-        // Page through every repairable object in (copies, bucket, key) order; the queue drops CIDs
+        // Page through every repairable object in (missing, bucket, key) order; the queue drops CIDs
         // already waiting, so repeated sweeps don't pile up duplicates.
         int found = 0, queued = 0;
-        (int Count, string Bucket, string Key)? cursor = null;
+        (int Missing, string Bucket, string Key)? cursor = null;
         while (true)
         {
-            var page = _store.ListUnderReplicated(minCopies, UnderReplicatedBatch, cursor);
+            var page = _store.ListShortOfTarget(UnderReplicatedBatch, cursor);
             foreach (var record in page)
             {
                 found++;
@@ -138,7 +138,7 @@ public sealed class ReplicationMonitor : BackgroundService
                 break;
             }
 
-            cursor = (page[^1].NodeIds.Count, page[^1].Bucket, page[^1].Key);
+            cursor = (page[^1].TargetCopies - page[^1].NodeIds.Count, page[^1].Bucket, page[^1].Key);
         }
 
         if (found == 0)
@@ -147,13 +147,11 @@ public sealed class ReplicationMonitor : BackgroundService
             return;
         }
 
-        _logger.LogInformation("ReplicationMonitor: {Found} under-replicated object(s), {Queued} newly queued for repair (need {Need} copies).",
-            found, queued, minCopies);
+        _logger.LogInformation("ReplicationMonitor: {Found} under-replicated object(s), {Queued} newly queued for repair.", found, queued);
     }
 
     private async Task ScanAsync(CancellationToken ct)
     {
-        var minCopies = _options.Value.MinCopiesPerObject;
         var knownUrls = _nodes.All.Select(n => n.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         // Pruning by absence is only safe when the node list is the operator's static config.
@@ -225,12 +223,13 @@ public sealed class ReplicationMonitor : BackgroundService
                     }
                 }
 
-                // d. Under-replicated? Enqueue a repair to add more copies.
-                if (healthyReplicas.Count < minCopies)
+                // d. Under-replicated against its own target? Enqueue a repair to add more copies.
+                var target = Math.Max(1, record.TargetCopies);
+                if (healthyReplicas.Count < target)
                 {
                     _logger.LogWarning(
                         "Object {Bucket}/{Key} has {Have} healthy replica(s), need {Need}; queuing repair.",
-                        record.Bucket, record.Key, healthyReplicas.Count, minCopies);
+                        record.Bucket, record.Key, healthyReplicas.Count, target);
                     _repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.UnderReplicated));
                     repairQueued++;
                 }

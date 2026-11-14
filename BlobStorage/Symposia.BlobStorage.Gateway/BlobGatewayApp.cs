@@ -58,6 +58,7 @@ public static class BlobGatewayApp
         builder.Services.AddSingleton<INodeRegistry>(sp => sp.GetRequiredService<NodeRegistry>());
         builder.Services.AddHostedService(sp => sp.GetRequiredService<NodeRegistry>());
 
+        builder.Services.AddSingleton<Placement.PlacementEngine>();
         builder.Services.AddScoped<QuorumWriter>();
         builder.Services.AddSingleton<TenantQuota>();
         builder.Services.AddSingleton<IWriteQuorumRequirement, ConfiguredWriteQuorum>();

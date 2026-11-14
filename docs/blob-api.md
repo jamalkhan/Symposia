@@ -28,7 +28,9 @@ A missing or bad signature gets `401` and a JSON error. The S3 surface keeps S3'
 | `GET /v1/buckets/{bucket}/objects?prefix=&cursor=&limit=` | List by key. `limit` 1–1000, default 100. Pass `nextCursor` back as `cursor`. |
 | `PUT /v1/buckets/{bucket}/objects/{key}` | Write the raw request body. Returns the object as JSON. |
 | `GET /v1/buckets/{bucket}/objects/{key}` | Read. Supports `Range`. |
-| `GET /v1/buckets/{bucket}/objects/{key}?meta` | Metadata, including the content ID (CID) and replica placement. |
+| `GET /v1/buckets/{bucket}/regions` | The bucket's region assignment (#7). Empty means global. |
+| `PUT /v1/buckets/{bucket}/regions` | Set it: `{"regions":["us-east"]}`. Applies to writes from then on. Needs network redundancy mode, `409 RegionsNotEnforced` otherwise. |
+| `GET /v1/buckets/{bucket}/objects/{key}?meta` | Metadata, including the content ID (CID), replica placement, `replication` (`quorum` until every target copy has confirmed, then `full`), `targetCopies` and `regions`. |
 | `GET /v1/buckets/{bucket}/objects/{key}?history` | The object's operation history (#204). See below. |
 | `HEAD /v1/buckets/{bucket}/objects/{key}` | Headers only. |
 | `DELETE /v1/buckets/{bucket}/objects/{key}` | Delete. Idempotent. |

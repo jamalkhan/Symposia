@@ -137,6 +137,51 @@ public sealed class GatewayOptions
     /// refused with 507 before any node is contacted. Tenants not listed are unlimited.
     /// </summary>
     public Dictionary<string, long> TenantQuotaBytes { get; set; } = [];
+
+    /// <summary>Copy counts, write quorum and placement (#7, #8).</summary>
+    public RedundancyOptions Redundancy { get; set; } = new();
+}
+
+public enum RedundancyMode
+{
+    /// <summary>
+    /// Small clusters (single-node dev, a network not yet spanning regions): every writable node is a
+    /// target, <see cref="GatewayOptions.WriteQuorumCount"/> acks are a quorum, regions aren't enforced.
+    /// </summary>
+    Bootstrap,
+
+    /// <summary>The full region tables of #7/#8: 4/5/6/7/2N copies, region-aware quorum, fault domains.</summary>
+    Network,
+}
+
+public sealed class RedundancyOptions
+{
+    public RedundancyMode Mode { get; set; } = RedundancyMode.Bootstrap;
+
+    /// <summary>
+    /// Longest wait for a write's quorum once its body has been sent (#7 FR4); past it the write fails with
+    /// 503 and its copies are discarded. Measured from the end of the body, so a slow upload isn't cut short.
+    /// </summary>
+    public int WriteQuorumTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Per-tenant overrides of <see cref="WriteQuorumTimeoutSeconds"/> for enterprise large-blob or
+    /// slow-network needs (#7 FR12). Operators set these on request; see docs/blob-storage-operations.md.
+    /// </summary>
+    public Dictionary<string, int> TenantWriteQuorumTimeoutSeconds { get; set; } = [];
+
+    /// <summary>How long the copies past quorum may take to land before repair takes over (#7 FR5).</summary>
+    public int RemainderTimeoutSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Region of storage nodes (by URL or node ID) that don't report one in their probe. A probed region
+    /// wins; nodes with neither count as "no region" (overflow only). A list, not a map: URLs contain
+    /// the configuration key separator.
+    /// </summary>
+    public NodeRegion[] NodeRegions { get; set; } = [];
+
+    public TimeSpan WriteQuorumTimeout(string tenantId) => TimeSpan.FromSeconds(Math.Max(1,
+        TenantWriteQuorumTimeoutSeconds.TryGetValue(tenantId, out var seconds) ? seconds : WriteQuorumTimeoutSeconds));
 }
 
 public enum NodeSourceKind
@@ -156,4 +201,12 @@ public sealed class HistoryOptions
     public int QueueCapacity { get; set; } = 10_000;
 
     public int SweepIntervalSeconds { get; set; } = 300;
+}
+
+public sealed class NodeRegion
+{
+    /// <summary>The node's URL or registry ID.</summary>
+    public string Node { get; set; } = "";
+
+    public string Region { get; set; } = "";
 }

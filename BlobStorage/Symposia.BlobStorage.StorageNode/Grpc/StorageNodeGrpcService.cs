@@ -24,14 +24,17 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
     private readonly NodeIdentity _nodeIdentity;
     private readonly StorageCapacityMonitor _capacity;
     private readonly Health.NodeMetrics _metrics;
+    private readonly IOptions<StorageNodeOptions> _options;
 
     public StorageNodeGrpcService(
         LocalBlobStore blobStore,
         ManifestStore manifestStore,
         NodeIdentity nodeIdentity,
         StorageCapacityMonitor capacity,
-        Health.NodeMetrics metrics)
+        Health.NodeMetrics metrics,
+        IOptions<StorageNodeOptions> options)
     {
+        _options = options;
         _metrics = metrics;
         _blobStore = blobStore;
         _manifestStore = manifestStore;
@@ -221,6 +224,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
             ReadOnly = capacity.ReadOnly,
             VolumeFreeBytes = capacity.Free,
             ReserveBytes = capacity.Reserve,
+            Region = _options.Value.Region,
         });
     }
 

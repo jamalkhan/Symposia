@@ -87,7 +87,26 @@
               }
             }
           }
-        ]
+        ],
+        "properties": {
+          "replication": {
+            "type": "string",
+            "enum": [
+              "quorum",
+              "full"
+            ],
+            "description": "quorum until every target copy has confirmed (#7)."
+          },
+          "targetCopies": {
+            "type": "integer"
+          },
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       },
       "HistoryEntry": {
         "type": "object",
@@ -391,6 +410,64 @@
         "responses": {
           "204": {
             "description": "Deleted or absent."
+          }
+        }
+      }
+    },
+    "/v1/buckets/{bucket}/regions": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "The bucket's region assignment (#7): where its new objects are placed. Empty = global.",
+        "responses": {
+          "200": {
+            "description": "{ regions: string[] }"
+          },
+          "404": {
+            "description": "NoSuchBucket (also for another tenant's bucket)"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set the bucket's region assignment. Applies to writes from now on; network redundancy mode only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "regions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ regions: string[] }"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          },
+          "409": {
+            "description": "RegionsNotEnforced (bootstrap mode)"
           }
         }
       }

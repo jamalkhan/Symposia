@@ -27,13 +27,16 @@ public sealed class RepairWorker : BackgroundService
     private readonly GatewayMetadataStore _store;
     private readonly INodeRegistry _nodes;
     private readonly ILogger<RepairWorker> _logger;
+    private readonly Placement.PlacementEngine _placement;
 
     public RepairWorker(
         RepairQueue queue,
         GatewayMetadataStore store,
         INodeRegistry nodes,
+        Placement.PlacementEngine placement,
         ILogger<RepairWorker> logger)
     {
+        _placement = placement;
         _queue = queue;
         _store = store;
         _nodes = nodes;
@@ -85,10 +88,11 @@ public sealed class RepairWorker : BackgroundService
             return;
         }
 
-        // 3. Find a healthy target node not already in the replica set.
-        var targetNode = _nodes.Writable(record.SizeBytes)
-            .Where(n => !currentNodeIds.Contains(n.Id, StringComparer.OrdinalIgnoreCase))
-            .FirstOrDefault();
+        // 3. Find a target under the object's placement rules (#7/#8): the region still short of its
+        //    count first, then overflow; never a node already holding a copy.
+        var existing = _nodes.All.Where(n => currentNodeIds.Contains(n.Id)).ToList();
+        var requirement = _placement.Requirement(record.Regions, record.SizeBytes);
+        var targetNode = _placement.PlaceAdditional(requirement, existing, 1, record.SizeBytes, exclude: currentNodeIds).Targets.FirstOrDefault();
 
         if (targetNode is null)
         {

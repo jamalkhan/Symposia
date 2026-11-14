@@ -113,6 +113,12 @@ public sealed class NodeConnection : IDisposable
     // The health cache's other inputs (#1 FR-21): P2P gossip and the on-chain registry each epoch. Their
     // producers land separately; these are where they write, and null means "no data from that source yet".
 
+    /// <summary>Region from gateway configuration, used when the node's probe reports none (#7).</summary>
+    public string? ConfiguredRegion { get; set; }
+
+    /// <summary>The node's region: its own report, else configuration, else empty (no region).</summary>
+    public string Region => LastProbe?.Region is { Length: > 0 } reported ? reported : ConfiguredRegion ?? "";
+
     /// <summary>When gossip last reported this node alive.</summary>
     public DateTimeOffset? GossipLastSeen { get; set; }
 
