@@ -112,7 +112,9 @@ BlobStorage #245. Gateways pull only what changed (`/internal/changes`). A crede
 3. Run `POST /v1/keys/reseal` with the operator token. Watch `GET /v1/keys` until `secretsByKey` shows only `k2`. The job is batched and resumable, and runs one at a time across replicas.
 4. Remove `k1`. An Authority refuses to start while any stored secret still names a key it doesn't have.
 
-A secret that can't be opened (corrupt, or sealed under a key that has since been lost) never blocks the rest of the system. The snapshot leaves that credential out, so the credential fails closed on its own, and the Authority counts it in `unreadableSecrets` on `GET /v1/keys`. The re-seal marks it `bad:<label>` in `secretsByKey` and carries on. A quarantined row doesn't count as using its key. Re-issue that credential.
+A secret that can't be opened (corrupt, or sealed under a key that has since been lost) never blocks the rest of the system. The snapshot leaves that credential out, so the credential fails closed on its own, and the Authority counts it in `unreadableSecrets` on `GET /v1/keys`. The re-seal marks it `bad:<label>` in `secretsByKey` and carries on. A quarantined row doesn't count as using its key. Re-issue that credential. Alert on `unreadableSecrets` above 0, and don't remove a key while `secretsByKey` still shows `bad:<that key>` rows that haven't been reviewed.
+
+After restoring the Authority's database, expect each gateway to take a full snapshot. A gateway that was ahead of the restored version gets 410 `AheadOfAuthority` and installs the restored state. There is one blind spot: if new writes carry the restored database past a gateway's version before that gateway polls, the gap goes undetected. The next reconcile (`ReconcileMinutes`) closes it. To close it at once, restart the gateways after a restore.
 
 The re-seal lock, the migration lock and the state-version row lock are Postgres session or transaction locks. Connect the Authority directly or through session pooling. Transaction-mode PgBouncer would break the re-seal's advisory lock.
 

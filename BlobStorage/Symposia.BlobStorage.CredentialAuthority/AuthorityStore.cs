@@ -196,7 +196,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         }
     }
 
-    /// <summary>How many secrets each key version seals (index-only on idx_credentials_seal_key).</summary>
+    /// <summary>How many secrets each key version seals (a scan of credentials: operator and startup only, ~20 ms at 200k rows; Frank #12).</summary>
     public async Task<IReadOnlyDictionary<string, long>> KeyCountsAsync(CancellationToken ct)
     {
         await using var conn = await OpenAsync(ct);
@@ -680,6 +680,9 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
                 ("ids", withSecret.ToArray())), true, ct);
             var secrets = opened.ToDictionary(g => g.CredentialId, g => g.Secret);
             credentials = [.. credentials.Select(g => secrets.TryGetValue(g.CredentialId, out var secret) ? g with { Secret = secret } : g)];
+            // A new secret we can't open travels as a tombstone, as the snapshot leaves it out: a grant without its
+            // secret would send every gateway to the full snapshot each time it changes (review round 2: Lenny #2).
+            credentials = [.. credentials.Where(g => !withSecret.Contains(g.CredentialId) || g.Secret is not null)];
         }
 
         var deleted = credentialIds.Except(credentials.Select(c => c.CredentialId)).ToList();

@@ -196,6 +196,17 @@ public sealed class MutualTlsTests(AuthorityFixture f) : IClassFixture<Authority
         http.DefaultRequestHeaders.Add("X-Service-Token", AuthorityFixture.ServiceToken);
 
         Assert.Equal(HttpStatusCode.OK, (await http.GetAsync("internal/snapshot")).StatusCode);
+
+        // A different CA must not be trusted for the same Authority.
+        using var otherKey = RSA.Create(2048);
+        using var other = new CertificateRequest("CN=other-ca", otherKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+            .CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        var otherPath = Path.Combine(_dir, "other-ca.pem");
+        File.WriteAllText(otherPath, other.ExportCertificatePem());
+        using var wrong = new HttpClient(GatewayAlias::Symposia.BlobStorage.Gateway.Auth.AuthorityTls.Handler(
+            new GatewayAlias::Symposia.BlobStorage.Gateway.CredentialAuthorityOptions { ServerCaPath = otherPath }))
+        { BaseAddress = new Uri($"https://localhost:{internalPort}/") };
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => wrong.GetAsync("internal/snapshot"));
     }
 
     [Fact]

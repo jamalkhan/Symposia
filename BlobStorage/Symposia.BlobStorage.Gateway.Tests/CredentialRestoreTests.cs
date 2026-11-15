@@ -68,4 +68,43 @@ public sealed class CredentialRestoreTests
         Assert.False(await sync.SyncAsync(CancellationToken.None)); // a lagging replica's snapshot must not undo newer state
         Assert.Equal(50, cache.Version);
     }
+
+    [Fact]
+    public async Task PreDeltaAuthority_404_FallsBackToSnapshots_AndStopsAskingForDeltas() // AC10, CP-1
+    {
+        var changesCalls = 0;
+        var (cache, sync) = Gateway(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/internal/changes")
+            {
+                changesCalls++;
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            // A #3 Authority's snapshot: no epoch field at all.
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"version":7,"tenants":[],"credentials":[],"rules":[]}""", System.Text.Encoding.UTF8, "application/json") };
+        });
+        cache.Apply(new AuthoritySnapshot(5, [], [], []));
+
+        await sync.SyncAsync(CancellationToken.None);
+        await sync.SyncAsync(CancellationToken.None);
+
+        Assert.Equal(1, changesCalls);
+        Assert.Equal(1, sync.Counts["fallback_404"]);
+        Assert.Equal(1, sync.Counts["snapshot"]); // the next poll goes straight to the snapshot
+        Assert.Equal(7, cache.Version);
+    }
+
+    [Fact]
+    public async Task PollingAlone_EnforcesARevocation_WithNoWatchStream() // AC4: the poll path, as when Watch is down
+    {
+        var revoked = new AuthorityDelta(50, 51, "e1", [], [Grant("c1", "AK1", CredentialStatus.Revoked) with { Secret = null }], [], []);
+        var (cache, sync) = Gateway(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(revoked, options: CredentialSync.Json) });
+        cache.Apply(new AuthoritySnapshot(50, [new TenantState("t", TenantStatus.Active)], [Grant("c1", "AK1", CredentialStatus.Active)], []) { Epoch = "e1" });
+
+        Assert.True(await sync.SyncAsync(CancellationToken.None));
+
+        Assert.Equal(CredentialStatus.Revoked, cache.Grant("AK1")!.Status);
+        Assert.Equal(1, sync.Counts["delta"]);
+    }
 }
