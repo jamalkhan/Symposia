@@ -42,7 +42,7 @@ In practice:
 - **JSON documents and protos** only gain optional fields.
 - **Golden fixtures** in `protocol/fixtures/` are history: add new ones, never edit or delete old ones.
 - **Contract storage** is append-only.
-- **Database migrations** are expand/contract: add, dual-write, stop reading, then drop in a later release.
+- **Database migrations** are expand/contract: add, dual-write, stop reading, then drop in a later release. A gateway's metadata database is local to that gateway. Expand/contract covers restarting the same host on an older binary. It never covers two releases writing one database at once (see [docs/blob-storage-operations.md](docs/blob-storage-operations.md#upgrading-to-this-release-release-blocker)).
 
 CI enforces whatever a machine can judge. Each failure names its rule and links the fix in [docs/engineering/protocol-compatibility.md](docs/engineering/protocol-compatibility.md#the-checks). Reviewers check the rest. A field that keeps its name but changes meaning, for example, is still a breaking change.
 

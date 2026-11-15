@@ -68,8 +68,24 @@ public sealed partial class GatewayMetadataStore
             CREATE INDEX IF NOT EXISTS idx_object_shards_cid ON object_shards (shard_cid);
             CREATE INDEX IF NOT EXISTS idx_object_shards_node ON object_shards (node_id);
             CREATE INDEX IF NOT EXISTS idx_objects_erasure ON objects (bucket, key) WHERE scheme <> 'replica';
+
+            -- Nodes that returned a Merkle root from a write: they support proofs, so a proofless challenge
+            -- answer from them is a failure, never a fallback (review: Carl #1). A fact the node can't take back.
+            CREATE TABLE IF NOT EXISTS merkle_nodes (node_id TEXT PRIMARY KEY, first_seen TEXT NOT NULL);
             """);
         tx.Commit();
+    }
+
+    public void MarkMerkleCapable(string nodeId)
+    {
+        using var conn = Open();
+        Execute(Query(conn, "INSERT OR IGNORE INTO merkle_nodes (node_id, first_seen) VALUES ($n, $t)", ("$n", nodeId), ("$t", Now())));
+    }
+
+    public bool IsMerkleCapable(string nodeId)
+    {
+        using var conn = Open();
+        return Query(conn, "SELECT 1 FROM merkle_nodes WHERE node_id = $n", ("$n", nodeId)).ExecuteScalar() is not null;
     }
 
     // ── Region assignment by folder (#8 FR1.1) ────────────────────────────────

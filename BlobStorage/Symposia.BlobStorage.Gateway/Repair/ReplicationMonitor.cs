@@ -226,6 +226,7 @@ public sealed class ReplicationMonitor : BackgroundService
                         continue;
                     }
 
+                    node.ProofCapable |= _store.IsMerkleCapable(node.Id);
                     var result = await Integrity.ChallengeScheduler.ChallengeAsync(node, record, TimeSpan.FromSeconds(30), ct);
                     if (result is Integrity.ChallengeResult.Passed or Integrity.ChallengeResult.Unreachable)
                     {

@@ -291,6 +291,11 @@ public sealed class RepairWorker : BackgroundService
 
             await writeCall.RequestStream.CompleteAsync();
             var result = await writeCall.ResponseAsync;
+            if (result.MerkleRoot.Length == Domain.MerkleTree.HashSize)
+            {
+                target.ProofCapable = true;
+                _store.MarkMerkleCapable(target.Id); // review: Carl #1
+            }
 
             // Verify the target stored the correct blob.
             if (!result.Cid.Equals(record.Cid, StringComparison.OrdinalIgnoreCase))

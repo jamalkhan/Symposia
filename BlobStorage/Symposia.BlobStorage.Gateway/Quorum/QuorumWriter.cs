@@ -185,10 +185,14 @@ public sealed class QuorumWriter
         // Fan-out: read one chunk from the HTTP body, write it to all active node streams in parallel.
         var buffer = new byte[ChunkSizeBytes];
         int read;
+        // The gateway hashes what the client sent: only a node that stored exactly these bytes counts toward
+        // quorum, however many faulty nodes agree on something else (review: Lenny #6).
+        using var hasher = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
         try
         {
             while ((read = await body.ReadAsync(buffer, cancellationToken)) > 0)
             {
+                hasher.AppendData(buffer, 0, read);
                 var chunk = new WriteBlobChunk { Data = ByteString.CopyFrom(buffer, 0, read) };
                 await Task.WhenAll(sessions.Select(s => s.SendChunkAsync(chunk, cancellationToken)));
             }
@@ -205,15 +209,17 @@ public sealed class QuorumWriter
             throw;
         }
 
+        var expectedCid = Convert.ToHexStringLower(hasher.GetHashAndReset());
+
         // Every target now has the whole body; wait for durable acks, at most the quorum timeout.
         // A list, not a map: sessions that end synchronously share one completed Task instance.
         var completions = sessions.Select(s => new Pending(s.CompleteAsync(), s)).ToList();
         var acks = new List<NodeWriteSession>();
         using var timeout = new CancellationTokenSource(_options.Value.Redundancy.WriteQuorumTimeout(tenantId));
         var waitForAll = !requirement.EnforcesRegions;
-        // Acks are grouped by the CID each node computed: quorum is a group of identical copies, so a faulty
-        // node can neither complete a quorum nor, by answering first, decide the content (review: Lenny #6).
-        List<NodeWriteSession> Leading() => acks.GroupBy(a => a.Response!.Cid).OrderByDescending(g => g.Count()).FirstOrDefault()?.ToList() ?? [];
+        // Only acks for the content the client sent count: a faulty node can neither complete a quorum nor,
+        // by answering first, decide the content (review: Lenny #6).
+        List<NodeWriteSession> Leading() => acks.Where(a => a.Response!.Cid == expectedCid).ToList();
         while (completions.Count > 0 && (waitForAll || !requirement.IsSatisfiedBy(Leading().Select(c => c.Region))))
         {
             NodeWriteSession session;
@@ -243,7 +249,7 @@ public sealed class QuorumWriter
 
         // One content hash: a node reporting a different CID for the same bytes is faulty, not a copy.
         var confirmed = Leading();
-        var cid = confirmed.FirstOrDefault()?.Response!.Cid;
+        var cid = expectedCid;
         foreach (var odd in acks.Except(confirmed))
         {
             _logger.LogError("Node {Node} stored {Got} for a blob others stored as {Cid}; not counting it.", odd.Node.Id, odd.Response!.Cid, cid);
@@ -261,10 +267,7 @@ public sealed class QuorumWriter
                 pending.Session.Abort();
             }
 
-            if (cid is not null)
-            {
-                _metadata.CollectIfUnreferenced(cid, plan.Targets.Select(t => t.Id));
-            }
+            _metadata.CollectIfUnreferenced(cid, plan.Targets.Select(t => t.Id));
 
             _metrics?.WriteQuorumFailed.Inc();
             _logger.LogWarning("Write of {Bucket}/{Key} missed quorum: {Confirmed} of {Needed} durable acks ({Targets} targets).",
@@ -279,6 +282,10 @@ public sealed class QuorumWriter
             : AwaitRemainderAsync(completions, cid!, TimeSpan.FromSeconds(Math.Max(1, _options.Value.Redundancy.RemainderTimeoutSeconds)));
         // The Merkle root is kept only when every confirming node computed the same one (#8 FR6.4).
         var roots = confirmed.Select(c => c.Response!.MerkleRoot).ToList();
+        foreach (var proofCapable in confirmed.Where(c => c.Response!.MerkleRoot.Length == Domain.MerkleTree.HashSize))
+        {
+            MarkCapable(proofCapable.Node);
+        }
         var merkleRoot = roots.All(r => r.Length == Domain.MerkleTree.HashSize && r.Equals(roots[0]))
             ? Convert.ToHexStringLower(roots[0].ToByteArray()) : null;
         return new BlobWriteResult(cid!, confirmed[0].Response!.SizeBytes, confirmed.Select(c => c.Node.Id).ToList())
@@ -289,6 +296,16 @@ public sealed class QuorumWriter
             Pending = completions.Count,
             Remainder = remainder,
         };
+    }
+
+    /// <summary>Records that a node returned a Merkle root, so it can't later dodge a proof (review: Carl #1).</summary>
+    private void MarkCapable(NodeConnection node)
+    {
+        if (!node.ProofCapable)
+        {
+            node.ProofCapable = true;
+            _metadata.MarkMerkleCapable(node.Id);
+        }
     }
 
     private sealed record Pending(Task Completion, NodeWriteSession Session);

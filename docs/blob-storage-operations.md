@@ -27,7 +27,13 @@ When a process starts shutting down, `/ready` turns `503 draining` at once. `Dra
 
 The gateway writes one line per request, under the `Symposia.BlobStorage.Gateway.RequestLog` category. Each line has the tenant, credential, operation, bucket, key, status, bytes in and out, latency, the node that served the request and any error. The shipped `appsettings.json` uses the JSON console formatter, so each line is one JSON object. Health probes log at `Debug`.
 
+## Upgrading to this release (release blocker)
+
+**Stop every old gateway before starting a new one on the same metadata database.** Never run two releases against one metadata database at the same time. From this release, deleted objects are kept in `object_versions` and erasure-coded objects in `object_shards`. An older gateway doesn't know those tables. It would treat their blobs as unreferenced and delete them, which loses data that can no longer be restored. The new schema stamps `PRAGMA user_version = 2`, so a later release can refuse to start against a database newer than itself.
+
 ## Redundancy mode
+
+Every gateway in a deployment must run the same `Redundancy:Mode` and redundancy settings. Gateways configured differently place, size quorums for, and repair the same data differently.
 
 `Gateway:Redundancy:Mode` chooses how writes are placed (BlobStorage #7, #8):
 

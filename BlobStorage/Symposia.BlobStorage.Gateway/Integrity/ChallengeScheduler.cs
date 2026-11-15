@@ -73,6 +73,7 @@ public sealed class ChallengeScheduler(
         }
 
         var node = replicas[Random.Shared.Next(replicas.Count)];
+        node.ProofCapable |= store.IsMerkleCapable(node.Id);
         var result = await ChallengeAsync(node, record, TimeSpan.FromSeconds(Math.Max(1, options.Value.Redundancy.ChallengeTimeoutSeconds)), ct);
         Record(node, record, result);
         return result;
@@ -117,8 +118,9 @@ public sealed class ChallengeScheduler(
 
             if (root is not null)
             {
-                // No proof. A node known to produce proofs is dodging, and echoing back the CID we sent proves
-                // nothing (review: Carl #1). Only a node that never has (an older release) gets the whole-blob
+                // No proof. A node that returned a Merkle root from a write (recorded in merkle_nodes, so it
+                // survives restarts) supports proofs and is dodging; echoing back the CID we sent proves nothing
+                // (review: Carl #1). Only a node that never returned a root, an older release, gets the whole-blob
                 // comparison, the protocol's documented fallback for nodes without storage.integrity.merkle.v1.
                 return node.ProofCapable || response.Sha256Hex.Length == 0 ? ChallengeResult.Failed
                     : response.Sha256Hex.Equals(record.Cid, StringComparison.OrdinalIgnoreCase) ? ChallengeResult.Passed : ChallengeResult.Failed;
