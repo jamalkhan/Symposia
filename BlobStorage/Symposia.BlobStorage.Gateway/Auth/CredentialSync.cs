@@ -383,3 +383,49 @@ public sealed class AuditForwarder : BackgroundService
         }
     }
 }
+
+/// <summary>
+/// The HTTP handler for every call to the Authority (#245 FR6): presents this gateway's client certificate and
+/// verifies the Authority by pinned fingerprint, or by a configured CA. A mismatch fails the call; there is no
+/// fallback to cleartext or to no verification. Built per handler lifetime, so rotated certificate files are picked
+/// up without a restart.
+/// </summary>
+public static class AuthorityTls
+{
+    public static HttpMessageHandler Handler(CredentialAuthorityOptions o)
+    {
+        var handler = new SocketsHttpHandler { EnableMultipleHttp2Connections = true };
+        if (o.ClientCertificatePath.Length > 0)
+        {
+            handler.SslOptions.ClientCertificates =
+                [Domain.TlsPin.Load(o.ClientCertificatePath, o.ClientKeyPath, o.ClientCertificatePassword)];
+        }
+
+        if (o.ServerFingerprints.Length > 0)
+        {
+            var pins = o.ServerFingerprints;
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) =>
+                Domain.TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow);
+        }
+        else if (o.ServerCaPath.Length > 0)
+        {
+            var ca = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromPemFile(o.ServerCaPath);
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+            {
+                if (certificate is null || errors.HasFlag(System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch)
+                    || errors.HasFlag(System.Net.Security.SslPolicyErrors.RemoteCertificateNotAvailable))
+                {
+                    return false;
+                }
+
+                using var chain = new System.Security.Cryptography.X509Certificates.X509Chain();
+                chain.ChainPolicy.TrustMode = System.Security.Cryptography.X509Certificates.X509ChainTrustMode.CustomRootTrust;
+                chain.ChainPolicy.CustomTrustStore.Add(ca);
+                chain.ChainPolicy.RevocationMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck;
+                return chain.Build(new System.Security.Cryptography.X509Certificates.X509Certificate2(certificate));
+            };
+        }
+
+        return handler;
+    }
+}

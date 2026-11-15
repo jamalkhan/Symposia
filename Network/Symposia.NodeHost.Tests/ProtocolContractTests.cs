@@ -123,6 +123,11 @@ public sealed class ProtocolContractTests
 
     // ── Golden fixtures still parse ───────────────────────────────────────────
 
+    private static readonly JsonSerializerOptions AuthorityJson = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
     public static TheoryData<string> Fixtures()
     {
         var data = new TheoryData<string>();
@@ -153,6 +158,13 @@ public sealed class ProtocolContractTests
                 break;
             case "protocol-schedule":
                 Assert.NotNull(JsonSerializer.Deserialize<ProtocolSchedule>(text, JsonSerializerOptions.Web)!.Features);
+                break;
+            case "authority-snapshot": // Credential Authority → gateway (BlobStorage #3, #245)
+                Assert.NotEmpty(JsonSerializer.Deserialize<Symposia.BlobStorage.Domain.Credentials.AuthoritySnapshot>(text, AuthorityJson)!.Credentials);
+                break;
+            case "authority-delta":
+                var delta = JsonSerializer.Deserialize<Symposia.BlobStorage.Domain.Credentials.AuthorityDelta>(text, AuthorityJson)!;
+                Assert.True(delta.Version > delta.FromVersion, $"{fixture}: a delta moves forward");
                 break;
             default:
                 Assert.Fail($"{fixture}: no deserialization test for fixture folder '{kind}'. Add one here.");

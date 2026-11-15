@@ -283,6 +283,24 @@ public sealed class CredentialAuthorityOptions
     /// </summary>
     public double ReconcileMinutes { get; set; } = 10;
 
+    // Mutual TLS with the Authority (#245 FR6). Empty = no client certificate (the Authority's Off/Permissive modes).
+
+    /// <summary>This gateway's client certificate: PFX, or PEM (key in the file or <see cref="ClientKeyPath"/>).</summary>
+    public string ClientCertificatePath { get; set; } = "";
+
+    public string ClientKeyPath { get; set; } = "";
+
+    public string ClientCertificatePassword { get; set; } = "";
+
+    /// <summary>
+    /// Pinned SHA-256 fingerprints of the Authority's server certificate (several, so it can rotate with overlap).
+    /// Pinning replaces CA validation, like storage-node TLS (#142).
+    /// </summary>
+    public string[] ServerFingerprints { get; set; } = [];
+
+    /// <summary>Alternatively, a CA (PEM) the Authority's certificate must chain to, with normal name checks.</summary>
+    public string ServerCaPath { get; set; } = "";
+
     /// <summary>This gateway's ID in audit events; empty = the machine name.</summary>
     public string GatewayId { get; set; } = "";
 

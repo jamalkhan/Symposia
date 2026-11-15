@@ -8,10 +8,15 @@ namespace Symposia.BlobStorage.CredentialAuthority;
 /// Pushes each new state version to a gateway (#3 FR5.18). It watches the version in Postgres rather than an
 /// in-process event, so any Authority replica serves any gateway and sees every replica's writes.
 /// </summary>
-public sealed class WatchService(AuthorityStore store, IOptions<AuthorityOptions> options) : Protocol.Credentials.CredentialAuthority.CredentialAuthorityBase
+public sealed class WatchService(AuthorityStore store, IOptions<AuthorityOptions> options, InternalTls tls) : Protocol.Credentials.CredentialAuthority.CredentialAuthorityBase
 {
     public override async Task Watch(WatchRequest request, IServerStreamWriter<StateVersion> responseStream, ServerCallContext context)
     {
+        if (tls.Refuse(context.GetHttpContext()) is { } why)
+        {
+            throw new RpcException(new Status(StatusCode.PermissionDenied, why)); // #245 FR6
+        }
+
         if (!Tokens.Matches(context.RequestHeaders.GetValue("x-service-token"), options.Value.ServiceToken))
         {
             throw new RpcException(new Status(StatusCode.Unauthenticated, "service token required"));

@@ -41,8 +41,11 @@ public static class BlobGatewayApp
             if (authority.Url.Length > 0) http.BaseAddress = new Uri(authority.Url.TrimEnd('/') + "/");
             http.DefaultRequestHeaders.Add("X-Service-Token", authority.ServiceToken);
             http.Timeout = TimeSpan.FromSeconds(10);
-        });
-        builder.Services.AddHttpClient(CredentialSync.HttpClientName + "-grpc", http => http.Timeout = Timeout.InfiniteTimeSpan);
+        }).ConfigurePrimaryHttpMessageHandler(sp => AuthorityTls.Handler(
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.CredentialAuthority)); // mTLS (#245)
+        builder.Services.AddHttpClient(CredentialSync.HttpClientName + "-grpc", http => http.Timeout = Timeout.InfiniteTimeSpan)
+            .ConfigurePrimaryHttpMessageHandler(sp => AuthorityTls.Handler(
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.CredentialAuthority));
         builder.Services.AddSingleton<CredentialSync>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<CredentialSync>());
         builder.Services.AddSingleton<AuditForwarder>();
