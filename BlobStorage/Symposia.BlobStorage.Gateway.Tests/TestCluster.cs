@@ -53,6 +53,9 @@ internal sealed class TestCluster : IDisposable
 
     public List<NodeConnection> Connections { get; } = [];
 
+    /// <summary>Where node <paramref name="index"/> keeps its blobs and manifest.</summary>
+    public string NodeDataDir(int index) => _nodeFactories[index].DataDir;
+
     public ClusterRegistry Registry { get; }
 
     public GatewayFactory Gateway { get; }

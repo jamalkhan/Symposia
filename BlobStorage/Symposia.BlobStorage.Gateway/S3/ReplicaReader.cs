@@ -19,9 +19,12 @@ public static class ReplicaReader
 
     public static IReadOnlyList<NodeConnection> Order(INodeRegistry nodes, IEnumerable<string> nodeIds)
     {
+        // Healthiest first (#8 FR7.1): stage 3+ nodes are out of the read pool, stage 2 sorts after
+        // healthy peers but still serves when nothing better is up.
         var ids = nodeIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return nodes.All.Where(n => ids.Contains(n.Id))
+        return nodes.All.Where(n => ids.Contains(n.Id) && n.PenaltyStage < 3)
             .OrderByDescending(n => n.IsHealthy)
+            .ThenBy(n => n.PenaltyStage >= 2)
             .ThenByDescending(n => n.LastProbeTime)
             .ToList();
     }

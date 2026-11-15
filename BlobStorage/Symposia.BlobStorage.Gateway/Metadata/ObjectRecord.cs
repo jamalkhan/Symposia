@@ -29,4 +29,15 @@ public sealed record ObjectRecord(
 
     /// <summary>The region assignment this object was placed under (#7 FR6 metadata; empty = global).</summary>
     public IReadOnlyList<string> Regions { get; init; } = [];
+
+    /// <summary>Soft placement rules bent when this object was placed (#8 FR2.3).</summary>
+    public IReadOnlyList<PlacementGapRecord> PlacementGaps { get; init; } = [];
+
+    /// <summary>Hex Merkle root over 64 KiB leaves, for range challenges (#8 FR6.4); null when the nodes didn't report one.</summary>
+    public string? MerkleRoot { get; init; }
+
+    /// <summary><c>replica</c> (full copies in <see cref="NodeIds"/>) or an erasure scheme like <c>rs:4+2</c> (shards in object_shards, #8 FR5).</summary>
+    public string Scheme { get; init; } = "replica";
+
+    public bool IsErasureCoded => Scheme != "replica";
 }

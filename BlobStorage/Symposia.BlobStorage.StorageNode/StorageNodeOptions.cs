@@ -54,6 +54,20 @@ public sealed class StorageNodeOptions
     /// <summary>Report not ready until the region is verified (#1 FR-25). Off for standalone/dev use.</summary>
     public bool RequireRegionVerification { get; set; }
 
+    // Fault-domain inputs reported in probes (#8 FR2.1). Self-declared until region verification exists.
+
+    /// <summary>This node's public IP as the operator knows it; gateways prefer the address they connect to.</summary>
+    public string PublicIp { get; set; } = "";
+
+    /// <summary>The node's autonomous system number (ISP / hosting provider); 0 = unknown.</summary>
+    public long Asn { get; set; }
+
+    /// <summary>The data center or colocation facility the node is in, if any.</summary>
+    public string FacilityId { get; set; } = "";
+
+    /// <summary>Upload capacity for the replication bandwidth budget (#8 FR3.3); 0 = unknown, the gateway assumes a default.</summary>
+    public long UploadBytesPerSecond { get; set; }
+
     /// <summary>Performance tier reported in <c>/ready</c> (Requirements/BlobStorage/performance-tiers-and-workload-routing.md).</summary>
     public int Tier { get; set; }
 

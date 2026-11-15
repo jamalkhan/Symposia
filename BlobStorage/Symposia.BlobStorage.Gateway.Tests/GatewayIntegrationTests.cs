@@ -525,6 +525,8 @@ internal sealed class NodeFactory
     private readonly string _dataDir =
         Path.Combine(Path.GetTempPath(), $"symposia-gw-node-{Guid.NewGuid():N}");
 
+    public string DataDir => _dataDir;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureAppConfiguration((_, cfg) =>

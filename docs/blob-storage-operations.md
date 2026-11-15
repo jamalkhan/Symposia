@@ -47,3 +47,15 @@ Enterprise tenants with very large objects or slow networks can ask for a longer
 3. Roll the gateways.
 
 The override applies only to that tenant's writes.
+
+## Placement, penalties and repair
+
+In network mode, placement follows `redundancy-and-data-integrity.md` (BlobStorage #8):
+
+- **Fault domains.** No two copies of a blob ever share a public IP. The gateway uses the address it connects to, falling back to the node's `StorageNode:PublicIp`. Copies avoid sharing a /24 subnet, `StorageNode:Asn` or `StorageNode:FacilityId` where possible. Each such rule bent is recorded on the object as a placement gap (see `?meta`), and the repair scan improves it once a compliant node exists.
+- **Region precedence.** The object's `x-symposia-regions` header on PUT, then the longest matching folder rule (`PUT /v1/buckets/{b}/regions?prefix=…`), then the bucket's assignment, then global.
+- **Erasure coding.** `PUT /v1/buckets/{b}/scheme {"scheme":"rs:4+2"}` stores new single-PUT objects as Reed–Solomon shards. Multipart uploads into such a bucket are still stored as full copies.
+- **Penalties.** `POST /admin/nodes/penalty {"node":"…","stage":0-4}` sets a node's penalty stage until the on-chain penalty system feeds it. Stage 1 and 2 add one and two extra copies of the node's blobs. Stage 3 takes the node out of placement and reads and migrates its data. Stage 4 audits its blobs, and any left short of target are repaired at P0.
+- **Repair tiers.** P0 ≤ 5 min, P1 ≤ 30 min, P2 ≤ 2 h, P3 ≤ 24 h. `GET /admin/repair/sla?hours=24` reports compliance per tier. `GET /admin/placement/ip-violations` should always return `count: 0`.
+- **Bandwidth.** Repair traffic is capped per node at `Redundancy:BandwidthBudgetPercent` (25 %) of its `StorageNode:UploadBytesPerSecond`, or of `Redundancy:DefaultNodeUploadBytesPerSecond` when the node reports none. Stage 3 and 4 nodes get `RecoveryBandwidthBudgetPercent`.
+- **Challenges.** About every `Redundancy:ChallengeIntervalSeconds`, at random, a random replica must prove a random 64 KiB leaf against the Merkle root recorded at write time. Failures show in `/admin/nodes` as `challengeFailures` and `recommendedPenaltyStage`.

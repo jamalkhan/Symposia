@@ -62,7 +62,8 @@ public sealed class IntegritySelfCheckWorker : BackgroundService
                 _logger.LogError(ex, "Integrity self-check encountered an unexpected error; will retry next cycle.");
             }
 
-            var interval = TimeSpan.FromSeconds(_options.Value.IntegrityCheckIntervalSeconds);
+            // Randomized (#8 FR6.3): 50–150 % of the interval, so no one can predict when blobs are re-hashed.
+            var interval = TimeSpan.FromSeconds(_options.Value.IntegrityCheckIntervalSeconds * (0.5 + Random.Shared.NextDouble()));
             await Task.Delay(interval, stoppingToken);
         }
     }

@@ -39,9 +39,15 @@ public sealed class QuorumWriter
     private readonly Health.GatewayMetrics? _metrics;
     private readonly ILogger _logger;
 
+    private readonly RegionAssignmentResolver _regions;
+    private readonly Erasure.ErasureObjects? _erasure;
+
     public QuorumWriter(INodeRegistry nodes, GatewayMetadataStore metadata, IOptions<GatewayOptions> options,
-        Repair.RepairQueue repairQueue, PlacementEngine? placement = null, Health.GatewayMetrics? metrics = null, ILogger<QuorumWriter>? logger = null)
+        Repair.RepairQueue repairQueue, PlacementEngine? placement = null, Health.GatewayMetrics? metrics = null, ILogger<QuorumWriter>? logger = null,
+        RegionAssignmentResolver? regions = null, Erasure.ErasureObjects? erasure = null)
     {
+        _erasure = erasure;
+        _regions = regions ?? new RegionAssignmentResolver(metadata);
         _nodes = nodes;
         _metadata = metadata;
         _options = options;
@@ -63,9 +69,15 @@ public sealed class QuorumWriter
     /// <summary>As <see cref="WriteAsync"/>, also reporting whether the commit replaced an existing object (#204).</summary>
     public async Task<(ObjectRecord? Record, bool Replaced)> WriteObjectAsync(
         string tenantId, string bucket, string key, string contentType,
-        Stream body, CancellationToken cancellationToken, long? expectedSize = null)
+        Stream body, CancellationToken cancellationToken, long? expectedSize = null, IReadOnlyList<string>? objectRegions = null)
     {
-        var blob = await WriteBlobAsync(tenantId, bucket, key, body, cancellationToken, expectedSize);
+        // A bucket configured for erasure coding stores shards instead of copies (#8 FR5.1).
+        if (_erasure is not null && Domain.Erasure.ErasureScheme.TryParse(_metadata.BucketScheme(bucket), out var scheme))
+        {
+            return await _erasure.WriteAsync(tenantId, bucket, key, contentType, body, scheme, _regions.Resolve(bucket, key, objectRegions), cancellationToken);
+        }
+
+        var blob = await WriteBlobAsync(tenantId, bucket, key, body, cancellationToken, expectedSize, objectRegions);
         if (blob is null)
             return (null, false);
 
@@ -82,6 +94,8 @@ public sealed class QuorumWriter
         {
             TargetCopies = blob.Requirement.RepairTarget,
             Regions = blob.Requirement.Regions,
+            PlacementGaps = blob.Gaps.Select(g => new PlacementGapRecord(g.Rule, g.Detail)).ToList(),
+            MerkleRoot = blob.MerkleRoot,
         };
 
     /// <summary>
@@ -133,7 +147,7 @@ public sealed class QuorumWriter
         IReadOnlyList<string>? regions = null)
     {
         expectedSize ??= body.CanSeek ? body.Length - body.Position : null;
-        var requirement = _placement.Requirement(regions ?? _metadata.BucketRegions(bucket), expectedSize);
+        var requirement = _placement.Requirement(_regions.Resolve(bucket, key, regions), expectedSize);
         PlacementPlan plan;
         try
         {
@@ -249,8 +263,13 @@ public sealed class QuorumWriter
         var remainder = completions.Count == 0
             ? Task.FromResult<IReadOnlyList<string>>([])
             : AwaitRemainderAsync(completions, cid!, TimeSpan.FromSeconds(Math.Max(1, _options.Value.Redundancy.RemainderTimeoutSeconds)));
+        // The Merkle root is kept only when every confirming node computed the same one (#8 FR6.4).
+        var roots = confirmed.Select(c => c.Response!.MerkleRoot).ToList();
+        var merkleRoot = roots.All(r => r.Length == Domain.MerkleTree.HashSize && r.Equals(roots[0]))
+            ? Convert.ToHexStringLower(roots[0].ToByteArray()) : null;
         return new BlobWriteResult(cid!, confirmed[0].Response!.SizeBytes, confirmed.Select(c => c.Node.Id).ToList())
         {
+            MerkleRoot = merkleRoot,
             Requirement = requirement,
             Gaps = plan.Gaps,
             Pending = completions.Count,
@@ -431,6 +450,9 @@ public sealed record BlobWriteResult(string Cid, long SizeBytes, IReadOnlyList<s
 
     /// <summary>Soft placement rules bent for this write (#8 FR2.3).</summary>
     public IReadOnlyList<PlacementGap> Gaps { get; init; } = [];
+
+    /// <summary>Hex Merkle root agreed by every confirming node, or null.</summary>
+    public string? MerkleRoot { get; init; }
 
     /// <summary>Copies still landing when quorum was reached.</summary>
     public int Pending { get; init; }

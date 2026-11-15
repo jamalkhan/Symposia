@@ -21,6 +21,12 @@
       "description": "Storage RPCs carry an EIP-191 node-identity token; the node accepts only registered network members.",
       "issue": 140,
       "history": [{ "stage": "offered", "release": "0.1.0" }]
+    },
+    {
+      "name": "storage.integrity.merkle.v1",
+      "description": "Writes return a Merkle root over 64 KiB leaves, and IntegrityChallenge answers a leaf with an inclusion proof (BlobStorage #8 FR6.4). Gateways fall back to whole-blob hashes for nodes without it.",
+      "issue": 8,
+      "history": [{ "stage": "offered", "release": "0.1.0" }]
     }
   ]
 }

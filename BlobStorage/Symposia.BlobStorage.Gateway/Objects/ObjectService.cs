@@ -33,7 +33,7 @@ public enum ServeOutcome
 /// its own history entry here, the one hook point, and the adapters only map results to XML or JSON.
 /// </summary>
 public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry nodes, RepairQueue repairQueue, Quorum.QuorumWriter writer,
-    Quorum.TenantQuota quota, Health.GatewayMetrics metrics, ILogger<ObjectService> logger)
+    Quorum.TenantQuota quota, Health.GatewayMetrics metrics, Erasure.ErasureObjects erasure, ILogger<ObjectService> logger)
 {
     /// <summary>Reads an object (or a range of it) into the response, recording a view.</summary>
     public Task<ServeOutcome> GetAsync(HttpContext ctx, string bucket, string key)
@@ -57,7 +57,8 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         var tenantId = ctx.Items["TenantId"] as string ?? "";
         var expected = S3.UploadBody.ExpectedLength(ctx.Request);
         quota.EnsureRoom(tenantId, expected); // before placement or any node contact (#1 FR-2)
-        var (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected);
+        var (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected,
+            Placement.RegionAssignmentResolver.FromHeader(ctx.Request));
         if (record is not null)
         {
             Fill(written, record, replaced);
@@ -118,6 +119,10 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         var isRange = rangeHeader is not null && TryParseRange(rangeHeader, record.SizeBytes, out offset, out length);
         var total = isRange ? length : record.SizeBytes;
         var request = new ReadBlobRequest { Cid = record.Cid, Offset = offset, Length = isRange ? length : 0 };
+        if (record.IsErasureCoded)
+        {
+            return await ServeErasureCodedAsync(record, isRange, offset, total, ctx, view);
+        }
 
         // Try each replica (healthy ones first) until one starts streaming (#135); shared with Complete (#5).
         var replicas = ReplicaReader.Order(nodes, record.NodeIds);
@@ -266,6 +271,58 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
                 ctx.Abort();
                 if (view is not null) view.Outcome = "Error";
             }
+        }
+
+        return ServeOutcome.Served;
+    }
+
+    /// <summary>An erasure-coded object, decoded from any k shards (#8 FR5); full reads are CID-checked as for copies.</summary>
+    private async Task<ServeOutcome> ServeErasureCodedAsync(ObjectRecord record, bool isRange, long offset, long length, HttpContext ctx,
+        History.PendingOperation? view)
+    {
+        using var hasher = isRange ? null : IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var started = false;
+        try
+        {
+            var ok = await erasure.ReadAsync(record, offset, length, ctx.Response.Body, hasher, ctx.RequestAborted, () =>
+            {
+                started = true;
+                ctx.Response.ContentType = record.ContentType;
+                ctx.Response.Headers.ETag = $"\"{record.ETag}\"";
+                ctx.Response.Headers.LastModified = record.LastModified.ToString("R");
+                if (isRange)
+                {
+                    ctx.Response.StatusCode = 206;
+                    ctx.Response.Headers.ContentRange = $"bytes {offset}-{offset + length - 1}/{record.SizeBytes}";
+                }
+
+                ctx.Response.ContentLength = length;
+            });
+            if (!ok)
+            {
+                Health.RequestLog.Error(ctx, "fewer than k shards reachable");
+                return ServeOutcome.NoReplica;
+            }
+        }
+        catch (IOException ex) when (started && !ctx.RequestAborted.IsCancellationRequested)
+        {
+            logger.LogWarning("Erasure-coded read of {Bucket}/{Key} lost too many shards mid-stream: {Message}", record.Bucket, record.Key, ex.Message);
+            ctx.Abort();
+            repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.MissingReplica) { Priority = RepairPriority.P0 });
+            return ServeOutcome.Served;
+        }
+
+        if (view is not null)
+        {
+            (view.Size, view.Etag, view.Cid) = (length, record.ETag, record.Cid);
+        }
+
+        if (hasher is not null && !Convert.ToHexStringLower(hasher.GetHashAndReset()).Equals(record.Cid, StringComparison.Ordinal))
+        {
+            logger.LogError("CID mismatch decoding {Bucket}/{Key}; aborting and repairing its shards.", record.Bucket, record.Key);
+            repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.CorruptReplica));
+            Health.RequestLog.Error(ctx, "CID mismatch");
+            ctx.Abort();
         }
 
         return ServeOutcome.Served;

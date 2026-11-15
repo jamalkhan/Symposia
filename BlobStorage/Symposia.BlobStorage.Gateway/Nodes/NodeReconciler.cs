@@ -76,7 +76,7 @@ public sealed class NodeReconciler
         foreach (var cid in nodeCids)
         {
             ct.ThrowIfCancellationRequested();
-            if (_store.GetObjectByCid(cid) is null)
+            if (!_store.IsCidReferenced(cid))
             {
                 // No object in the entire metadata store references this CID — true orphan.
                 _logger.LogDebug(

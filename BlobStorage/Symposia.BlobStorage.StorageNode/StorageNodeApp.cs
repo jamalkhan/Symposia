@@ -159,6 +159,8 @@ public static class StorageNodeApp
             features.Add(ProtocolFeatures.StorageRpcAuthV1);
         }
 
+        features.Add(ProtocolFeatures.StorageIntegrityMerkleV1);
+
         app.MapGet(NodeServices.Path, (NodeIdentity identity, Microsoft.Extensions.Options.IOptions<NodeNetworkOptions> network) =>
         {
             var advertised = network.Value.AdvertisedEndpoint;

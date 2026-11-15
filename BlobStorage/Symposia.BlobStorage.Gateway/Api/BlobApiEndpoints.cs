@@ -114,6 +114,11 @@ public static partial class BlobApiEndpoints
                     // #7 FR5: "quorum" until every target copy has confirmed, then "full".
                     replication = record.Replication == ReplicationState.Full ? "full" : "quorum",
                     targetCopies = record.TargetCopies, regions = record.Regions,
+                    // #8: soft placement rules bent for this object, and its storage scheme and shards.
+                    placementGaps = record.PlacementGaps.Select(g => new { rule = g.Rule, detail = g.Detail }),
+                    scheme = record.Scheme,
+                    shards = record.IsErasureCoded ? store.Shards(bucket, key).Select(sh => new { index = sh.Index, cid = sh.Cid, node = sh.NodeId }) : null,
+                    pendingReplicas = store.PendingReplicas(record.Cid).Select(p => new { node = p.NodeId, stage = p.Stage, extra = p.Extra, done = p.Done }),
                 });
             }
 
@@ -142,10 +147,14 @@ public static partial class BlobApiEndpoints
 
         // Region assignment (#7 FR1/FR3, #8 FR1.1): where the bucket's new objects are placed and which
         // regions their write quorum must include. Applies to writes from now on; existing objects keep theirs.
-        v1.MapGet("/buckets/{bucket}/regions", (string bucket, HttpContext ctx, GatewayMetadataStore store) =>
-            !OwnsBucket(ctx, store, bucket) ? NoSuchBucket(bucket) : Results.Ok(new { regions = store.BucketRegions(bucket) }));
+        // ?prefix= sets a folder rule instead (#8 FR1.1): object header, then longest folder rule, then bucket.
+        v1.MapGet("/buckets/{bucket}/regions", (string bucket, string? prefix, HttpContext ctx, GatewayMetadataStore store) =>
+            !OwnsBucket(ctx, store, bucket) ? NoSuchBucket(bucket)
+            : prefix is null
+                ? Results.Ok(new { regions = store.BucketRegions(bucket), folders = store.PrefixRegions(bucket).Select(r => new { prefix = r.Prefix, regions = r.Regions }) })
+                : Results.Ok(new { prefix, regions = store.PrefixRegions(bucket).FirstOrDefault(r => r.Prefix == prefix).Regions ?? [] }));
 
-        v1.MapPut("/buckets/{bucket}/regions", (string bucket, RegionAssignment body, HttpContext ctx, GatewayMetadataStore store,
+        v1.MapPut("/buckets/{bucket}/regions", (string bucket, string? prefix, RegionAssignment body, HttpContext ctx, GatewayMetadataStore store,
             Microsoft.Extensions.Options.IOptions<GatewayOptions> options) =>
         {
             if (!OwnsBucket(ctx, store, bucket))
@@ -165,8 +174,31 @@ public static partial class BlobApiEndpoints
                 return Error(409, "RegionsNotEnforced", "This gateway runs in bootstrap redundancy mode and does not place by region.");
             }
 
+            if (prefix is { Length: > 0 })
+            {
+                store.SetPrefixRegions(bucket, prefix, regions);
+                return Results.Ok(new { prefix, regions });
+            }
+
             store.SetBucketRegions(bucket, regions);
             return Results.Ok(new { regions });
+        });
+
+        // Erasure coding per bucket (#8 FR5.1): "rs:k+m" stores new objects as shards; "replica" (default) as copies.
+        v1.MapPut("/buckets/{bucket}/scheme", (string bucket, SchemeChoice body, HttpContext ctx, GatewayMetadataStore store) =>
+        {
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            if (body.Scheme is not ("replica" or null) && !Domain.Erasure.ErasureScheme.TryParse(body.Scheme, out _))
+            {
+                return Error(400, "InvalidArgument", "scheme must be \"replica\" or \"rs:k+m\" with 1 ≤ k, 1 ≤ m, k + m ≤ 32.");
+            }
+
+            store.SetBucketScheme(bucket, body.Scheme is "replica" ? null : body.Scheme);
+            return Results.Ok(new { scheme = body.Scheme ?? "replica" });
         });
 
         v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects) =>
@@ -241,6 +273,8 @@ public static partial class BlobApiEndpoints
         store.BucketExists(bucket) && store.BucketTenant(bucket) == ctx.Items["TenantId"] as string;
 
     private sealed record RegionAssignment(string[]? Regions);
+
+    private sealed record SchemeChoice(string? Scheme);
 
     [System.Text.RegularExpressions.GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]
     private static partial System.Text.RegularExpressions.Regex RegionCode();

@@ -79,7 +79,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         {
             // A Pipe lets us stream gRPC chunks straight to disk without buffering the full blob in memory.
             var pipe = new Pipe();
-            var writeTask = _blobStore.WriteAsync(pipe.Reader.AsStream(), context.CancellationToken);
+            var writeTask = _blobStore.WriteWithMerkleAsync(pipe.Reader.AsStream(), context.CancellationToken);
 
             Exception? pumpError = null;
             try
@@ -122,7 +122,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
                 await pipe.Writer.CompleteAsync(pumpError);
             }
 
-            (Cid Cid, long SizeBytes) written;
+            (Cid Cid, long SizeBytes, byte[] MerkleRoot) written;
             try
             {
                 written = await writeTask;
@@ -139,7 +139,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
                 throw refused;
             }
 
-            var (cid, sizeBytes) = written;
+            var (cid, sizeBytes, merkleRoot) = written;
             stored = sizeBytes;
 
             _manifestStore.Upsert(new BlobRecord(
@@ -153,7 +153,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
                 ChecksumVerifiedAt: null,
                 BlobStatus.Active));
 
-            return new WriteBlobResponse { Cid = cid.Value, SizeBytes = sizeBytes };
+            return new WriteBlobResponse { Cid = cid.Value, SizeBytes = sizeBytes, MerkleRoot = ByteString.CopyFrom(merkleRoot) };
         }
         finally
         {
@@ -225,12 +225,22 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
             VolumeFreeBytes = capacity.Free,
             ReserveBytes = capacity.Reserve,
             Region = _options.Value.Region,
+            PublicIp = _options.Value.PublicIp,
+            Asn = _options.Value.Asn,
+            FacilityId = _options.Value.FacilityId,
+            UploadBytesPerSecond = _options.Value.UploadBytesPerSecond,
+            IntegrityFailures = (long)_metrics.IntegrityFailures.Value,
         });
     }
 
     public override async Task<IntegrityChallengeResponse> IntegrityChallenge(
         IntegrityChallengeRequest request, ServerCallContext context)
     {
+        if (request.MerkleProof)
+        {
+            return await MerkleChallengeAsync(request, context.CancellationToken);
+        }
+
         var (cid, remaining, offset) = ResolveRange(request.Cid, request.Offset, request.Length);
 
         using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -251,6 +261,44 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         }
 
         return new IntegrityChallengeResponse { Sha256Hex = Convert.ToHexStringLower(hasher.GetHashAndReset()) };
+    }
+
+    /// <summary>
+    /// Proof of storage (#8 FR6.4): the requested 64 KiB leaf and its sibling hashes. Answering needs the
+    /// leaf's actual bytes, so a node that kept only hashes can't pass.
+    /// </summary>
+    private async Task<IntegrityChallengeResponse> MerkleChallengeAsync(IntegrityChallengeRequest request, CancellationToken ct)
+    {
+        if (!Cid.TryParse(request.Cid, out var cid) || !_blobStore.Exists(cid))
+        {
+            throw new RpcException(new Status(StatusCode.NotFound, $"Blob '{request.Cid}' not found."));
+        }
+
+        var leaves = await _blobStore.ReadLeavesAsync(cid, ct);
+        if (request.LeafIndex < 0 || request.LeafIndex >= leaves.Count)
+        {
+            throw new RpcException(new Status(StatusCode.OutOfRange, "Leaf index is outside the blob."));
+        }
+
+        var data = new byte[MerkleTree.LeafSize];
+        int filled = 0;
+        await using (var stream = _blobStore.OpenRead(cid, request.LeafIndex * MerkleTree.LeafSize))
+        {
+            int read;
+            while (filled < data.Length && (read = await stream.ReadAsync(data.AsMemory(filled), ct)) > 0)
+            {
+                filled += read;
+            }
+        }
+
+        var response = new IntegrityChallengeResponse
+        {
+            ProofSupported = true,
+            LeafData = ByteString.CopyFrom(data, 0, filled),
+            LeafCount = leaves.Count,
+        };
+        response.Siblings.AddRange(MerkleTree.Proof(leaves, request.LeafIndex).Select(ByteString.CopyFrom));
+        return response;
     }
 
     public override async Task ListBlobs(

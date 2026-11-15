@@ -17,6 +17,8 @@ public static class ProtocolFeatures
 
     public const string StorageRpcAuthV1 = "storage.rpc.auth.v1";
 
+    public const string StorageIntegrityMerkleV1 = "storage.integrity.merkle.v1";
+
     private static readonly Lazy<ProtocolRegistry> LazyRegistry = new(Load);
 
     /// <summary>The embedded <c>protocol/features.json</c>.</summary>

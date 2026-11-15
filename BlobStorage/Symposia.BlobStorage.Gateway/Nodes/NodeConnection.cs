@@ -119,6 +119,42 @@ public sealed class NodeConnection : IDisposable
     /// <summary>The node's region: its own report, else configuration, else empty (no region).</summary>
     public string Region => LastProbe?.Region is { Length: > 0 } reported ? reported : ConfiguredRegion ?? "";
 
+    // ── Fault domains (#8 FR2) ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The IP this gateway actually connects to (the URL's host, resolved by the registry's probe). Preferred
+    /// over the node's self-report for the hard same-IP rule: a node can't misstate where it's reached.
+    /// </summary>
+    public System.Net.IPAddress? ObservedIp { get; set; }
+
+    /// <summary>The address the same-IP rule compares: observed, else self-reported, else none.</summary>
+    public string PublicIp => ObservedIp?.ToString()
+        ?? (System.Net.IPAddress.TryParse(LastProbe?.PublicIp, out var reported) ? reported.ToString() : "");
+
+    /// <summary>The /24 (IPv4) or /48 (IPv6) the node's address is in; empty when unknown.</summary>
+    public string Subnet => System.Net.IPAddress.TryParse(PublicIp, out var ip)
+        ? ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            ? string.Join('.', ip.GetAddressBytes().Take(3)) + ".0/24"
+            : Convert.ToHexString(ip.GetAddressBytes()[..6]) + "::/48"
+        : "";
+
+    /// <summary>Self-reported ASN (0 = unknown): best effort until region verification attests it.</summary>
+    public long Asn => LastProbe?.Asn ?? 0;
+
+    /// <summary>Self-reported facility (empty = unknown).</summary>
+    public string Facility => LastProbe?.FacilityId ?? "";
+
+    // ── Penalties and integrity (#8 FR3, FR6) ─────────────────────────────────
+
+    /// <summary>Current penalty stage 0–4, from the penalty-stage system (#8 FR3).</summary>
+    public int PenaltyStage { get; set; }
+
+    /// <summary>Challenges this node failed since the gateway started (#8 FR6.4); feeds its penalty assessment.</summary>
+    public int ChallengeFailures { get; set; }
+
+    /// <summary>Upload capacity the node reports, for the replication bandwidth budget; 0 = unknown.</summary>
+    public long UploadBytesPerSecond => LastProbe?.UploadBytesPerSecond ?? 0;
+
     /// <summary>When gossip last reported this node alive.</summary>
     public DateTimeOffset? GossipLastSeen { get; set; }
 

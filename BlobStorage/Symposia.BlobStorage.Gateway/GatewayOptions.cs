@@ -180,6 +180,27 @@ public sealed class RedundancyOptions
     /// </summary>
     public NodeRegion[] NodeRegions { get; set; } = [];
 
+    /// <summary>
+    /// Share of a node's upload capacity background replication may use (#8 FR3.3, default 25 %).
+    /// A governance parameter; set here until governance wiring exists.
+    /// </summary>
+    public int BandwidthBudgetPercent { get; set; } = 25;
+
+    /// <summary>The share for nodes in penalty stage 3 or 4, whose data is being evacuated (#8 FR3.3).</summary>
+    public int RecoveryBandwidthBudgetPercent { get; set; } = 50;
+
+    /// <summary>Upload capacity assumed for nodes that report none (bytes/s).</summary>
+    public long DefaultNodeUploadBytesPerSecond { get; set; } = 100L * 1024 * 1024;
+
+    /// <summary>Most copies P3 opportunistic redundancy may add up to (#8 FR8.1, governance parameter); 0 = never beyond target.</summary>
+    public int MaxReplicationFactor { get; set; } = 8;
+
+    /// <summary>How often a random replica gets a Merkle range challenge, on average (#8 FR6.4); 0 = off.</summary>
+    public int ChallengeIntervalSeconds { get; set; } = 60;
+
+    /// <summary>How long a challenged node has to answer before it counts as failed.</summary>
+    public int ChallengeTimeoutSeconds { get; set; } = 10;
+
     public TimeSpan WriteQuorumTimeout(string tenantId) => TimeSpan.FromSeconds(Math.Max(1,
         TenantWriteQuorumTimeoutSeconds.TryGetValue(tenantId, out var seconds) ? seconds : WriteQuorumTimeoutSeconds));
 }

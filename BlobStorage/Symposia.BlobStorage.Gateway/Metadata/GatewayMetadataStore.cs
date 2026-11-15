@@ -159,6 +159,7 @@ public sealed partial class GatewayMetadataStore
 
         InitializeTenancy(conn);
         InitializeReplication(conn, _minCopies);
+        InitializeRedundancy(conn);
     }
 
     public bool BucketExists(string name)
@@ -209,7 +210,8 @@ public sealed partial class GatewayMetadataStore
 
     /// <summary>The columns <see cref="ReadObject"/> reads, in order; every query returning whole objects selects these.</summary>
     internal const string ObjectColumns =
-        "bucket, key, cid, size_bytes, content_type, last_modified, node_ids, etag_override, replication_state, target_copies, regions";
+        "bucket, key, cid, size_bytes, content_type, last_modified, node_ids, etag_override, replication_state, target_copies, regions, " +
+        "placement_gaps, merkle_root, scheme";
 
     internal static ObjectRecord ReadObject(SqliteDataReader r) => new(
         r.GetString(0), r.GetString(1),
@@ -223,6 +225,9 @@ public sealed partial class GatewayMetadataStore
         Replication = r.GetString(8) == "quorum" ? ReplicationState.Quorum : ReplicationState.Full,
         TargetCopies = r.GetInt32(9),
         Regions = SplitList(r.IsDBNull(10) ? null : r.GetString(10)),
+        PlacementGaps = ReadGaps(r.IsDBNull(11) ? null : r.GetString(11)),
+        MerkleRoot = r.IsDBNull(12) ? null : r.GetString(12),
+        Scheme = r.GetString(13),
     };
 
     /// <summary>Inserts or replaces an object; true when it replaced one (read inside the write's transaction, #204).</summary>
@@ -252,9 +257,10 @@ public sealed partial class GatewayMetadataStore
         (string Cid, string[] NodeIds)? previous = null;
         bool existed;
         long previousSize = 0;
+        var previousScheme = "replica";
         DateTimeOffset previousCommit = default;
         string previousEtag = "";
-        using (var old = Query(conn, "SELECT cid, node_ids, size_bytes, last_modified, COALESCE(etag_override, cid) FROM objects WHERE bucket = $b AND key = $k",
+        using (var old = Query(conn, "SELECT cid, node_ids, size_bytes, last_modified, COALESCE(etag_override, cid), scheme FROM objects WHERE bucket = $b AND key = $k",
                    ("$b", record.Bucket), ("$k", record.Key)))
         {
             old.Transaction = tx;
@@ -265,6 +271,7 @@ public sealed partial class GatewayMetadataStore
                 previousSize = r.GetInt64(2);
                 previousCommit = DateTimeOffset.Parse(r.GetString(3));
                 previousEtag = r.GetString(4);
+                previousScheme = r.GetString(5);
             }
 
             if (existed && r.GetString(0) != record.Cid)
@@ -294,14 +301,19 @@ public sealed partial class GatewayMetadataStore
             }
         }
 
+        if (existed && previousScheme != "replica" && previous is not null)
+        {
+            CollectShards(conn, tx, record.Bucket, record.Key); // the new version brings its own shards, if any
+        }
+
         var target = record.TargetCopies > 0 ? record.TargetCopies : (int?)null;
         Run(conn, tx, """
             INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, etag_override,
-                                 target_copies, replication_state, regions)
+                                 target_copies, replication_state, regions, placement_gaps, merkle_root, scheme)
             VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc, $eo,
                     COALESCE($tc, (SELECT target_copies FROM objects WHERE bucket = $b AND key = $k),
                              CAST((SELECT value FROM settings WHERE name = 'copy_floor') AS INTEGER), 1),
-                    'full', $rg)
+                    'full', $rg, $pg, $mr, $sc)
             ON CONFLICT(bucket, key) DO UPDATE SET
                 cid = excluded.cid,
                 size_bytes = excluded.size_bytes,
@@ -311,7 +323,10 @@ public sealed partial class GatewayMetadataStore
                 replica_count = excluded.replica_count,
                 etag_override = excluded.etag_override,
                 target_copies = excluded.target_copies,
-                regions = excluded.regions;
+                regions = excluded.regions,
+                placement_gaps = excluded.placement_gaps,
+                merkle_root = excluded.merkle_root,
+                scheme = excluded.scheme;
             """,
             ("$b", record.Bucket), ("$k", record.Key), ("$cid", record.Cid),
             ("$sz", record.SizeBytes), ("$ct", record.ContentType),
@@ -320,7 +335,8 @@ public sealed partial class GatewayMetadataStore
             ("$rc", record.NodeIds.Count),
             ("$eo", (object?)record.EtagOverride ?? DBNull.Value),
             ("$tc", target),
-            ("$rg", record.Regions.Count == 0 ? null : string.Join(',', record.Regions)));
+            ("$rg", record.Regions.Count == 0 ? null : string.Join(',', record.Regions)),
+            ("$pg", GapsJson(record.PlacementGaps)), ("$mr", record.MerkleRoot), ("$sc", record.Scheme));
         RefreshReplicationState(conn, tx, "WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key));
         CancelPendingDeletion(conn, tx, record.Cid);
         AdjustUsage(conn, tx, record.Bucket, record.SizeBytes - previousSize);
@@ -335,6 +351,14 @@ public sealed partial class GatewayMetadataStore
     private static DateTimeOffset TruncateToMilliseconds(DateTimeOffset t) =>
         new(t.UtcTicks - t.UtcTicks % TimeSpan.TicksPerMillisecond, TimeSpan.Zero);
 
+    /// <summary>
+    /// Whether anything references a blob: an object (as its full-copy CID), a multipart part (#5), or a shard
+    /// of an erasure-coded object (#8). Each arm is index-backed (idx_objects_cid, idx_multipart_parts_cid, idx_object_shards_cid).
+    /// </summary>
+    private const string ReferencedSql =
+        "SELECT 1 FROM objects WHERE cid = $cid AND scheme = 'replica' UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid " +
+        "UNION ALL SELECT 1 FROM object_shards WHERE shard_cid = $cid LIMIT 1";
+
     /// <summary>A blob is referenced again: drop any queued deletion of it (GC/dedup race, #5 review).</summary>
     internal static void CancelPendingDeletion(SqliteConnection conn, SqliteTransaction tx, string cid) =>
         Run(conn, tx, "DELETE FROM gc_queue WHERE cid = $cid", ("$cid", cid));
@@ -343,7 +367,7 @@ public sealed partial class GatewayMetadataStore
     internal static void CollectIfUnreferenced(SqliteConnection conn, SqliteTransaction tx, string cid, IEnumerable<string> nodeIds)
     {
         using (var check = Query(conn,
-                   "SELECT 1 FROM objects WHERE cid = $cid UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid LIMIT 1", ("$cid", cid)))
+                   ReferencedSql, ("$cid", cid)))
         {
             check.Transaction = tx;
             if (check.ExecuteScalar() is not null)
@@ -403,6 +427,11 @@ public sealed partial class GatewayMetadataStore
 
         AdjustUsage(conn, tx, bucket, -record.SizeBytes);
         CollectIfUnreferenced(conn, tx, record.Cid, record.NodeIds);
+        if (record.IsErasureCoded)
+        {
+            CollectShards(conn, tx, bucket, key);
+        }
+
         tx.Commit();
         return record;
     }
@@ -440,9 +469,7 @@ public sealed partial class GatewayMetadataStore
     {
         using var conn = Open();
         // A part of an in-progress multipart upload is referenced too (#5), so GC must not delete it.
-        return Query(conn,
-            "SELECT 1 FROM objects WHERE cid = $cid UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid LIMIT 1",
-            ("$cid", cid)).ExecuteScalar() is not null;
+        return Query(conn, ReferencedSql, ("$cid", cid)).ExecuteScalar() is not null;
     }
 
     /// <summary>Returns the first object record that matches the given CID, or null if none exists.</summary>

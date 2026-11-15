@@ -59,6 +59,7 @@ public static class BlobGatewayApp
         builder.Services.AddHostedService(sp => sp.GetRequiredService<NodeRegistry>());
 
         builder.Services.AddSingleton<Placement.PlacementEngine>();
+        builder.Services.AddSingleton<Placement.RegionAssignmentResolver>();
         builder.Services.AddScoped<QuorumWriter>();
         builder.Services.AddSingleton<TenantQuota>();
         builder.Services.AddSingleton<IWriteQuorumRequirement, ConfiguredWriteQuorum>();
@@ -72,7 +73,18 @@ public static class BlobGatewayApp
             host.ShutdownTimeout = TimeSpan.FromSeconds(Math.Max(1, gatewayConfig.ShutdownTimeoutSeconds)));
 
         // Repair / resilience services.
-        builder.Services.AddSingleton<RepairQueue>();
+        builder.Services.AddSingleton<RepairQueue>(sp => new RepairQueue(sp.GetRequiredService<GatewayMetadataStore>()));
+        builder.Services.AddSingleton<BandwidthBudget>(sp => new BandwidthBudget(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>()));
+        builder.Services.AddSingleton<Erasure.ErasureObjects>();
+
+        // Penalty stages (#8 FR3): operator-set until the on-chain penalty system lands; its reactions run here.
+        builder.Services.AddSingleton<Penalties.ManualPenaltySource>();
+        builder.Services.AddSingleton<Penalties.INodePenaltyEventSource>(sp => sp.GetRequiredService<Penalties.ManualPenaltySource>());
+        builder.Services.AddSingleton<Penalties.IIntegrityFailureSink, Penalties.LoggingIntegrityFailureSink>();
+        builder.Services.AddSingleton<Penalties.PenaltyResponder>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<Penalties.PenaltyResponder>());
+        builder.Services.AddSingleton<Integrity.ChallengeScheduler>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<Integrity.ChallengeScheduler>());
         builder.Services.AddScoped<Objects.ObjectService>(); // scoped: it uses the scoped QuorumWriter
         builder.Services.AddSingleton<NodeReconciler>();
         builder.Services.AddHostedService<GcWorker>();

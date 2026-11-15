@@ -105,6 +105,28 @@
             "items": {
               "type": "string"
             }
+          },
+          "placementGaps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "shards": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "object"
+            }
+          },
+          "pendingReplicas": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           }
         }
       },
@@ -423,6 +445,15 @@
           "schema": {
             "type": "string"
           }
+        },
+        {
+          "name": "prefix",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Set or read a folder rule instead of the bucket's (#8)."
         }
       ],
       "get": {
@@ -468,6 +499,47 @@
           },
           "409": {
             "description": "RegionsNotEnforced (bootstrap mode)"
+          }
+        }
+      }
+    },
+    "/v1/buckets/{bucket}/scheme": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Choose how new objects are stored (#8): \"replica\" (full copies, default) or \"rs:k+m\" Reed-Solomon shards.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scheme": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ scheme }"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket"
           }
         }
       }

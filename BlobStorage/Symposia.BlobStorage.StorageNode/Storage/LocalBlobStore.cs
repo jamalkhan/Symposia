@@ -47,8 +47,16 @@ public sealed class LocalBlobStore
     /// to its content-addressed path. The CID is not known until the stream is fully consumed and hashed,
     /// so the write is never acknowledged before the data is both hashed and durable.
     /// </summary>
-    public async Task<(Cid Cid, long SizeBytes)> WriteAsync(Stream content, CancellationToken cancellationToken)
+    public async Task<(Cid Cid, long SizeBytes)> WriteAsync(Stream content, CancellationToken cancellationToken) =>
+        (await WriteWithMerkleAsync(content, cancellationToken)) is var w ? (w.Cid, w.SizeBytes) : default;
+
+    /// <summary>
+    /// As <see cref="WriteAsync"/>, also returning the blob's Merkle root (#8 FR6.4). The leaf hashes are
+    /// kept beside the blob (<c>&lt;cid&gt;.merkle</c>) so a challenge needs one leaf read, not a full rehash.
+    /// </summary>
+    public async Task<(Cid Cid, long SizeBytes, byte[] MerkleRoot)> WriteWithMerkleAsync(Stream content, CancellationToken cancellationToken)
     {
+        var merkle = new MerkleBuilder();
         EnsureRootExists();
 
         var tempPath = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.tmp");
@@ -66,6 +74,7 @@ public sealed class LocalBlobStore
                     while ((read = await content.ReadAsync(buffer, cancellationToken)) > 0)
                     {
                         hasher.AppendData(buffer, 0, read);
+                        merkle.Append(buffer.AsSpan(0, read));
                         await tempStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                         sizeBytes += read;
                     }
@@ -91,7 +100,9 @@ public sealed class LocalBlobStore
                     File.Move(tempPath, finalPath);
                 }
 
-                return (cid, sizeBytes);
+                var leaves = merkle.Finish();
+                WriteLeaves(cid, leaves);
+                return (cid, sizeBytes, MerkleTree.Root(leaves));
             }
         }
         catch
@@ -119,9 +130,50 @@ public sealed class LocalBlobStore
         return stream;
     }
 
+    /// <summary>The blob's leaf hashes, rebuilt from the blob (and saved) when the sidecar is missing, e.g. for pre-#8 blobs.</summary>
+    public async Task<IReadOnlyList<byte[]>> ReadLeavesAsync(Cid cid, CancellationToken ct)
+    {
+        var sidecar = GetFullPath(cid) + MerkleSuffix;
+        if (File.Exists(sidecar))
+        {
+            var raw = await File.ReadAllBytesAsync(sidecar, ct);
+            if (raw.Length % MerkleTree.HashSize == 0 && raw.Length > 0)
+            {
+                return Enumerable.Range(0, raw.Length / MerkleTree.HashSize)
+                    .Select(i => raw.AsSpan(i * MerkleTree.HashSize, MerkleTree.HashSize).ToArray()).ToList();
+            }
+        }
+
+        var builder = new MerkleBuilder();
+        await using (var stream = OpenRead(cid))
+        {
+            var buffer = new byte[BufferSize];
+            int read;
+            while ((read = await stream.ReadAsync(buffer, ct)) > 0)
+            {
+                builder.Append(buffer.AsSpan(0, read));
+            }
+        }
+
+        var leaves = builder.Finish();
+        WriteLeaves(cid, leaves);
+        return leaves;
+    }
+
+    private const string MerkleSuffix = ".merkle";
+
+    private void WriteLeaves(Cid cid, IReadOnlyList<byte[]> leaves)
+    {
+        var sidecar = GetFullPath(cid) + MerkleSuffix;
+        var temp = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.merkle.tmp");
+        File.WriteAllBytes(temp, leaves.SelectMany(l => l).ToArray());
+        File.Move(temp, sidecar, overwrite: true);
+    }
+
     public bool Delete(Cid cid)
     {
         var path = GetFullPath(cid);
+        File.Delete(path + MerkleSuffix);
         if (!File.Exists(path))
         {
             return false;
@@ -143,6 +195,7 @@ public sealed class LocalBlobStore
         {
             // Skip anything inside the tmp directory.
             if (file.StartsWith(_tempDir, StringComparison.OrdinalIgnoreCase)) continue;
+            if (file.EndsWith(MerkleSuffix, StringComparison.Ordinal)) continue; // a blob's leaf hashes, not a blob
 
             var name = Path.GetFileNameWithoutExtension(file);
             if (Cid.TryParse(name, out var cid)) yield return cid;

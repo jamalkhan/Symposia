@@ -66,8 +66,10 @@ public sealed class PlacementEngine(INodeRegistry nodes, IOptions<GatewayOptions
             taken.Add(id);
         }
 
-        var candidates = nodes.Writable(sizeBytes).Where(n => !taken.Contains(n.Id))
-            .OrderByDescending(n => n.LastProbe?.AvailableStorageBytes ?? 0).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
+        // Stage 3+ nodes are offline for placement (#8 FR3.1); lower stages sort after healthy peers.
+        var candidates = nodes.Writable(sizeBytes).Where(n => !taken.Contains(n.Id) && n.PenaltyStage < 3)
+            .OrderBy(n => n.PenaltyStage)
+            .ThenByDescending(n => n.LastProbe?.AvailableStorageBytes ?? 0).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         if (!requirement.EnforcesRegions)
         {
             return new PlacementPlan(candidates.Take(count).ToList(), []);
@@ -78,26 +80,49 @@ public sealed class PlacementEngine(INodeRegistry nodes, IOptions<GatewayOptions
         var placed = existing.ToList();
         bool InRegion(NodeConnection n, string region) => string.Equals(n.Region, region, StringComparison.OrdinalIgnoreCase);
 
+        // Takes the best node from pool under the fault-domain rules (#8 FR2), or null when the hard rule rules all out.
+        NodeConnection? Pick(IEnumerable<NodeConnection> pool)
+        {
+            var best = pool.Except(chosen)
+                .Where(n => n.PublicIp.Length == 0 || !placed.Any(p => p.PublicIp == n.PublicIp)) // hard: never a shared public IP
+                .Select(n => (Node: n, Conflicts: SoftConflicts(n, placed)))
+                .OrderBy(c => c.Conflicts.Count)
+                .FirstOrDefault();
+            if (best.Node is null)
+            {
+                return null;
+            }
+
+            foreach (var rule in best.Conflicts)
+            {
+                // Soft rules bend only when no compliant node exists, and every bend is recorded (#8 FR2.3).
+                gaps.Add(new PlacementGap(rule, $"{best.Node.Id} shares its {rule} with another copy; no compliant node was available"));
+            }
+
+            chosen.Add(best.Node);
+            placed.Add(best.Node);
+            return best.Node;
+        }
+
         // 1. Hard per-region counts.
         foreach (var (region, wanted) in requirement.PlacementPerRegion)
         {
             var need = Math.Min(wanted - placed.Count(n => InRegion(n, region)), count - chosen.Count);
-            var inRegion = candidates.Where(n => InRegion(n, region)).Except(chosen).ToList();
-            if (inRegion.Count < need)
+            var got = 0;
+            while (got < need && Pick(candidates.Where(n => InRegion(n, region))) is not null)
+            {
+                got++;
+            }
+
+            if (got < need)
             {
                 if (newWrite)
                 {
                     throw new PlacementException(
-                        $"Region '{region}' needs {wanted} copies but only {inRegion.Count + wanted - need} eligible node(s) are there.");
+                        $"Region '{region}' needs {wanted} copies but only {got + wanted - need} eligible node(s) with distinct public IPs are there.");
                 }
 
-                gaps.Add(new PlacementGap("region", $"region '{region}' is short {need - inRegion.Count} copy(ies)"));
-            }
-
-            foreach (var node in inRegion.Take(Math.Max(0, need)))
-            {
-                chosen.Add(node);
-                placed.Add(node);
+                gaps.Add(new PlacementGap("region", $"region '{region}' is short {need - got} copy(ies)"));
             }
         }
 
@@ -106,21 +131,22 @@ public sealed class PlacementEngine(INodeRegistry nodes, IOptions<GatewayOptions
         while (chosen.Count < count)
         {
             var usedRegions = placed.Select(n => n.Region).Where(r => r.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var remaining = candidates.Except(chosen).ToList();
-            var next = remaining.FirstOrDefault(n => n.Region.Length > 0 && !targets.Contains(n.Region) && !usedRegions.Contains(n.Region));
-            if (next is null && (next = remaining.FirstOrDefault()) is not null && requirement.PlacementPerRegion.Count > 0)
+            if (Pick(candidates.Where(n => n.Region.Length > 0 && !targets.Contains(n.Region) && !usedRegions.Contains(n.Region))) is not null)
             {
-                // No fresh region left: the overflow copy shares one (P3 later moves it when a region appears).
-                gaps.Add(new PlacementGap("overflow-region", $"overflow copy on {next.Id} shares region '{next.Region}' with another copy"));
+                continue;
             }
 
+            var next = Pick(candidates);
             if (next is null)
             {
                 break;
             }
 
-            chosen.Add(next);
-            placed.Add(next);
+            if (requirement.PlacementPerRegion.Count > 0)
+            {
+                // No fresh region left: the overflow copy shares one (P3 later moves it when a region appears).
+                gaps.Add(new PlacementGap("overflow-region", $"overflow copy on {next.Id} shares region '{next.Region}' with another copy"));
+            }
         }
 
         var spread = placed.Select(n => n.Region).Where(r => r.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Count();
@@ -135,5 +161,15 @@ public sealed class PlacementEngine(INodeRegistry nodes, IOptions<GatewayOptions
         }
 
         return new PlacementPlan(chosen, gaps);
+    }
+
+    /// <summary>The soft fault domains (subnet, ASN, facility) <paramref name="node"/> shares with a placed copy; unknown never conflicts.</summary>
+    internal static IReadOnlyList<string> SoftConflicts(NodeConnection node, IReadOnlyCollection<NodeConnection> placed)
+    {
+        var rules = new List<string>();
+        if (node.Subnet.Length > 0 && placed.Any(p => p.Subnet == node.Subnet)) rules.Add("subnet");
+        if (node.Asn != 0 && placed.Any(p => p.Asn == node.Asn)) rules.Add("asn");
+        if (node.Facility.Length > 0 && placed.Any(p => p.Facility == node.Facility)) rules.Add("facility");
+        return rules;
     }
 }

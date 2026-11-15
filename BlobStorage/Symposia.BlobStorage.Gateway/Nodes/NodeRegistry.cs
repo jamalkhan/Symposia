@@ -345,6 +345,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
             node.LastProbe = response;
             node.LastProbeTime = DateTimeOffset.UtcNow;
+            node.ObservedIp ??= await ResolveAsync(node.Url);
             node.LastProbeError = null;
             _logger.LogDebug("Node {Url} probe ok: {Used} bytes used, {Available} available, {Blobs} blobs.",
                 node.Url, response.UsedStorageBytes, response.AvailableStorageBytes, response.BlobCount);
@@ -363,6 +364,30 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
             if (node.IsHealthy || node.LastUnhealthyAt == DateTimeOffset.MinValue)
                 node.LastUnhealthyAt = DateTimeOffset.UtcNow;
             node.LastProbe = null;
+        }
+    }
+
+    /// <summary>The address a node URL's host resolves to (#8 same-IP rule); null when it doesn't resolve.</summary>
+    internal static async Task<System.Net.IPAddress?> ResolveAsync(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        if (System.Net.IPAddress.TryParse(uri.Host, out var literal))
+        {
+            return literal;
+        }
+
+        try
+        {
+            var addresses = await System.Net.Dns.GetHostAddressesAsync(uri.Host).WaitAsync(TimeSpan.FromSeconds(2));
+            return addresses.FirstOrDefault();
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 
