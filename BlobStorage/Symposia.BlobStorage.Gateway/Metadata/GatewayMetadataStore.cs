@@ -212,7 +212,7 @@ public sealed partial class GatewayMetadataStore
     /// <summary>The columns <see cref="ReadObject"/> reads, in order; every query returning whole objects selects these.</summary>
     internal const string ObjectColumns =
         "bucket, key, cid, size_bytes, content_type, last_modified, node_ids, etag_override, replication_state, target_copies, regions, " +
-        "placement_gaps, merkle_root, scheme";
+        "placement_gaps, merkle_root, scheme, merkle_cid";
 
     internal static ObjectRecord ReadObject(SqliteDataReader r) => new(
         r.GetString(0), r.GetString(1),
@@ -227,8 +227,11 @@ public sealed partial class GatewayMetadataStore
         TargetCopies = r.GetInt32(9),
         Regions = SplitList(r.IsDBNull(10) ? null : r.GetString(10)),
         PlacementGaps = ReadGaps(r.IsDBNull(11) ? null : r.GetString(11)),
-        MerkleRoot = r.IsDBNull(12) ? null : r.GetString(12),
-        Scheme = r.GetString(13),
+        // A root counts only for the CID it was computed over: an N-1 gateway overwriting the row keeps the
+        // old root, which must not be held against the new bytes (review: Frank #2).
+        MerkleRoot = !r.IsDBNull(12) && !r.IsDBNull(14) && r.GetString(14) == r.GetString(2) ? r.GetString(12) : null,
+        // Erasure-coded rows never list replicas; one that does was overwritten by an N-1 gateway as full copies.
+        Scheme = r.GetString(13) != "replica" && !r.IsDBNull(6) && r.GetString(6).Length > 0 ? "replica" : r.GetString(13),
     };
 
     /// <summary>Inserts or replaces an object; true when it replaced one (read inside the write's transaction, #204).</summary>
@@ -291,10 +294,12 @@ public sealed partial class GatewayMetadataStore
             var floor = TruncateToMilliseconds(previousCommit);
             if (committedAt < floor)
             {
-                committedAt = floor;
+                // This commit is serialized after the current one, so it is the later write whatever its
+                // gateway's clock says: it wins, one millisecond on (review: Frank #1). Only genuinely equal
+                // timestamps fall to the ETag tiebreak.
+                committedAt = floor.AddMilliseconds(1);
             }
-
-            if (committedAt == floor && string.CompareOrdinal(record.ETag, previousEtag) < 0)
+            else if (committedAt == floor && string.CompareOrdinal(record.ETag, previousEtag) < 0)
             {
                 // Lost the tiebreak: the existing version stays current, and this write's blob is garbage.
                 CollectIfUnreferenced(conn, tx, record.Cid, record.NodeIds);
@@ -323,11 +328,11 @@ public sealed partial class GatewayMetadataStore
         var target = record.TargetCopies > 0 ? record.TargetCopies : (int?)null;
         Run(conn, tx, """
             INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, etag_override,
-                                 target_copies, replication_state, regions, placement_gaps, merkle_root, scheme)
+                                 target_copies, replication_state, regions, placement_gaps, merkle_root, scheme, merkle_cid)
             VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc, $eo,
                     COALESCE($tc, (SELECT target_copies FROM objects WHERE bucket = $b AND key = $k),
                              CAST((SELECT value FROM settings WHERE name = 'copy_floor') AS INTEGER), 1),
-                    'full', $rg, $pg, $mr, $sc)
+                    'full', $rg, $pg, $mr, $sc, $cid)
             ON CONFLICT(bucket, key) DO UPDATE SET
                 cid = excluded.cid,
                 size_bytes = excluded.size_bytes,
@@ -340,7 +345,8 @@ public sealed partial class GatewayMetadataStore
                 regions = excluded.regions,
                 placement_gaps = excluded.placement_gaps,
                 merkle_root = excluded.merkle_root,
-                scheme = excluded.scheme;
+                scheme = excluded.scheme,
+                merkle_cid = excluded.merkle_cid;
             """,
             ("$b", record.Bucket), ("$k", record.Key), ("$cid", record.Cid),
             ("$sz", record.SizeBytes), ("$ct", record.ContentType),
@@ -376,8 +382,13 @@ public sealed partial class GatewayMetadataStore
         "UNION ALL SELECT 1 FROM object_versions WHERE cid = $cid AND physically_deleted_at IS NULL AND purge_queued_at IS NULL LIMIT 1";
 
     /// <summary>A blob is referenced again: drop any queued deletion of it (GC/dedup race, #5 review).</summary>
-    internal static void CancelPendingDeletion(SqliteConnection conn, SqliteTransaction tx, string cid) =>
+    internal static void CancelPendingDeletion(SqliteConnection conn, SqliteTransaction tx, string cid)
+    {
         Run(conn, tx, "DELETE FROM gc_queue WHERE cid = $cid", ("$cid", cid));
+        // Versions whose purge waited on these bytes are done: the bytes now belong to a live object, which
+        // is billed in its own right (review: Lenny #3, else they'd stay pending and billed forever).
+        CloseVersionsWaitingOn(conn, tx, cid);
+    }
 
     /// <summary>Queues a blob's copies for deletion if no object or multipart part references it (same transaction).</summary>
     internal static void CollectIfUnreferenced(SqliteConnection conn, SqliteTransaction tx, string cid, IEnumerable<string> nodeIds)
@@ -718,6 +729,13 @@ public sealed partial class GatewayMetadataStore
         while (r.Read())
             results.Add((r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetInt32(3)));
         return results;
+    }
+
+    /// <summary>Whether a GC entry is still queued (not cancelled by a re-reference since it was read).</summary>
+    public bool IsQueued(long id)
+    {
+        using var conn = Open();
+        return Query(conn, "SELECT 1 FROM gc_queue WHERE id = $id", ("$id", id)).ExecuteScalar() is not null;
     }
 
     public void RemoveFromGcQueue(long id)

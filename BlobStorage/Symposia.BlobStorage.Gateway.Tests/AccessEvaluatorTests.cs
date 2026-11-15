@@ -29,6 +29,16 @@ public sealed class AccessEvaluatorTests
     }
 
     [Fact]
+    public void PrefixCredential_CantPassABucketLevelWriteByCarryingAPrefix() // review: Lenny #1
+    {
+        var g = Grant(AccessLevel.ReadWrite, new ResourceScope("b", "uploads/"));
+        // A bucket-level write (lifecycle, scheme, regions, delete bucket) never has a list prefix.
+        Assert.Equal(AccessDecision.InsufficientCredentialScope, Eval(g, Req(true, "b", null, prefix: null)));
+        Assert.Equal(AccessDecision.InsufficientCredentialScope, Eval(g, Req(false, "b", null, prefix: null)));
+        Assert.Equal(AccessDecision.Allowed, Eval(Grant(scope: new ResourceScope("b")), Req(true, "b", null)));
+    }
+
+    [Fact]
     public void BucketScopedCredential_GetsTheSameRefusal_ForAnyOtherBucket_ExistingOrNot() // AC2
     {
         var g = Grant(scope: new ResourceScope("bucket-a"));

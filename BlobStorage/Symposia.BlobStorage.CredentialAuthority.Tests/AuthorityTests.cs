@@ -207,4 +207,46 @@ public sealed class AuthorityTests(AuthorityFixture f) : IClassFixture<Authority
         Assert.Null(await store.GetAsync(temp.CredentialId, CancellationToken.None));
         Assert.Contains(await store.AuditAsync(tenant, temp.CredentialId, 0, 100, CancellationToken.None), e => e.Action == "credential.revoke"); // FR5.21
     }
+
+    [Fact]
+    public async Task RotatingARevokedCredential_IssuesNothing() // review: Frank #5
+    {
+        var tenant = Tenant();
+        var admin = await f.TenantAsync(tenant);
+        var store = f.Factory.Services.GetRequiredService<AuthorityStore>();
+        var cred = (await store.IssueAsync(tenant, null, "svc", AccessLevel.Read, ResourceScope.Tenant, null, [], false, admin, CancellationToken.None))!;
+        await store.RevokeAsync(tenant, cred.CredentialId, admin, CancellationToken.None);
+
+        Assert.Null(await store.RotateAsync(tenant, cred.CredentialId, TimeSpan.Zero, admin, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AReplayedUseBatch_IsChainedOnce() // review: Frank #7
+    {
+        var tenant = Tenant();
+        var admin = await f.TenantAsync(tenant);
+        var store = f.Factory.Services.GetRequiredService<AuthorityStore>();
+        var batch = new UseBatch("gw1", Guid.NewGuid().ToString("N"),
+            [new UseReport(admin, "GET object", "/b/k", null, null, "gw1", "Success", null, DateTimeOffset.UtcNow)]);
+
+        Assert.True(await store.RecordUsesAsync(batch, CancellationToken.None));
+        Assert.False(await store.RecordUsesAsync(batch, CancellationToken.None));
+        Assert.Single(await store.AuditAsync(tenant, admin, 0, 100, CancellationToken.None), e => e.Action == "GET object");
+    }
+
+    [Fact]
+    public async Task UsesOfAPrunedCredential_AreStillAudited() // review: Frank #8
+    {
+        var tenant = Tenant();
+        var admin = await f.TenantAsync(tenant);
+        var store = f.Factory.Services.GetRequiredService<AuthorityStore>();
+        var old = (await store.IssueAsync(tenant, null, "old", AccessLevel.Read, ResourceScope.Tenant, DateTimeOffset.UtcNow.AddDays(-200), [], false, admin, CancellationToken.None))!;
+        await store.RevokeAsync(tenant, old.CredentialId, admin, CancellationToken.None);
+        await store.PruneRevocationsAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+
+        await store.RecordUsesAsync([new UseReport(old.CredentialId, "GET object", "/b/k", "203.0.113.5", null, "gw1", "Rejected", "CredentialRevoked", DateTimeOffset.UtcNow)],
+            CancellationToken.None);
+
+        Assert.Contains(await store.AuditAsync(tenant, old.CredentialId, 0, 100, CancellationToken.None), e => e.Reason == "CredentialRevoked");
+    }
 }

@@ -112,6 +112,12 @@ public sealed class MultiTenancyTests : IAsyncLifetime
         var sibling = await RefusedAsync(() => readerS3.GetObjectAsync("acme-data", "private/x"));
         Assert.Equal("InsufficientCredentialScope", sibling.ErrorCode);
 
+        // Review (Lenny #1, #2): a carried prefix doesn't widen a bucket-level call, and an encoded key is
+        // authorized as the key the endpoint actually uses.
+        using var readerHttp = Signed(reader.Key, reader.Secret);
+        Assert.Equal(HttpStatusCode.Forbidden, (await readerHttp.GetAsync("/v1/buckets/acme-data/regions?prefix=reports/")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await readerHttp.GetAsync("/acme-data/%2572eports/q3.csv")).StatusCode);
+
         // AC5: revoke, then measure until this gateway refuses it.
         var revoked = Stopwatch.StartNew();
         (await adminHttp.PostAsync($"/v1/credentials/{readerId}/revoke", null)).EnsureSuccessStatusCode();

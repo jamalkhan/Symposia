@@ -44,21 +44,12 @@ public sealed class GcEvaluator(GatewayMetadataStore store, IOptions<GatewayOpti
             }
         }
 
-        // The shortest window any bucket may have is a day; each row is then checked against its own bucket's.
+        // Each bucket's own recovery window is applied by the query.
         var queued = 0;
-        var windows = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
-        foreach (var version in store.PurgeableVersions(now - TimeSpan.FromDays(1), Batch))
+        foreach (var version in store.PurgeableVersions(now, options.Value.Gc.RecoveryDays, Batch))
         {
-            if (!windows.TryGetValue(version.Bucket, out var window))
-            {
-                windows[version.Bucket] = window = TimeSpan.FromDays(Math.Clamp(store.Lifecycle(version.Bucket).RecoveryDays ?? options.Value.Gc.RecoveryDays, 1, 365));
-            }
-
-            if (version.DeletedAt is { } deletedAt && now - deletedAt >= window)
-            {
-                store.QueueVersionPurge(version);
-                queued++;
-            }
+            store.QueueVersionPurge(version);
+            queued++;
         }
 
         var markers = store.CleanOrphanedDeleteMarkers();

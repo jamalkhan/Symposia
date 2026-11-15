@@ -22,6 +22,7 @@ public sealed class GcWorker : BackgroundService
     private readonly IOptions<GatewayOptions> _options;
     private readonly ILogger<GcWorker> _logger;
     private readonly SafetyInvariantGate _gate;
+    private readonly Repair.RepairQueue? _repairs;
     private readonly Dictionary<string, (long Second, int Count)> _rate = new(StringComparer.OrdinalIgnoreCase);
 
     public GcWorker(
@@ -29,8 +30,10 @@ public sealed class GcWorker : BackgroundService
         INodeRegistry nodes,
         IOptions<GatewayOptions> options,
         ILogger<GcWorker> logger,
-        SafetyInvariantGate gate)
+        SafetyInvariantGate gate,
+        Repair.RepairQueue? repairs = null)
     {
+        _repairs = repairs;
         _store = store;
         _nodes = nodes;
         _options = options;
@@ -99,11 +102,27 @@ public sealed class GcWorker : BackgroundService
                 continue; // this node's GC budget for the second is spent; the entry waits for the next batch
             }
 
+            // Re-checked at the last moment: the entry may have been cancelled, or the bytes re-referenced by
+            // a dedup PUT, since the batch was read (review: Lenny #5).
+            if (!_store.IsQueued(entry.Id) || _gate.Check(entry.Cid, entry.NodeUrl, entry.Category) != GcVerdict.Clear)
+            {
+                continue;
+            }
+
             try
             {
                 await node.Client.DeleteBlobAsync(
                     new DeleteBlobRequest { Cid = entry.Cid },
                     cancellationToken: ct);
+
+                // A PUT of the same bytes that committed during the RPC itself now points at a deleted copy:
+                // repair it at once rather than waiting for the next scan.
+                if (_store.GetObjectByCid(entry.Cid) is { } relived && relived.NodeIds.Contains(entry.NodeUrl, StringComparer.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning("GC: {Cid} was re-referenced while deleting it from {Url}; queuing repair.", entry.Cid, entry.NodeUrl);
+                    _store.RemoveReplica(relived.Bucket, relived.Key, relived.Cid, entry.NodeUrl);
+                    _repairs?.Enqueue(new Repair.RepairTask(entry.Cid, entry.NodeUrl, Repair.RepairReason.MissingReplica) { Priority = Repair.RepairPriority.P0 });
+                }
 
                 _logger.LogDebug("GC: deleted blob {Cid} from node {Url} ({Category}).", entry.Cid, entry.NodeUrl, entry.Category);
                 _store.RemoveFromGcQueue(entry.Id);

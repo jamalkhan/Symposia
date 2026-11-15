@@ -33,8 +33,10 @@ public sealed record ResourceScope(string? Bucket = null, string? Prefix = null,
         if (bucket is null || !string.Equals(Bucket, bucket, StringComparison.Ordinal)) return false;
         if (Key is not null) return key == Key;
         if (Prefix is null) return true;
-        // A bucket-level call (LIST) is covered only when it lists inside the prefix.
-        return key is not null ? key.StartsWith(Prefix, StringComparison.Ordinal) : (listPrefix ?? "").StartsWith(Prefix, StringComparison.Ordinal);
+        if (key is not null) return key.StartsWith(Prefix, StringComparison.Ordinal);
+        // A bucket-level call is covered only when it is a listing inside the prefix (listPrefix is null for
+        // any other bucket-level call: config writes, bucket deletion, HEAD), never by a prefix it merely carries.
+        return listPrefix is not null && listPrefix.StartsWith(Prefix, StringComparison.Ordinal);
     }
 
     /// <summary>Whether this scope is no broader than <paramref name="outer"/> (minimum necessary access).</summary>
@@ -149,3 +151,13 @@ public static class AccessEvaluator
         return AccessDecision.Allowed;
     }
 }
+
+/// <summary>One data-plane use, as a gateway reports it to the Authority's audit log (#3 FR8.28).</summary>
+public sealed record UseReport(string CredentialId, string Action, string? Resource, string? SourceIp, string? Region, string GatewayId,
+    string Outcome, string? Reason, DateTimeOffset At);
+
+/// <summary>
+/// A batch of uses with an ID the Authority records once: a batch resent after a lost acknowledgement is not
+/// appended to the hash chain twice (review: Frank #7).
+/// </summary>
+public sealed record UseBatch(string GatewayId, string BatchId, IReadOnlyList<UseReport> Uses);

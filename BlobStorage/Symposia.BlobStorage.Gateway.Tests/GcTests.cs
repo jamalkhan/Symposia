@@ -238,4 +238,65 @@ public sealed class GcTests
         Assert.Contains("gc/offline", report);
         Assert.Equal(["http://gone"], store.OfflineReplicas(TestCluster.Bucket, "gc/offline"));
     }
+
+    // ── Review regressions ────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RestoredVersion_KeepsItsMetadata() // review: Lenny #4, Frank #12
+    {
+        using var cluster = await TestCluster.StartAsync(1);
+        var store = cluster.Services.GetRequiredService<GatewayMetadataStore>();
+        await cluster.S3.PutObjectAsync(new Amazon.S3.Model.PutObjectRequest
+        {
+            BucketName = TestCluster.Bucket, Key = "gc/meta", ContentBody = "typed", ContentType = "text/csv", UseChunkEncoding = false,
+        });
+        var before = store.GetObject(TestCluster.Bucket, "gc/meta")!;
+        await cluster.S3.DeleteObjectAsync(TestCluster.Bucket, "gc/meta");
+
+        var restored = store.RestoreLatestVersion(TestCluster.Bucket, "gc/meta")!;
+
+        Assert.Equal("text/csv", restored.ContentType);
+        Assert.Equal(before.MerkleRoot, restored.MerkleRoot);
+        Assert.Equal(before.TargetCopies, restored.TargetCopies);
+    }
+
+    [Fact]
+    public async Task DedupReupload_ClosesAQueuedPurge_SoItIsntPendingAndBilledForever() // review: Lenny #3
+    {
+        using var cluster = await TestCluster.StartAsync(1);
+        var store = cluster.Services.GetRequiredService<GatewayMetadataStore>();
+        var bytes = "same bytes"u8.ToArray().Concat(Guid.NewGuid().ToByteArray()).ToArray();
+        await cluster.PutAsync("gc/first", bytes);
+        await cluster.S3.DeleteObjectAsync(TestCluster.Bucket, "gc/first");
+        Evaluator(store).Evaluate(DateTimeOffset.UtcNow.AddDays(31));
+
+        await cluster.PutAsync("gc/second", bytes);
+
+        var version = store.Versions(TestCluster.Bucket, "gc/first").Single();
+        Assert.NotNull(version.PhysicallyDeletedAt);
+        Assert.DoesNotContain(store.PendingDeletions(), p => p.Bucket == TestCluster.Bucket && p.Pending > 0 && p.Queued > 0);
+    }
+
+    [Fact]
+    public void ShortWindowBucket_IsNotStarvedByLongWindowOnes() // review: Frank #10
+    {
+        var store = new GatewayMetadataStore(Options.Create(new GatewayOptions
+        {
+            MetadataDbPath = Path.Combine(Path.GetTempPath(), $"symposia-gc-{Guid.NewGuid():N}", "m.db"),
+        }));
+        store.Initialize();
+        store.CreateBucket("slow", "t");
+        store.CreateBucket("fast", "t");
+        store.SetLifecycle("fast", new BucketLifecycle(RecoveryDays: 2));
+        for (var i = 0; i < 600; i++) // more than one evaluator batch of not-yet-due rows
+        {
+            store.CommitObject(new ObjectRecord("slow", $"k{i}", $"slow{i}", 1, "x", DateTimeOffset.UtcNow, ["n"]) { TargetCopies = 1 });
+            store.SoftDeleteObject("slow", $"k{i}");
+        }
+
+        store.CommitObject(new ObjectRecord("fast", "k", "fast", 1, "x", DateTimeOffset.UtcNow, ["n"]) { TargetCopies = 1 });
+        store.SoftDeleteObject("fast", "k");
+
+        Assert.Equal(1, Evaluator(store).Evaluate(DateTimeOffset.UtcNow.AddDays(3)).Queued);
+    }
 }

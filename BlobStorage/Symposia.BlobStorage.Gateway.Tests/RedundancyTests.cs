@@ -253,6 +253,32 @@ public sealed class RedundancyTests
     }
 
     [Fact]
+    public void Queue_Escalation_ClosesTheSupersededAuditRow() // review: Lenny #8
+    {
+        var store = Store();
+        var queue = new RepairQueue(store);
+        queue.Enqueue(new RepairTask("esc", null, RepairReason.PlacementImprovement));
+        queue.Enqueue(new RepairTask("esc", null, RepairReason.UnderReplicated) { Priority = RepairPriority.P0 });
+
+        Assert.Single(store.OpenRepairTasks(10));
+    }
+
+    [Fact]
+    public async Task Challenge_ProofCapableNodeAnsweringWithoutAProof_Fails() // review: Carl #1
+    {
+        using var cluster = await TestCluster.StartAsync(1);
+        await cluster.PutAsync("challenge/dodge", new byte[200_000]);
+        var record = cluster.Services.GetRequiredService<GatewayMetadataStore>().GetObject(TestCluster.Bucket, "challenge/dodge")!;
+        var node = cluster.Connections[0];
+
+        Assert.Equal(ChallengeResult.Passed, await ChallengeScheduler.ChallengeAsync(node, record, TimeSpan.FromSeconds(10), CancellationToken.None));
+        Assert.True(node.ProofCapable);
+        // The same node later claiming not to support proofs would only be echoing the CID it was sent.
+        var unprovable = record with { MerkleRoot = new string('0', 64) };
+        Assert.Equal(ChallengeResult.Failed, await ChallengeScheduler.ChallengeAsync(node, unprovable, TimeSpan.FromSeconds(10), CancellationToken.None));
+    }
+
+    [Fact]
     public void Queue_RehydratesOpenTasksAfterARestart()
     {
         var store = Store();

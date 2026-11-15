@@ -22,25 +22,34 @@ public static class Authorization
         var path = request.Path.Value ?? "/";
         var isWrite = !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method);
         string? bucket = null, key = null;
+        var listRoute = false;
         if (path.StartsWith("/v1/buckets/", StringComparison.Ordinal))
         {
             var rest = path["/v1/buckets/".Length..];
             var slash = rest.IndexOf('/');
             bucket = slash < 0 ? rest : rest[..slash];
-            if (slash >= 0 && rest[(slash + 1)..].StartsWith("objects/", StringComparison.Ordinal))
+            var tail = slash < 0 ? "" : rest[(slash + 1)..];
+            if (tail.StartsWith("objects/", StringComparison.Ordinal))
             {
-                key = Uri.UnescapeDataString(rest[(slash + 1 + "objects/".Length)..]);
+                key = tail["objects/".Length..];
             }
+
+            listRoute = tail is "objects" or "objects/";
         }
         else if (!path.StartsWith("/v1", StringComparison.Ordinal) && path.Length > 1)
         {
             var trimmed = path[1..];
             var slash = trimmed.IndexOf('/');
             bucket = slash < 0 ? trimmed : trimmed[..slash];
-            key = slash < 0 || slash == trimmed.Length - 1 ? null : Uri.UnescapeDataString(trimmed[(slash + 1)..]);
+            key = slash < 0 || slash == trimmed.Length - 1 ? null : trimmed[(slash + 1)..];
+            listRoute = key is null && !request.Query.ContainsKey("uploads");
         }
 
-        return (bucket is { Length: > 0 } ? Uri.UnescapeDataString(bucket) : null, key, isWrite, request.Query["prefix"].FirstOrDefault());
+        // Path.Value is already decoded exactly as routing decodes it: decoding again would authorize a
+        // different key than the endpoint writes (review: Lenny #2). A list prefix only means something on a
+        // listing read; anywhere else it would let a prefix-scoped credential pass a bucket-wide call (Lenny #1).
+        var isList = listRoute && HttpMethods.IsGet(request.Method);
+        return (bucket is { Length: > 0 } ? bucket : null, key, isWrite, isList ? request.Query["prefix"].FirstOrDefault() ?? "" : null);
     }
 
     /// <summary>The decision for the request, plus the copy source's read when it is a CopyObject.</summary>
@@ -131,7 +140,7 @@ public static class Authorization
         using var response = await ctx.RequestServices.GetRequiredService<IHttpClientFactory>().CreateClient(CredentialSync.HttpClientName)
             .SendAsync(request, ctx.RequestAborted);
         var body = await response.Content.ReadAsStringAsync(ctx.RequestAborted);
-        if (response.IsSuccessStatusCode && HttpMethods.IsPost(ctx.Request.Method))
+        if (response.IsSuccessStatusCode && !HttpMethods.IsGet(ctx.Request.Method))
         {
             // Make the change visible here at once rather than at the next push or poll.
             await ctx.RequestServices.GetRequiredService<CredentialSync>().PullAsync(ctx.RequestAborted);

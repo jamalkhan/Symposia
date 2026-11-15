@@ -104,7 +104,9 @@ public sealed partial class GatewayMetadataStore
         {
             Run(conn, tx, """
                 INSERT INTO tenant_usage (tenant_id, bytes)
-                SELECT $t, COALESCE(SUM(o.size_bytes), 0) FROM objects o JOIN buckets b ON b.name = o.bucket WHERE b.tenant_id = $t
+                SELECT $t, COALESCE((SELECT SUM(o.size_bytes) FROM objects o JOIN buckets b ON b.name = o.bucket WHERE b.tenant_id = $t), 0)
+                         + COALESCE((SELECT SUM(v.size_bytes) FROM object_versions v JOIN buckets b ON b.name = v.bucket
+                                     WHERE b.tenant_id = $t AND v.physically_deleted_at IS NULL), 0)
                 ON CONFLICT(tenant_id) DO UPDATE SET bytes = excluded.bytes
                 """, ("$t", tenantId));
         }

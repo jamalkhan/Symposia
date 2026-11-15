@@ -258,13 +258,19 @@ public static class BlobGatewayApp
             // Authorization (#3 FR4), from cached Authority state: revoked, suspended, expired, region-locked,
             // cross-tenant, out-of-scope and policy-denied requests stop here, each with its own code.
             var cache = ctx.RequestServices.GetRequiredService<CredentialStore>();
-            var grant = cache.Grant(sigv4!.AccessKeyId)!;
+            // Gone between authentication and here (a sync just removed it): refuse, never crash (review: Carl #5).
+            if (cache.Grant(sigv4!.AccessKeyId) is not { } grant)
+            {
+                await Authorization.Refusal(ctx, Symposia.BlobStorage.Domain.Credentials.AccessDecision.CredentialRevoked).ExecuteAsync(ctx);
+                return;
+            }
+
             var gatewayOptions = ctx.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value;
             var decision = Authorization.Decide(ctx, grant, cache, ctx.RequestServices.GetRequiredService<GatewayMetadataStore>(),
                 gatewayOptions.Region, sigv4.Scope.Split('/') is { Length: > 1 } scope ? scope[1] : null, DateTimeOffset.UtcNow);
             ctx.Items[Health.RequestLog.CredentialItem] = grant.CredentialId;
             var audit = ctx.RequestServices.GetRequiredService<AuditForwarder>();
-            UseReport Use(string outcome, string? reason) => new(grant.CredentialId, $"{ctx.Request.Method} {Authorization.Classify(ctx.Request) switch
+            Symposia.BlobStorage.Domain.Credentials.UseReport Use(string outcome, string? reason) => new(grant.CredentialId, $"{ctx.Request.Method} {Authorization.Classify(ctx.Request) switch
             {
                 (null, _, _, _) => "service",
                 (_, null, _, _) => "bucket",

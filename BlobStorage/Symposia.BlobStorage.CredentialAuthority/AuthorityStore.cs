@@ -12,9 +12,6 @@ public sealed record AuditEvent(
     long Seq, string TenantId, string? CredentialId, string Actor, string Action, string? Resource, string? SourceIp, string? Region,
     string? GatewayId, string Outcome, string? Reason, DateTimeOffset At, string PrevHash, string Hash);
 
-/// <summary>What a gateway reports about one data-plane use (#3 FR8.28).</summary>
-public sealed record UseReport(string CredentialId, string Action, string? Resource, string? SourceIp, string? Region, string GatewayId,
-    string Outcome, string? Reason, DateTimeOffset At);
 
 /// <summary>
 /// The Credential Authority's Postgres store (#3): tenants, accounts, credentials, policy rules and the audit
@@ -66,6 +63,12 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
 
             -- Every credential ID ever issued: a revoked, pruned or purged one can never be issued again (FR3.12, AC8).
             CREATE TABLE IF NOT EXISTS issued_ids (credential_id TEXT PRIMARY KEY, access_key_id TEXT NOT NULL UNIQUE, issued_at TIMESTAMPTZ NOT NULL);
+            -- The owning tenant outlives the credential row, so uses of a pruned credential are still audited (review: Frank #8).
+            ALTER TABLE issued_ids ADD COLUMN IF NOT EXISTS tenant_id TEXT NULL;
+
+            -- Use batches already appended, so a retried batch isn't chained twice (review: Frank #7).
+            CREATE TABLE IF NOT EXISTS audit_batches (gateway_id TEXT NOT NULL, batch_id TEXT NOT NULL, received_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (gateway_id, batch_id));
 
             CREATE TABLE IF NOT EXISTS credentials (
                 credential_id TEXT PRIMARY KEY REFERENCES issued_ids (credential_id),
@@ -224,7 +227,8 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         var (accessKey, secret) = SecretBox.NewKeyPair();
         var id = requestedId ?? "cred_" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
         // The ledger's primary key rejects any reuse, including an ID from a revoked or purged credential (AC8).
-        await Cmd(conn, tx, "INSERT INTO issued_ids (credential_id, access_key_id, issued_at) VALUES (@c, @k, now())", ("c", id), ("k", accessKey)).ExecuteNonQueryAsync(ct);
+        await Cmd(conn, tx, "INSERT INTO issued_ids (credential_id, access_key_id, issued_at, tenant_id) VALUES (@c, @k, now(), @t)",
+            ("c", id), ("k", accessKey), ("t", tenantId)).ExecuteNonQueryAsync(ct);
         var now = DateTimeOffset.UtcNow;
         await Cmd(conn, tx, """
             INSERT INTO credentials (credential_id, access_key_id, secret_sealed, secret_hash, tenant_id, account_id, identity, access_level,
@@ -268,18 +272,25 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     public async Task<CredentialGrant?> RotateAsync(string tenantId, string credentialId, TimeSpan grace, string actor, CancellationToken ct,
         Func<CredentialGrant, CredentialGrant>? overrides = null)
     {
-        var old = await GetAsync(credentialId, ct);
-        if (old is null || old.TenantId != tenantId || old.Status != CredentialStatus.Active)
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        // Read and lock the old credential inside the transaction: a revoke racing this rotate either lands
+        // first (and rotate refuses) or waits; it can never be undone by a fresh copy (review: Frank #5).
+        var old = (await ReadGrantsAsync(Cmd(conn, tx, $"SELECT {GrantColumns} FROM credentials WHERE credential_id = @c FOR UPDATE",
+            ("c", credentialId)), false, ct)).FirstOrDefault();
+        if (old is null || old.TenantId != tenantId || old.Status != CredentialStatus.Active || old.RevokedAt is not null)
         {
             return null;
         }
 
         var shape = overrides?.Invoke(old) ?? old;
-        await using var conn = await OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
         var grant = await IssueInTxAsync(conn, tx, tenantId, shape.AccountId, shape.Identity, shape.AccessLevel, shape.Scope, shape.ExpiresAt,
             shape.RegionLock, shape.CanManage, credentialId, actor, ct);
-        await RevokeInTxAsync(conn, tx, tenantId, credentialId, actor, grace > TimeSpan.Zero ? DateTimeOffset.UtcNow + grace : null, ct);
+        if (!await RevokeInTxAsync(conn, tx, tenantId, credentialId, actor, grace > TimeSpan.Zero ? DateTimeOffset.UtcNow + grace : null, ct))
+        {
+            await tx.RollbackAsync(ct);
+            return null;
+        }
         await Cmd(conn, tx, "UPDATE credentials SET rotated_to = @n WHERE credential_id = @c", ("n", grant.CredentialId), ("c", credentialId)).ExecuteNonQueryAsync(ct);
         await AuditInTxAsync(conn, tx, tenantId, credentialId, actor, "credential.rotate.revoke", $"rotated_to={grant.CredentialId}", null, null, null, "Success", null, ct);
         await AuditInTxAsync(conn, tx, tenantId, grant.CredentialId, actor, "credential.rotate.create", $"rotated_from={credentialId}", null, null, null, "Success", null, ct);
@@ -296,6 +307,9 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     {
         await using var conn = await OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
+        // A grace-period revocation is Revoked once its instant passes, though no one rewrote its status (review: Frank #8).
+        await Cmd(conn, tx, "UPDATE credentials SET status = 'Revoked' WHERE status = 'Active' AND revoked_at IS NOT NULL AND revoked_at <= @now",
+            ("now", now)).ExecuteNonQueryAsync(ct);
         var pruned = await Cmd(conn, tx, "DELETE FROM credentials WHERE status = 'Revoked' AND expires_at IS NOT NULL AND expires_at < @cut",
             ("cut", now - TimeSpan.FromDays(options.Value.RevocationHoldingDays))).ExecuteNonQueryAsync(ct);
         if (pruned > 0)
@@ -382,14 +396,31 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     // ── Audit (FR8) ───────────────────────────────────────────────────────────
 
     /// <summary>Appends gateway-reported uses; the first rejection for natural expiry is also logged as the credential's expiration (FR8.28).</summary>
-    public async Task RecordUsesAsync(IReadOnlyList<UseReport> uses, CancellationToken ct)
+    public Task RecordUsesAsync(IReadOnlyList<UseReport> uses, CancellationToken ct) =>
+        RecordUsesAsync(new UseBatch("", Guid.NewGuid().ToString("N"), uses), ct);
+
+    /// <summary>Appends a batch once: false when this gateway already delivered it (a retry after a lost acknowledgement).</summary>
+    public async Task<bool> RecordUsesAsync(UseBatch batch, CancellationToken ct)
     {
         await using var conn = await OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
-        foreach (var use in uses)
+        if (await Cmd(conn, tx, "INSERT INTO audit_batches (gateway_id, batch_id, received_at) VALUES (@g, @b, now()) ON CONFLICT DO NOTHING",
+                ("g", batch.GatewayId), ("b", batch.BatchId)).ExecuteNonQueryAsync(ct) == 0)
         {
-            var tenant = await Cmd(conn, tx, "SELECT tenant_id FROM issued_ids i JOIN credentials c USING (credential_id) WHERE credential_id = @c",
-                ("c", use.CredentialId)).ExecuteScalarAsync(ct) as string;
+            return false;
+        }
+
+        // Tenants in one fixed order, so two gateways' batches never take the per-tenant chain locks in
+        // opposite orders and deadlock (review: Frank #6).
+        var tenants = new Dictionary<string, string?>();
+        foreach (var id in batch.Uses.Select(u => u.CredentialId).Distinct())
+        {
+            tenants[id] = await Cmd(conn, tx, "SELECT tenant_id FROM issued_ids WHERE credential_id = @c", ("c", id)).ExecuteScalarAsync(ct) as string;
+        }
+
+        foreach (var use in batch.Uses.OrderBy(u => tenants[u.CredentialId], StringComparer.Ordinal).ThenBy(u => u.At))
+        {
+            var tenant = tenants[use.CredentialId];
             if (tenant is null)
             {
                 continue; // a static config credential, unknown to the Authority
@@ -405,6 +436,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         }
 
         await tx.CommitAsync(ct);
+        return true;
     }
 
     private static async Task AuditInTxAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string tenantId, string? credentialId, string actor, string action,

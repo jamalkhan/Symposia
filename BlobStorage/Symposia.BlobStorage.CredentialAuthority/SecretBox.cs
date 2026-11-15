@@ -22,12 +22,21 @@ public sealed class SecretBox(byte[] key)
         var tag = new byte[16];
         using var aes = new AesGcm(key, 16);
         aes.Encrypt(nonce, plain, cipher, tag);
-        return Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
+        // Versioned, so the master key can be rotated later without re-issuing credentials (review: Carl #3).
+        return KeyVersion + Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
     }
+
+    /// <summary>The prefix marking which master key sealed a secret.</summary>
+    public const string KeyVersion = "k1:";
 
     public string Open(string sealedSecret)
     {
-        var raw = Convert.FromBase64String(sealedSecret);
+        if (!sealedSecret.StartsWith(KeyVersion, StringComparison.Ordinal))
+        {
+            throw new CryptographicException($"Secret sealed under an unknown key version: {sealedSecret.Split(':')[0]}.");
+        }
+
+        var raw = Convert.FromBase64String(sealedSecret[KeyVersion.Length..]);
         var plain = new byte[raw.Length - 28];
         using var aes = new AesGcm(key, 16);
         aes.Decrypt(raw.AsSpan(0, 12), raw.AsSpan(28), raw.AsSpan(12, 16), plain);

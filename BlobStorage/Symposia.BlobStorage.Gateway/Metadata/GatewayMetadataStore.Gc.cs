@@ -31,6 +31,24 @@ public sealed partial class GatewayMetadataStore
         AddColumnIfMissing(conn, tx, "gc_queue", "priority", $"INTEGER NOT NULL DEFAULT {PriorityMedium}");
         AddColumnIfMissing(conn, tx, "objects", "locked_until", "TEXT NULL");
         AddColumnIfMissing(conn, tx, "objects", "legal_hold", "INTEGER NOT NULL DEFAULT 0");
+        tx.Commit();
+        using var tx2 = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        InitializeGcTables(conn, tx2);
+        // Everything a restore needs to bring a version back exactly as it was (review: Lenny #4, Frank #12).
+        foreach (var (column, definition) in new[]
+                 {
+                     ("content_type", "TEXT NULL"), ("etag_override", "TEXT NULL"), ("regions", "TEXT NULL"), ("placement_gaps", "TEXT NULL"),
+                     ("merkle_root", "TEXT NULL"), ("merkle_cid", "TEXT NULL"), ("scheme", "TEXT NOT NULL DEFAULT 'replica'"), ("target_copies", "INTEGER NULL"),
+                 })
+        {
+            AddColumnIfMissing(conn, tx2, "object_versions", column, definition);
+        }
+
+        tx2.Commit();
+    }
+
+    private static void InitializeGcTables(SqliteConnection conn, SqliteTransaction tx)
+    {
         Run(conn, tx, """
             CREATE INDEX IF NOT EXISTS idx_gc_queue_due ON gc_queue (priority, attempts, id, queued_at); -- matches DueDeletions' ORDER BY, so LIMIT stops early
 
@@ -50,6 +68,8 @@ public sealed partial class GatewayMetadataStore
                 physically_deleted_at TEXT NULL        -- every replica confirmed gone; the row stays as the audit record
             );
             CREATE INDEX IF NOT EXISTS idx_versions_key ON object_versions (bucket, key, created_at);
+            CREATE INDEX IF NOT EXISTS idx_versions_markers ON object_versions (bucket, key) WHERE kind = 'marker';
+            CREATE INDEX IF NOT EXISTS idx_versions_pending ON object_versions (bucket) WHERE physically_deleted_at IS NULL AND deleted_at IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_versions_purgeable ON object_versions (deleted_at) WHERE purge_queued_at IS NULL AND deleted_at IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_versions_cid_live ON object_versions (cid) WHERE physically_deleted_at IS NULL;
             CREATE INDEX IF NOT EXISTS idx_versions_queued ON object_versions (cid) WHERE purge_queued_at IS NOT NULL AND physically_deleted_at IS NULL;
@@ -110,7 +130,6 @@ public sealed partial class GatewayMetadataStore
                 PRIMARY KEY (cid)
             );
             """);
-        tx.Commit();
     }
 
     // ── Versions and soft delete (#16 FR2, FR3) ───────────────────────────────
@@ -119,8 +138,10 @@ public sealed partial class GatewayMetadataStore
     internal static void ArchiveVersion(SqliteConnection conn, SqliteTransaction tx, string bucket, string key, string kind, bool softDeleted)
     {
         Run(conn, tx, $"""
-            INSERT INTO object_versions (bucket, key, cid, size_bytes, kind, node_ids, created_at, deleted_at, locked_until, legal_hold)
-            SELECT bucket, key, cid, size_bytes, $kind, node_ids, last_modified, {(softDeleted ? "$now" : "NULL")}, locked_until, legal_hold
+            INSERT INTO object_versions (bucket, key, cid, size_bytes, kind, node_ids, created_at, deleted_at, locked_until, legal_hold,
+                                         content_type, etag_override, regions, placement_gaps, merkle_root, merkle_cid, scheme, target_copies)
+            SELECT bucket, key, cid, size_bytes, $kind, node_ids, last_modified, {(softDeleted ? "$now" : "NULL")}, locked_until, legal_hold,
+                   content_type, etag_override, regions, placement_gaps, merkle_root, merkle_cid, scheme, target_copies
             FROM objects WHERE bucket = $b AND key = $k
             """, ("$kind", kind), ("$now", Now()), ("$b", bucket), ("$k", key));
     }
@@ -183,10 +204,12 @@ public sealed partial class GatewayMetadataStore
         }
 
         Run(conn, tx, """
-            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, target_copies, locked_until, legal_hold)
-            SELECT bucket, key, cid, size_bytes, 'application/octet-stream', $now, node_ids,
+            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, target_copies, locked_until, legal_hold,
+                                 etag_override, regions, placement_gaps, merkle_root, merkle_cid, scheme)
+            SELECT bucket, key, cid, size_bytes, COALESCE(content_type, 'application/octet-stream'), $now, node_ids,
                    CASE WHEN node_ids = '' THEN 0 ELSE length(node_ids) - length(replace(node_ids, ',', '')) + 1 END,
-                   COALESCE(CAST((SELECT value FROM settings WHERE name = 'copy_floor') AS INTEGER), 1), locked_until, legal_hold
+                   COALESCE(target_copies, CAST((SELECT value FROM settings WHERE name = 'copy_floor') AS INTEGER), 1), locked_until, legal_hold,
+                   etag_override, regions, placement_gaps, merkle_root, merkle_cid, scheme
             FROM object_versions WHERE id = $id;
             DELETE FROM object_versions WHERE id = $id;
             DELETE FROM object_versions WHERE bucket = $b AND key = $k AND kind = 'marker';
@@ -284,15 +307,20 @@ public sealed partial class GatewayMetadataStore
     // ── Evaluators' queries ───────────────────────────────────────────────────
 
     /// <summary>Soft-deleted versions past <paramref name="cutoff"/>, not yet queued, not locked or held (FR2.1, FR2.4).</summary>
-    public IReadOnlyList<ObjectVersion> PurgeableVersions(DateTimeOffset cutoff, int limit)
+    /// <remarks>
+    /// Each row is held to its own bucket's window in SQL, so a batch is never filled with long-window rows
+    /// that aren't due while short-window ones wait behind them (review: Frank #10).
+    /// </remarks>
+    public IReadOnlyList<ObjectVersion> PurgeableVersions(DateTimeOffset now, int defaultRecoveryDays, int limit)
     {
         using var conn = Open();
         return ReadVersions(Query(conn, $"""
-            SELECT {VersionColumns} FROM object_versions
+            SELECT {VersionColumns} FROM object_versions v
             WHERE purge_queued_at IS NULL AND deleted_at IS NOT NULL AND deleted_at < $cut
+              AND julianday(deleted_at) <= julianday($now) - MIN(365, MAX(1, COALESCE((SELECT recovery_d FROM bucket_lifecycle l WHERE l.bucket = v.bucket), $default)))
               AND legal_hold = 0 AND (locked_until IS NULL OR locked_until <= $now)
             ORDER BY deleted_at LIMIT $l
-            """, ("$cut", cutoff.ToString("O")), ("$now", Now()), ("$l", limit)));
+            """, ("$cut", (now - TimeSpan.FromDays(1)).ToString("O")), ("$now", now.ToString("O")), ("$default", defaultRecoveryDays), ("$l", limit)));
     }
 
     /// <summary>Queues a version's bytes for physical deletion from every replica (FR2.2), unless something else still references them.</summary>
@@ -318,7 +346,7 @@ public sealed partial class GatewayMetadataStore
             foreach (var (cid, node) in shardCopies)
             {
                 Run(conn, tx, "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at, category, priority) VALUES ($c, $n, $t, 'SoftDeletePurge', $p)",
-                    ("$c", cid), ("$n", node), ("$t", "0001-01-01T00:00:00.0000000+00:00"), ("$p", PriorityMedium));
+                    ("$c", cid), ("$n", node), ("$t", Now()), ("$p", PriorityMedium));
                 Run(conn, tx, "INSERT OR IGNORE INTO version_purges (version_id, cid) VALUES ($id, $c)", ("$id", version.Id), ("$c", cid));
             }
 
@@ -336,12 +364,12 @@ public sealed partial class GatewayMetadataStore
             foreach (var node in version.NodeIds)
             {
                 Run(conn, tx, "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at, category, priority) VALUES ($c, $n, $t, 'SoftDeletePurge', $p)",
-                    ("$c", version.Cid), ("$n", node), ("$t", "0001-01-01T00:00:00.0000000+00:00"), ("$p", PriorityMedium));
+                    ("$c", version.Cid), ("$n", node), ("$t", Now()), ("$p", PriorityMedium));
             }
 
             if (version.NodeIds.Count == 0)
             {
-                Run(conn, tx, "UPDATE object_versions SET physically_deleted_at = $now WHERE id = $id", ("$now", Now()), ("$id", version.Id));
+                CloseVersionsWaitingOn(conn, tx, version.Cid); // nothing to delete: physically gone now, billed until now (Frank #11)
             }
         }
 
@@ -415,6 +443,17 @@ public sealed partial class GatewayMetadataStore
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        var closed = CloseVersionsWaitingOn(conn, tx, cid);
+        tx.Commit();
+        return closed;
+    }
+
+    /// <summary>
+    /// Closes every version waiting on <paramref name="cid"/> whose blobs have all left the queue: physically
+    /// deleted now, its bytes out of the tenant's usage, and <c>blob.physically_deleted</c> recorded (same transaction).
+    /// </summary>
+    internal static int CloseVersionsWaitingOn(SqliteConnection conn, SqliteTransaction tx, string cid)
+    {
         // Versions waiting on this blob whose every blob is now gone from the queue.
         var closed = new List<(long Id, string Bucket, string Key, long Size)>();
         using (var read = Query(conn, """
@@ -436,7 +475,6 @@ public sealed partial class GatewayMetadataStore
                 ("$b", bucket), ("$k", key), ("$c", cid), ("$s", size), ("$now", Now()));
         }
 
-        tx.Commit();
         return closed.Count;
     }
 

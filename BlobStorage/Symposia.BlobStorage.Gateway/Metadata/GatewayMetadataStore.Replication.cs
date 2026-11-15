@@ -36,15 +36,30 @@ public sealed partial class GatewayMetadataStore
         }
 
         var floor = Math.Max(1, minCopies);
+        tx.Commit();
         if (applied != floor.ToString())
         {
-            Run(conn, tx, "UPDATE objects SET target_copies = $f WHERE target_copies < $f", ("$f", floor));
-            RefreshReplicationState(conn, tx, "WHERE replica_count < target_copies OR replication_state = 'quorum'");
-            Run(conn, tx, "INSERT INTO settings (name, value) VALUES ('copy_floor', $f) ON CONFLICT(name) DO UPDATE SET value = excluded.value",
-                ("$f", floor.ToString()));
-        }
+            // In chunks, each its own short transaction, so peers sharing the database aren't locked out for a
+            // full-table pass (review: Frank #14). The floor is recorded only once every row has it.
+            while (true)
+            {
+                using var chunk = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+                using var raise = Query(conn, """
+                    UPDATE objects SET target_copies = $f,
+                        replication_state = CASE WHEN replica_count >= $f THEN 'full' ELSE 'quorum' END
+                    WHERE rowid IN (SELECT rowid FROM objects WHERE target_copies < $f LIMIT 5000)
+                    """, ("$f", floor));
+                raise.Transaction = chunk;
+                var raised = raise.ExecuteNonQuery();
+                chunk.Commit();
+                if (raised == 0) break;
+            }
 
-        tx.Commit();
+            using var done = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+            Run(conn, done, "INSERT INTO settings (name, value) VALUES ('copy_floor', $f) ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                ("$f", floor.ToString()));
+            done.Commit();
+        }
     }
 
     /// <summary>The regions a bucket's objects are assigned to (empty = global).</summary>
@@ -93,7 +108,9 @@ public sealed partial class GatewayMetadataStore
         const string select = $"SELECT {ObjectColumns} FROM objects WHERE replica_count >= 1 AND target_copies > replica_count";
         using var cmd = after is null
             ? Query(conn, select + " ORDER BY (target_copies - replica_count), bucket, key LIMIT $limit", ("$limit", limit))
-            : Query(conn, select + " AND ((target_copies - replica_count), bucket, key) > ($m, $b, $k) ORDER BY (target_copies - replica_count), bucket, key LIMIT $limit",
+            // Split rather than one row-value comparison, so the cursor seeks the index (review: Frank #13).
+            : Query(conn, select + " AND ((target_copies - replica_count) > $m OR ((target_copies - replica_count) = $m AND (bucket, key) > ($b, $k))) " +
+                "ORDER BY (target_copies - replica_count), bucket, key LIMIT $limit",
                 ("$m", after.Value.Missing), ("$b", after.Value.Bucket), ("$k", after.Value.Key), ("$limit", limit));
         return ReadRecords(cmd);
     }

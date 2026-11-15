@@ -13,7 +13,7 @@ namespace Symposia.BlobStorage.Gateway.Auth;
 public sealed class CredentialStore
 {
     private readonly Dictionary<string, CredentialGrant> _static;
-    private volatile State _state = new(0, new Dictionary<string, CredentialGrant>(), new Dictionary<string, TenantStatus>(), []);
+    private State _state = new(0, new Dictionary<string, CredentialGrant>(), new Dictionary<string, TenantStatus>(), []);
 
     private sealed record State(long Version, IReadOnlyDictionary<string, CredentialGrant> ByAccessKey, IReadOnlyDictionary<string, TenantStatus> Tenants,
         IReadOnlyList<PolicyRule> Rules);
@@ -48,16 +48,25 @@ public sealed class CredentialStore
     /// <summary>Installs a snapshot unless an equal or newer one is already in place; returns whether it was applied.</summary>
     public bool Apply(AuthoritySnapshot snapshot)
     {
-        if (snapshot.Version <= _state.Version && _state.Version != 0)
-        {
-            return false;
-        }
-
-        _state = new State(snapshot.Version,
+        var next = new State(snapshot.Version,
             snapshot.Credentials.ToDictionary(c => c.AccessKeyId, StringComparer.Ordinal),
             snapshot.Tenants.ToDictionary(t => t.TenantId, t => t.Status, StringComparer.Ordinal),
             snapshot.Rules);
-        LastApplied = DateTimeOffset.UtcNow;
-        return true;
+        // Compare-and-swap: the Watch and poll loops pull concurrently, and a slower, older snapshot must never
+        // replace a newer one (that would un-revoke a credential until the next pull; review: Frank #9).
+        while (true)
+        {
+            var current = _state;
+            if (snapshot.Version <= current.Version && current.Version != 0)
+            {
+                return false;
+            }
+
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _state, next, current), current))
+            {
+                LastApplied = DateTimeOffset.UtcNow;
+                return true;
+            }
+        }
     }
 }

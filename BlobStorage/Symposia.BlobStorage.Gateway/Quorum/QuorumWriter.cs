@@ -84,7 +84,7 @@ public sealed class QuorumWriter
         var record = ToRecord(blob, bucket, key, contentType);
         var outcome = _metadata.CommitObject(record);
         record = record with { LastModified = outcome.CommittedAt };
-        AfterCommit(blob, bucket, key);
+        AfterCommit(blob, bucket, key, outcome.Applied);
         return (record, outcome.Replaced);
     }
 
@@ -102,21 +102,30 @@ public sealed class QuorumWriter
     /// After an object commit: records the copies that confirm past quorum on the object as they land (#7
     /// FR5), and queues repair for any the placement couldn't target. Shared with multipart Complete.
     /// </summary>
-    public void AfterCommit(BlobWriteResult blob, string bucket, string key)
+    public void AfterCommit(BlobWriteResult blob, string bucket, string key, bool applied = true)
     {
         RepairIfShort(blob);
         _ = blob.Remainder.ContinueWith(late =>
         {
-            foreach (var nodeId in late.Result)
+            // A faulted remainder records nothing, but must still hand the shortfall to repair (review: Carl #6).
+            IReadOnlyList<string> landed = late.IsCompletedSuccessfully ? late.Result : [];
+            if (!applied)
+            {
+                // The version lost its commit (#7 FR11): late copies are garbage too (review: Lenny #7).
+                _metadata.CollectIfUnreferenced(blob.Cid, landed);
+                return;
+            }
+
+            foreach (var nodeId in landed)
             {
                 _metadata.AddConfirmedReplica(bucket, key, blob.Cid, nodeId);
             }
 
-            if (blob.NodeIds.Count + late.Result.Count < blob.Requirement.RepairTarget)
+            if (blob.NodeIds.Count + landed.Count < blob.Requirement.RepairTarget)
             {
                 _repairQueue.Enqueue(new Repair.RepairTask(blob.Cid, null, Repair.RepairReason.UnderReplicated));
             }
-        }, CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -199,10 +208,13 @@ public sealed class QuorumWriter
         // Every target now has the whole body; wait for durable acks, at most the quorum timeout.
         // A list, not a map: sessions that end synchronously share one completed Task instance.
         var completions = sessions.Select(s => new Pending(s.CompleteAsync(), s)).ToList();
-        var confirmed = new List<NodeWriteSession>();
+        var acks = new List<NodeWriteSession>();
         using var timeout = new CancellationTokenSource(_options.Value.Redundancy.WriteQuorumTimeout(tenantId));
         var waitForAll = !requirement.EnforcesRegions;
-        while (completions.Count > 0 && (waitForAll || !requirement.IsSatisfiedBy(confirmed.Select(c => c.Region))))
+        // Acks are grouped by the CID each node computed: quorum is a group of identical copies, so a faulty
+        // node can neither complete a quorum nor, by answering first, decide the content (review: Lenny #6).
+        List<NodeWriteSession> Leading() => acks.GroupBy(a => a.Response!.Cid).OrderByDescending(g => g.Count()).FirstOrDefault()?.ToList() ?? [];
+        while (completions.Count > 0 && (waitForAll || !requirement.IsSatisfiedBy(Leading().Select(c => c.Region))))
         {
             NodeWriteSession session;
             try
@@ -221,7 +233,7 @@ public sealed class QuorumWriter
 
             if (session.Response is not null)
             {
-                confirmed.Add(session);
+                acks.Add(session);
             }
             else
             {
@@ -230,18 +242,20 @@ public sealed class QuorumWriter
         }
 
         // One content hash: a node reporting a different CID for the same bytes is faulty, not a copy.
+        var confirmed = Leading();
         var cid = confirmed.FirstOrDefault()?.Response!.Cid;
-        foreach (var odd in confirmed.Where(c => c.Response!.Cid != cid).ToList())
+        foreach (var odd in acks.Except(confirmed))
         {
             _logger.LogError("Node {Node} stored {Got} for a blob others stored as {Cid}; not counting it.", odd.Node.Id, odd.Response!.Cid, cid);
-            confirmed.Remove(odd);
+            _metadata.CollectIfUnreferenced(odd.Response!.Cid, [odd.Node.Id]);
         }
 
         if (!requirement.IsSatisfiedBy(confirmed.Select(c => c.Region)))
         {
             // Quorum not reached in time (#7 FR4): cancel what's still streaming and discard what landed.
             // Discard goes through GC (unreferenced check + minimum age), never a direct delete: another
-            // object may hold the same bytes (content-addressed dedup).
+            // object may hold the same bytes (content-addressed dedup). Every target is queued, not only the
+            // ones that answered: one may have fsynced just as it was cancelled (review: Lenny #7).
             foreach (var pending in completions)
             {
                 pending.Session.Abort();
@@ -249,7 +263,7 @@ public sealed class QuorumWriter
 
             if (cid is not null)
             {
-                _metadata.CollectIfUnreferenced(cid, confirmed.Select(c => c.Node.Id));
+                _metadata.CollectIfUnreferenced(cid, plan.Targets.Select(t => t.Id));
             }
 
             _metrics?.WriteQuorumFailed.Inc();

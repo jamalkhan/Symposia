@@ -108,6 +108,12 @@ public sealed class RepairQueue
                     continue;
                 }
 
+                // The waiting task's row closes as superseded, so no audit row is left open (review: Lenny #8).
+                if (waiting.AuditId > 0)
+                {
+                    _store?.CloseRepairTask(waiting.AuditId, "Superseded");
+                }
+
                 _tiers[(int)escalated.Priority].Writer.TryWrite(escalated);
                 return true;
             }

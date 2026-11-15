@@ -17,6 +17,7 @@ public sealed partial class GatewayMetadataStore
         AddColumnIfMissing(conn, tx, "objects", "merkle_root", "TEXT NULL");
         AddColumnIfMissing(conn, tx, "objects", "scheme", "TEXT NOT NULL DEFAULT 'replica'");
         AddColumnIfMissing(conn, tx, "buckets", "scheme", "TEXT NULL");
+        AddColumnIfMissing(conn, tx, "objects", "merkle_cid", "TEXT NULL"); // the CID merkle_root was computed over
         Run(conn, tx, """
             -- Folder-level region assignment (#8 FR1.1): the longest matching prefix wins over the bucket's.
             CREATE TABLE IF NOT EXISTS region_rules (

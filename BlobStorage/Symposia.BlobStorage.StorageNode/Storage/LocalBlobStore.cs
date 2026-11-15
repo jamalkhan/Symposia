@@ -169,7 +169,13 @@ public sealed class LocalBlobStore
     {
         var sidecar = GetFullPath(cid) + MerkleSuffix;
         var temp = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.merkle.tmp");
-        File.WriteAllBytes(temp, leaves.SelectMany(l => l).ToArray());
+        // fsynced like the blob: a torn sidecar after a crash would fail honest challenges (review: Frank).
+        using (var file = new FileStream(temp, FileMode.CreateNew, FileAccess.Write))
+        {
+            file.Write(leaves.SelectMany(l => l).ToArray());
+            file.Flush(flushToDisk: true);
+        }
+
         File.Move(temp, sidecar, overwrite: true);
     }
 

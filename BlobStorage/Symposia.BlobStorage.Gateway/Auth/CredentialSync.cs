@@ -94,9 +94,6 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
     }
 }
 
-/// <summary>One data-plane use, as reported to the Authority's audit log (#3 FR8.28).</summary>
-public sealed record UseReport(string CredentialId, string Action, string? Resource, string? SourceIp, string? Region, string GatewayId,
-    string Outcome, string? Reason, DateTimeOffset At);
 
 /// <summary>
 /// Sends use events to the Authority in batches, off the request path: a slow or unreachable Authority never
@@ -144,38 +141,69 @@ public sealed class AuditForwarder : BackgroundService
         {
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "CREATE TABLE IF NOT EXISTS spool (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)";
+            cmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS spool (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS rejected (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL, at TEXT NOT NULL);
+                """;
             cmd.ExecuteNonQuery();
         }
 
         while (!stoppingToken.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
-            var batch = new List<UseReport>();
-            while (batch.Count < 1000 && _queue.Reader.TryRead(out var use)) batch.Add(use);
+            var batch = Take(1000);
             await FlushSpoolAsync(stoppingToken);
-            if (batch.Count > 0 && !await SendAsync(batch, stoppingToken))
+            if (batch is not null && await SendAsync(batch, stoppingToken) == Delivery.Retry)
             {
                 Spool(batch);
             }
         }
     }
 
-    private async Task<bool> SendAsync(IReadOnlyList<UseReport> batch, CancellationToken ct)
+    /// <summary>On shutdown, what's still in memory goes to the spool instead of being lost (review: Frank #7, Carl #2).</summary>
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken);
+        while (Enabled && Take(1000) is { } rest)
+        {
+            Spool(rest);
+        }
+    }
+
+    private UseBatch? Take(int max)
+    {
+        var uses = new List<UseReport>();
+        while (uses.Count < max && _queue.Reader.TryRead(out var use)) uses.Add(use);
+        return uses.Count == 0 ? null : new UseBatch(GatewayId, Guid.NewGuid().ToString("N"), uses);
+    }
+
+    private string GatewayId => _options.Value.CredentialAuthority.GatewayId is { Length: > 0 } id ? id : Environment.MachineName;
+
+    private enum Delivery { Delivered, Retry, Rejected }
+
+    private async Task<Delivery> SendAsync(UseBatch batch, CancellationToken ct)
     {
         try
         {
             var response = await _http.CreateClient(CredentialSync.HttpClientName).PostAsJsonAsync("internal/audit", batch, CredentialSync.Json, ct);
-            return response.IsSuccessStatusCode;
+            if (response.IsSuccessStatusCode) return Delivery.Delivered;
+            if ((int)response.StatusCode is >= 400 and < 500 and not 408 and not 429)
+            {
+                // A batch the Authority will never take must not block every batch behind it (review: Frank #7).
+                _logger.LogError("Audit batch {Batch} rejected by the Authority ({Status}); setting it aside.", batch.BatchId, (int)response.StatusCode);
+                return Delivery.Rejected;
+            }
+
+            return Delivery.Retry;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            _logger.LogWarning("Audit delivery failed ({Message}); spooling {Count} event(s).", ex.Message, batch.Count);
-            return false;
+            _logger.LogWarning("Audit delivery failed ({Message}); spooling {Count} event(s).", ex.Message, batch.Uses.Count);
+            return Delivery.Retry;
         }
     }
 
-    private void Spool(IReadOnlyList<UseReport> batch)
+    private void Spool(UseBatch batch)
     {
         using var conn = new SqliteConnection(_spool);
         conn.Open();
@@ -201,6 +229,18 @@ public sealed class AuditForwarder : BackgroundService
         tx.Commit();
     }
 
+    /// <summary>Keeps a batch the Authority refused, for an operator to inspect, out of the delivery path.</summary>
+    private void SetAside(string body)
+    {
+        using var conn = new SqliteConnection(_spool);
+        conn.Open();
+        using var insert = conn.CreateCommand();
+        insert.CommandText = "INSERT INTO rejected (body, at) VALUES ($b, $t)";
+        insert.Parameters.AddWithValue("$b", body);
+        insert.Parameters.AddWithValue("$t", DateTimeOffset.UtcNow.ToString("O"));
+        insert.ExecuteNonQuery();
+    }
+
     private async Task FlushSpoolAsync(CancellationToken ct)
     {
         while (true)
@@ -217,9 +257,14 @@ public sealed class AuditForwarder : BackgroundService
                 (id, body) = (r.GetInt64(0), r.GetString(1));
             }
 
-            if (!await SendAsync(JsonSerializer.Deserialize<List<UseReport>>(body, CredentialSync.Json) ?? [], ct))
+            var spooled = JsonSerializer.Deserialize<UseBatch>(body, CredentialSync.Json);
+            switch (spooled is null ? Delivery.Rejected : await SendAsync(spooled, ct))
             {
-                return;
+                case Delivery.Retry:
+                    return;
+                case Delivery.Rejected:
+                    SetAside(body);
+                    break;
             }
 
             using var done = new SqliteConnection(_spool);

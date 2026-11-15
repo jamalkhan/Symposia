@@ -57,9 +57,10 @@ var internalApi = app.MapGroup("/internal").AddEndpointFilter(async (ctx, next) 
 
 internalApi.MapGet("/snapshot", (AuthorityStore store, CancellationToken ct) => store.SnapshotAsync(ct));
 
-internalApi.MapPost("/audit", async (UseReport[] uses, AuthorityStore store, CancellationToken ct) =>
+internalApi.MapPost("/audit", async (UseBatch batch, AuthorityStore store, CancellationToken ct) =>
 {
-    await store.RecordUsesAsync(uses, ct);
+    // 204 whether new or a replay: either way the gateway may drop its copy.
+    await store.RecordUsesAsync(batch, ct);
     return Results.NoContent();
 });
 

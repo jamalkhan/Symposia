@@ -149,6 +149,12 @@ public sealed class NodeConnection : IDisposable
     /// <summary>Current penalty stage 0–4, from the penalty-stage system (#8 FR3).</summary>
     public int PenaltyStage { get; set; }
 
+    /// <summary>
+    /// The node has answered a Merkle challenge with a valid proof, so it supports them: from then on an answer
+    /// without a proof is a failure, never a fallback to the (public) CID (review: Carl #1).
+    /// </summary>
+    public bool ProofCapable { get; set; }
+
     /// <summary>Challenges this node failed since the gateway started (#8 FR6.4); feeds its penalty assessment.</summary>
     public int ChallengeFailures { get; set; }
 

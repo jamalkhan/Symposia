@@ -109,15 +109,19 @@ public sealed class ChallengeScheduler(
 
             if (root is not null && response.ProofSupported)
             {
-                return response.LeafCount == leafCount
-                    && MerkleTree.Verify(response.LeafData.Span, leaf, leafCount, response.Siblings.Select(s => s.ToByteArray()).ToList(), root)
-                    ? ChallengeResult.Passed : ChallengeResult.Failed;
+                var valid = response.LeafCount == leafCount
+                    && MerkleTree.Verify(response.LeafData.Span, leaf, leafCount, response.Siblings.Select(s => s.ToByteArray()).ToList(), root);
+                node.ProofCapable |= valid;
+                return valid ? ChallengeResult.Passed : ChallengeResult.Failed;
             }
 
             if (root is not null)
             {
-                // An older node ignored the proof request and hashed the whole blob: compare with the CID.
-                return response.Sha256Hex.Equals(record.Cid, StringComparison.OrdinalIgnoreCase) ? ChallengeResult.Passed : ChallengeResult.Failed;
+                // No proof. A node known to produce proofs is dodging, and echoing back the CID we sent proves
+                // nothing (review: Carl #1). Only a node that never has (an older release) gets the whole-blob
+                // comparison, the protocol's documented fallback for nodes without storage.integrity.merkle.v1.
+                return node.ProofCapable || response.Sha256Hex.Length == 0 ? ChallengeResult.Failed
+                    : response.Sha256Hex.Equals(record.Cid, StringComparison.OrdinalIgnoreCase) ? ChallengeResult.Passed : ChallengeResult.Failed;
             }
 
             return response.Sha256Hex.Equals(record.Cid, StringComparison.OrdinalIgnoreCase) ? ChallengeResult.Passed : ChallengeResult.Failed;

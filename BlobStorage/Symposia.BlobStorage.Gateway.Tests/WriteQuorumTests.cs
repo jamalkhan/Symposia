@@ -100,19 +100,41 @@ public sealed class WriteQuorumTests
     }
 
     [Fact]
-    public void LaterCommit_Wins_AndTimestampsNeverRunBackwards()
+    public void LaterCommit_FromASlowClock_StillWins_AndTimestampsNeverRunBackwards() // review: Frank #1
     {
         var store = Store();
         var at = DateTimeOffset.Parse("2026-11-14T10:00:00.500Z");
         store.CommitObject(Record("ffff", at));
 
-        // A gateway whose clock is behind still commits after the current version, not before it.
+        // Serialized after the current version, so it is the later write whatever its gateway's clock says.
         var later = store.CommitObject(Record("0000", at.AddSeconds(-5)));
 
-        Assert.True(later.Applied || later.CommittedAt == at);
-        var current = store.GetObject("b", "k")!;
-        Assert.True(current.LastModified >= at);
+        Assert.True(later.Applied);
+        Assert.Equal(at.AddMilliseconds(1), later.CommittedAt);
+        Assert.Equal("0000", store.GetObject("b", "k")!.Cid);
     }
+
+    [Fact]
+    public void StaleMerkleRoot_FromAnOlderGatewaysOverwrite_IsIgnored() // review: Frank #2
+    {
+        var store = Store();
+        store.CommitObject(Record("aaaa", DateTimeOffset.UtcNow) with { MerkleRoot = new string('1', 64) });
+        Assert.NotNull(store.GetObject("b", "k")!.MerkleRoot);
+
+        // An N-1 gateway's upsert changes the CID but knows nothing of merkle_root/merkle_cid.
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(ConnectionOf(store)))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE objects SET cid = 'bbbb' WHERE bucket = 'b' AND key = 'k'";
+            cmd.ExecuteNonQuery();
+        }
+
+        Assert.Null(store.GetObject("b", "k")!.MerkleRoot);
+    }
+
+    private static string ConnectionOf(GatewayMetadataStore store) =>
+        (string)typeof(GatewayMetadataStore).GetField("_connectionString", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(store)!;
 
     private static ObjectRecord Record(string cid, DateTimeOffset at) => new("b", "k", cid, 1, "x", at, ["n1"]) { TargetCopies = 1 };
 
@@ -174,7 +196,9 @@ public sealed class WriteQuorumTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
         var store = cluster.Services.GetRequiredService<GatewayMetadataStore>();
         Assert.Null(store.GetObject(TestCluster.Bucket, "q/short"));
-        Assert.Equal(2, store.GetPendingDeletions(10).Count);
+        // Every target is queued, not only those that answered (one may have fsynced as it was cancelled); GC
+        // checks references, so a node without the blob just gets an idempotent delete.
+        Assert.Equal(4, store.GetPendingDeletions(10).Count);
     }
 
     [Fact]
