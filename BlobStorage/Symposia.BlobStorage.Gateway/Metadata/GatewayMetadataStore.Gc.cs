@@ -32,7 +32,7 @@ public sealed partial class GatewayMetadataStore
         AddColumnIfMissing(conn, tx, "objects", "locked_until", "TEXT NULL");
         AddColumnIfMissing(conn, tx, "objects", "legal_hold", "INTEGER NOT NULL DEFAULT 0");
         Run(conn, tx, """
-            CREATE INDEX IF NOT EXISTS idx_gc_queue_due ON gc_queue (priority, queued_at, attempts);
+            CREATE INDEX IF NOT EXISTS idx_gc_queue_due ON gc_queue (priority, attempts, id, queued_at); -- matches DueDeletions' ORDER BY, so LIMIT stops early
 
             CREATE TABLE IF NOT EXISTS object_versions (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
