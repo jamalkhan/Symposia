@@ -20,6 +20,12 @@ public sealed class AuthorityOptions
     /// <summary>How long a deleted tenant is recoverable before it may be purged (#3 FR2.7).</summary>
     public int TenantRecoveryDays { get; set; } = 30;
 
+    /// <summary>How long change rows are kept for deltas (#245); gateways further behind take the snapshot.</summary>
+    public int ChangeLogRetentionDays { get; set; } = 7;
+
+    /// <summary>A delta naming more entities than this is refused (410) in favour of the snapshot (#245).</summary>
+    public int MaxDeltaEntities { get; set; } = 5000;
+
     /// <summary>How often a Watch stream checks for a new state version (milliseconds).</summary>
     public int WatchPollMilliseconds { get; set; } = 500;
 }

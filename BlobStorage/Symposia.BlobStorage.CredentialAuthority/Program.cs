@@ -55,7 +55,21 @@ var internalApi = app.MapGroup("/internal").AddEndpointFilter(async (ctx, next) 
     Tokens.Matches(ctx.HttpContext.Request.Headers["X-Service-Token"].FirstOrDefault(), Opts(ctx.HttpContext).ServiceToken)
         ? await next(ctx) : Results.StatusCode(401));
 
-internalApi.MapGet("/snapshot", (AuthorityStore store, CancellationToken ct) => store.SnapshotAsync(ct));
+// Secret-bearing and per-caller: never cached anywhere (#245).
+internalApi.MapGet("/snapshot", async (HttpContext http, AuthorityStore store, CancellationToken ct) =>
+{
+    http.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(await store.SnapshotAsync(ct));
+});
+
+// Deltas since a version (#245 FR2). 410 tells the gateway to take the snapshot instead.
+internalApi.MapGet("/changes", async (long? since, HttpContext http, AuthorityStore store, CancellationToken ct) =>
+{
+    http.Response.Headers.CacheControl = "no-store";
+    if (since is not >= 0) return Results.BadRequest(new { error = "since must be a non-negative version" });
+    var (delta, refusal) = await store.ChangesAsync(since.Value, ct);
+    return delta is not null ? Results.Ok(delta) : Results.Json(new { error = "SnapshotRequired", reason = refusal.ToString() }, statusCode: 410);
+});
 
 internalApi.MapPost("/audit", async (UseBatch batch, AuthorityStore store, CancellationToken ct) =>
 {

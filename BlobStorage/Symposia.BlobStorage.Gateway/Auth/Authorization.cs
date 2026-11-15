@@ -143,7 +143,7 @@ public static class Authorization
         if (response.IsSuccessStatusCode && !HttpMethods.IsGet(ctx.Request.Method))
         {
             // Make the change visible here at once rather than at the next push or poll.
-            await ctx.RequestServices.GetRequiredService<CredentialSync>().PullAsync(ctx.RequestAborted);
+            await ctx.RequestServices.GetRequiredService<CredentialSync>().SyncAsync(ctx.RequestAborted, wait: true); // a delta, not the snapshot (#245)
         }
 
         return Results.Content(body, "application/json", statusCode: (int)response.StatusCode);

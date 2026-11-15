@@ -92,7 +92,32 @@ public sealed record PolicyRule(string TenantId, string Bucket, string? Key, Pol
 }
 
 /// <summary>Everything a gateway needs to enforce, at one version of the Authority's state.</summary>
-public sealed record AuthoritySnapshot(long Version, IReadOnlyList<TenantState> Tenants, IReadOnlyList<CredentialGrant> Credentials, IReadOnlyList<PolicyRule> Rules);
+public sealed record AuthoritySnapshot(long Version, IReadOnlyList<TenantState> Tenants, IReadOnlyList<CredentialGrant> Credentials, IReadOnlyList<PolicyRule> Rules)
+{
+    /// <summary>
+    /// The Authority database's identity (#245): random, set once. A different epoch means the database was replaced
+    /// or restored, so its versions don't compare with the cached ones. Null from Authorities before #245.
+    /// </summary>
+    public string? Epoch { get; init; }
+}
+
+/// <summary>The whole rule set of one bucket policy (Key null) or object ACL, as replaced together (#245).</summary>
+public sealed record RuleSet(string TenantId, string Bucket, string? Key, IReadOnlyList<PolicyRule> Rules);
+
+/// <summary>
+/// What changed between two versions of the Authority's state (#245 FR2): each changed entity in its state at
+/// <see cref="Version"/>. A credential's <see cref="CredentialGrant.Secret"/> is set only when it was created or its
+/// secret changed in the window (FR3); null means "unchanged, keep yours". Not an <see cref="AuthoritySnapshot"/>:
+/// there a null secret would mean something else.
+/// </summary>
+public sealed record AuthorityDelta(
+    long FromVersion,
+    long Version,
+    string? Epoch,
+    IReadOnlyList<TenantState> Tenants,
+    IReadOnlyList<CredentialGrant> Credentials,
+    IReadOnlyList<string> DeletedCredentialIds,
+    IReadOnlyList<RuleSet> RuleSets);
 
 /// <summary>A data-plane request, as authorization sees it.</summary>
 public sealed record AccessRequest(bool IsWrite, string? Bucket, string? Key, string? BucketOwner, string? ListPrefix, IReadOnlyList<string> Regions);

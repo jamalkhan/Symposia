@@ -272,10 +272,16 @@ public sealed class CredentialAuthorityOptions
     public string ServiceToken { get; set; } = "";
 
     /// <summary>
-    /// Fallback full pull interval (#3 FR5.18): bounds propagation even with the Watch stream down. Keep it
-    /// at most half the 60 s revocation SLA.
+    /// Fallback poll interval (#3 FR5.18): bounds propagation even with the Watch stream down. Pulls deltas since
+    /// #245. Keep it at most half the 60 s revocation SLA.
     /// </summary>
     public int PollSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// The full-snapshot reconcile interval (#245 FR4c), jittered ±20 %. Polls and Watch pushes pull deltas;
+    /// this pulls everything, healing anything a delta could have missed.
+    /// </summary>
+    public double ReconcileMinutes { get; set; } = 10;
 
     /// <summary>This gateway's ID in audit events; empty = the machine name.</summary>
     public string GatewayId { get; set; } = "";

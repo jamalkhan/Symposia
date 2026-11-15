@@ -153,6 +153,12 @@ public sealed class MultiTenancyTests : IAsyncLifetime
         Assert.Contains("InsufficientCredentialScope", audit);
         Assert.Contains("CredentialRevoked", audit);
         Assert.True((await adminHttp.GetFromJsonAsync<JsonElement>("/v1/audit/verify")).GetProperty("intact").GetBoolean());
+
+        // #245 AC5: after all those mutations, the full snapshot was pulled once (startup); everything since was deltas.
+        var sync = _cluster.Services.GetRequiredService<CredentialSync>();
+        Assert.Equal(1, sync.Counts.GetValueOrDefault("snapshot"));
+        Assert.True(sync.Counts.GetValueOrDefault("delta") > 0);
+        Assert.Equal(0, sync.Counts.GetValueOrDefault("fallback_410"));
     }
 
     [Fact]

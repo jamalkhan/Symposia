@@ -1,6 +1,6 @@
 namespace Symposia.BlobStorage.CredentialAuthority;
 
-/// <summary>Prunes revocation entries held past their holding period, daily (#16 FR6.1).</summary>
+/// <summary>Prunes revocation entries held past their holding period (#16 FR6.1) and change-log rows past retention (#245), daily.</summary>
 public sealed class RevocationPruner(AuthorityStore store, ILogger<RevocationPruner> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -13,6 +13,11 @@ public sealed class RevocationPruner(AuthorityStore store, ILogger<RevocationPru
                 if (await store.PruneRevocationsAsync(DateTimeOffset.UtcNow, stoppingToken) is var pruned and > 0)
                 {
                     logger.LogInformation("Pruned {Count} expired revocation(s) past their holding period.", pruned);
+                }
+
+                if (await store.PruneChangeLogAsync(DateTimeOffset.UtcNow, stoppingToken) is var changes and > 0)
+                {
+                    logger.LogInformation("Pruned {Count} change-log row(s) past retention (#245).", changes);
                 }
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)

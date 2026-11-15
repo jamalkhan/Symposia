@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jamalkhan/Symposia/protocol/schemas/authority-snapshot.schema.json",
+  "title": "Credential Authority snapshot (GET /internal/snapshot)",
+  "description": "Everything a gateway enforces, at one state version (#3). Properties may be added, never removed, retyped or made required (#146). epoch is from #245.",
+  "type": "object",
+  "required": [
+    "version",
+    "tenants",
+    "credentials",
+    "rules"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer"
+    },
+    "epoch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tenants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "tenantId",
+          "status"
+        ],
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "credentials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "credentialId",
+          "accessKeyId",
+          "tenantId",
+          "accountId",
+          "identity",
+          "accessLevel",
+          "scope",
+          "regionLock",
+          "canManage",
+          "status",
+          "createdAt"
+        ],
+        "properties": {
+          "credentialId": {
+            "type": "string"
+          },
+          "accessKeyId": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "identity": {
+            "type": "string"
+          },
+          "accessLevel": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "object",
+            "properties": {
+              "bucket": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prefix": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "key": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "regionLock": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "canManage": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "revokedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rotatedFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rotatedTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "tenantId",
+          "bucket",
+          "effect",
+          "kind",
+          "principal"
+        ],
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "bucket": {
+            "type": "string"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effect": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "principal": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

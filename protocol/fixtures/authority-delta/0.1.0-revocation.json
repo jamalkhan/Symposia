@@ -1,0 +1,55 @@
+{
+  "fromVersion": 42,
+  "version": 44,
+  "epoch": "3f2c",
+  "tenants": [
+    {
+      "tenantId": "acme",
+      "status": "Suspended"
+    }
+  ],
+  "credentials": [
+    {
+      "credentialId": "cred_0a1b",
+      "accessKeyId": "SYMABCDEFGHIJKLMNOPQ",
+      "tenantId": "acme",
+      "accountId": "acme-default",
+      "identity": "svc@acme",
+      "accessLevel": "Read",
+      "scope": {
+        "bucket": "data",
+        "prefix": "reports/",
+        "key": null
+      },
+      "expiresAt": null,
+      "regionLock": [],
+      "canManage": false,
+      "status": "Revoked",
+      "createdAt": "2026-11-01T00:00:00+00:00",
+      "revokedAt": "2026-11-02T00:00:00+00:00",
+      "rotatedFrom": null,
+      "rotatedTo": null,
+      "secret": null
+    }
+  ],
+  "deletedCredentialIds": [
+    "cred_pruned"
+  ],
+  "ruleSets": [
+    {
+      "tenantId": "acme",
+      "bucket": "data",
+      "key": null,
+      "rules": [
+        {
+          "tenantId": "acme",
+          "bucket": "data",
+          "key": null,
+          "effect": "Deny",
+          "kind": "Identity",
+          "principal": "intern@acme"
+        }
+      ]
+    }
+  ]
+}

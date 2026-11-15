@@ -11,11 +11,13 @@ using Symposia.BlobStorage.Protocol.Credentials;
 namespace Symposia.BlobStorage.Gateway.Auth;
 
 /// <summary>
-/// Keeps <see cref="CredentialStore"/> current with the Credential Authority (#3 FR5.18), two ways at once:
-/// a Watch stream pushes each new state version (sub-second), and a full pull every
-/// <see cref="CredentialAuthorityOptions.PollSeconds"/> heals anything the stream missed (a reconnect, a
-/// restart, a partition). Revocation therefore reaches this gateway within one poll interval at worst,
-/// well inside the 60 s SLA. With no Authority configured, only configured credentials exist.
+/// Keeps <see cref="CredentialStore"/> current with the Credential Authority (#3 FR5.18, #245). The Watch stream
+/// pushes each new state version, and a poll every <see cref="CredentialAuthorityOptions.PollSeconds"/> covers a
+/// dropped stream; both pull only the <em>changes</em> since the cached version (<c>/internal/changes</c>), so an
+/// unchanged credential's secret never crosses the wire again (#245 FR3). The full snapshot is pulled only at
+/// startup, when the Authority answers 410 (too far behind, a restored database, an oversized delta), from a
+/// pre-#245 Authority (404), and on a jittered reconcile every <see cref="CredentialAuthorityOptions.ReconcileMinutes"/>
+/// as a self-healing backstop. Revocation still reaches this gateway within one poll interval (FR5).
 /// </summary>
 public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOptions> options, IHttpClientFactory http, ILogger<CredentialSync> logger)
     : BackgroundService
@@ -23,6 +25,16 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
     public const string HttpClientName = "credential-authority";
 
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+
+    private static readonly System.Diagnostics.Metrics.Meter Meter = new("Symposia.BlobStorage.Gateway.CredentialSync");
+    private static readonly System.Diagnostics.Metrics.Counter<long> Syncs = Meter.CreateCounter<long>("credential_sync_total");
+
+    // One sync at a time: a Watch tick arriving mid-sync coalesces into the running one (#245 Arch §1.3).
+    private readonly SemaphoreSlim _single = new(1, 1);
+    private volatile bool _deltaUnsupported;
+
+    /// <summary>Counts of each kind of sync (delta, snapshot, fallback_410, fallback_404, reconcile), for tests and diagnostics.</summary>
+    public System.Collections.Concurrent.ConcurrentDictionary<string, long> Counts { get; } = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -32,28 +44,112 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
             return;
         }
 
-        await PullAsync(stoppingToken);
-        await Task.WhenAll(WatchLoopAsync(stoppingToken), PollLoopAsync(stoppingToken));
+        Meter.CreateObservableGauge("credential_state_version", () => cache.Version);
+        Meter.CreateObservableGauge("credential_state_seconds_since_applied", () =>
+            cache.LastApplied == default ? -1 : (DateTimeOffset.UtcNow - cache.LastApplied).TotalSeconds);
+        await SnapshotAsync("snapshot", stoppingToken);
+        await Task.WhenAll(WatchLoopAsync(stoppingToken), PollLoopAsync(stoppingToken), ReconcileLoopAsync(stoppingToken));
     }
 
-    /// <summary>Pulls and applies the full snapshot; true when it was newer.</summary>
-    public async Task<bool> PullAsync(CancellationToken ct)
+    /// <summary>Brings the cache up to date: a delta when possible, the snapshot when not. True when state changed.</summary>
+    /// <param name="wait">
+    /// Wait for a running sync and then sync again, rather than coalescing into it: for callers that must see a
+    /// change they just made (the management proxy).
+    /// </param>
+    public async Task<bool> SyncAsync(CancellationToken ct, bool wait = false)
     {
+        if (!await _single.WaitAsync(wait ? Timeout.Infinite : 0, ct))
+        {
+            // A sync is running; it will pick up this version (or the next tick will).
+            return false;
+        }
+
         try
         {
-            var snapshot = await http.CreateClient(HttpClientName).GetFromJsonAsync<AuthoritySnapshot>("internal/snapshot", Json, ct);
-            if (snapshot is not null && cache.Apply(snapshot))
+            if (!cache.Loaded || _deltaUnsupported)
             {
-                logger.LogDebug("Credential state now at version {Version}.", snapshot.Version);
-                return true;
+                return await SnapshotCoreAsync("snapshot", ct);
+            }
+
+            using var response = await http.CreateClient(HttpClientName).GetAsync($"internal/changes?since={cache.Version}", ct);
+            switch ((int)response.StatusCode)
+            {
+                case 200:
+                    var delta = await response.Content.ReadFromJsonAsync<AuthorityDelta>(Json, ct);
+                    var result = delta is null ? CredentialStore.DeltaResult.NeedsSnapshot : cache.ApplyDelta(delta);
+                    if (result == CredentialStore.DeltaResult.NeedsSnapshot)
+                    {
+                        return await SnapshotCoreAsync("fallback_410", ct);
+                    }
+
+                    Count("delta");
+                    if (result == CredentialStore.DeltaResult.Applied)
+                    {
+                        logger.LogDebug("Credential delta {From} → {To}: {Credentials} credential(s), {Deleted} deleted, {Tenants} tenant(s), {Rules} rule set(s).",
+                            delta!.FromVersion, delta.Version, delta.Credentials.Count, delta.DeletedCredentialIds.Count, delta.Tenants.Count, delta.RuleSets.Count);
+                    }
+
+                    return result == CredentialStore.DeltaResult.Applied;
+                case 410:
+                    return await SnapshotCoreAsync("fallback_410", ct);
+                case 404:
+                    // An Authority from before #245: snapshot polling until the next reconcile checks again (FR9).
+                    _deltaUnsupported = true;
+                    return await SnapshotCoreAsync("fallback_404", ct);
+                default:
+                    logger.LogWarning("Credential delta pull answered {Status}; keeping version {Version}.", (int)response.StatusCode, cache.Version);
+                    return false;
             }
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            logger.LogWarning("Credential Authority sync failed: {Message}. Keeping version {Version}.", ex.Message, cache.Version);
+            return false;
+        }
+        finally
+        {
+            _single.Release();
+        }
+    }
+
+    /// <summary>Pulls and applies the full snapshot (startup, reconcile, tests).</summary>
+    public async Task<bool> PullAsync(CancellationToken ct) => await SnapshotAsync("snapshot", ct);
+
+    private async Task<bool> SnapshotAsync(string kind, CancellationToken ct)
+    {
+        await _single.WaitAsync(ct);
+        try
+        {
+            return await SnapshotCoreAsync(kind, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
             logger.LogWarning("Credential Authority snapshot pull failed: {Message}. Keeping version {Version}.", ex.Message, cache.Version);
+            return false;
+        }
+        finally
+        {
+            _single.Release();
+        }
+    }
+
+    private async Task<bool> SnapshotCoreAsync(string kind, CancellationToken ct)
+    {
+        var snapshot = await http.CreateClient(HttpClientName).GetFromJsonAsync<AuthoritySnapshot>("internal/snapshot", Json, ct);
+        Count(kind);
+        if (snapshot is not null && cache.Apply(snapshot))
+        {
+            logger.LogDebug("Credential state now at version {Version} (full snapshot, {Kind}).", snapshot.Version, kind);
+            return true;
         }
 
         return false;
+    }
+
+    private void Count(string kind)
+    {
+        Counts.AddOrUpdate(kind, 1, (_, n) => n + 1);
+        Syncs.Add(1, new KeyValuePair<string, object?>("kind", kind));
     }
 
     private async Task PollLoopAsync(CancellationToken ct)
@@ -61,7 +157,19 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(1, options.Value.CredentialAuthority.PollSeconds)));
         while (await timer.WaitForNextTickAsync(ct))
         {
-            await PullAsync(ct);
+            await SyncAsync(ct);
+        }
+    }
+
+    /// <summary>The full-snapshot backstop, jittered ±20 % so a fleet doesn't pull together (#245 FR4c).</summary>
+    private async Task ReconcileLoopAsync(CancellationToken ct)
+    {
+        var minutes = Math.Max(0.05, options.Value.CredentialAuthority.ReconcileMinutes);
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromMinutes(minutes * (0.8 + Random.Shared.NextDouble() * 0.4)), ct);
+            _deltaUnsupported = false; // an upgraded Authority is noticed at the next reconcile
+            await SnapshotAsync("reconcile", ct);
         }
     }
 
@@ -78,9 +186,9 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
                     new Grpc.Core.Metadata { { "x-service-token", o.ServiceToken } }, cancellationToken: ct);
                 while (await call.ResponseStream.MoveNext(ct))
                 {
-                    if (call.ResponseStream.Current.Version > cache.Version)
+                    if (call.ResponseStream.Current.Version != cache.Version)
                     {
-                        await PullAsync(ct);
+                        await SyncAsync(ct);
                     }
                 }
             }
@@ -93,7 +201,6 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
         }
     }
 }
-
 
 /// <summary>
 /// Sends use events to the Authority in batches, off the request path: a slow or unreachable Authority never

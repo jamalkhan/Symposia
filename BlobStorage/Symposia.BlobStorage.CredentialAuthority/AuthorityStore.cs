@@ -48,6 +48,22 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
             CREATE TABLE IF NOT EXISTS state_version (id INT PRIMARY KEY, version BIGINT NOT NULL);
             INSERT INTO state_version (id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
 
+            -- #245: what each version changed, so gateways can sync deltas instead of the full snapshot.
+            CREATE TABLE IF NOT EXISTS change_log (
+                version        BIGINT      NOT NULL,
+                kind           TEXT        NOT NULL,   -- credential | tenant | rules
+                entity_key     TEXT        NOT NULL,   -- credential_id | tenant_id | tenant_id \x1f bucket \x1f key
+                secret_changed BOOLEAN     NOT NULL DEFAULT FALSE,
+                at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (version, kind, entity_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_change_log_at ON change_log (at);
+            -- The highest version pruned from change_log: a gateway behind it must take the snapshot (410).
+            ALTER TABLE state_version ADD COLUMN IF NOT EXISTS log_floor BIGINT NOT NULL DEFAULT 0;
+            -- The database's identity, set once: a restore or replacement shows up as a different epoch.
+            ALTER TABLE state_version ADD COLUMN IF NOT EXISTS epoch TEXT NULL;
+            UPDATE state_version SET epoch = md5(random()::text || clock_timestamp()::text) WHERE id = 1 AND epoch IS NULL;
+
             CREATE TABLE IF NOT EXISTS tenants (
                 tenant_id    TEXT PRIMARY KEY,
                 status       TEXT NOT NULL,
@@ -127,8 +143,43 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
             """).ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<long> BumpAsync(NpgsqlConnection conn, NpgsqlTransaction tx, CancellationToken ct) =>
-        (long)(await Cmd(conn, tx, "UPDATE state_version SET version = version + 1 WHERE id = 1 RETURNING version").ExecuteScalarAsync(ct))!;
+    /// <summary>One entity a mutation changed (#245 FR1).</summary>
+    public sealed record Change(string Kind, string EntityKey, bool SecretChanged = false)
+    {
+        public static Change Credential(string id, bool secretChanged = false) => new("credential", id, secretChanged);
+
+        public static Change Tenant(string id) => new("tenant", id);
+
+        public static Change Rules(string tenant, string bucket, string? key) => new("rules", RulesKey(tenant, bucket, key));
+    }
+
+    private const char Sep = '\u001f';
+
+    private static string RulesKey(string tenant, string bucket, string? key) => $"{tenant}{Sep}{bucket}{Sep}{key}";
+
+    /// <summary>
+    /// Bumps the state version and records what this mutation changed, in its own transaction, so a change and its
+    /// version commit together or not at all (#245 FR1).
+    /// </summary>
+    /// <remarks>
+    /// Load-bearing for deltas: <c>UPDATE … RETURNING</c> holds the state_version row lock until commit, so versions
+    /// become visible in commit order, and a reader that sees version V sees every change at or below V. Moving the
+    /// bump out of the mutation's transaction, or to a sequence, would silently break delta cursors (guarded by
+    /// <c>ConcurrentMutations_ProduceGapFreeDeltas</c>).
+    /// </remarks>
+    private static async Task<long> BumpAsync(NpgsqlConnection conn, NpgsqlTransaction tx, CancellationToken ct, params Change[] changes)
+    {
+        var version = (long)(await Cmd(conn, tx, "UPDATE state_version SET version = version + 1 WHERE id = 1 RETURNING version").ExecuteScalarAsync(ct))!;
+        foreach (var change in changes.DistinctBy(c => (c.Kind, c.EntityKey)))
+        {
+            await Cmd(conn, tx, """
+                INSERT INTO change_log (version, kind, entity_key, secret_changed) VALUES (@v, @k, @e, @s)
+                ON CONFLICT (version, kind, entity_key) DO UPDATE SET secret_changed = change_log.secret_changed OR excluded.secret_changed
+                """, ("v", version), ("k", change.Kind), ("e", change.EntityKey), ("s", change.SecretChanged)).ExecuteNonQueryAsync(ct);
+        }
+
+        return version;
+    }
 
     public async Task<long> VersionAsync(CancellationToken ct)
     {
@@ -154,7 +205,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         await Cmd(conn, tx, "INSERT INTO accounts (account_id, tenant_id) VALUES (@a, @t)", ("a", account), ("t", tenantId)).ExecuteNonQueryAsync(ct);
         var grant = await IssueInTxAsync(conn, tx, tenantId, account, identity, AccessLevel.ReadWrite, ResourceScope.Tenant, null, [], true, null, actor, ct);
         await AuditInTxAsync(conn, tx, tenantId, null, actor, "tenant.create", null, null, null, null, "Success", null, ct);
-        await BumpAsync(conn, tx, ct);
+        await BumpAsync(conn, tx, ct, Change.Tenant(tenantId), Change.Credential(grant.CredentialId, secretChanged: true));
         await tx.CommitAsync(ct);
         return grant;
     }
@@ -182,7 +233,16 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         }
 
         await AuditInTxAsync(conn, tx, tenantId, null, actor, $"tenant.{status.ToString().ToLowerInvariant()}", null, null, null, null, "Success", null, ct);
-        await BumpAsync(conn, tx, ct);
+        var version = await BumpAsync(conn, tx, ct, Change.Tenant(tenantId));
+        if (status == TenantStatus.Purged)
+        {
+            // Every credential of the purged tenant was revoked above (idx_credentials_tenant).
+            await Cmd(conn, tx, """
+                INSERT INTO change_log (version, kind, entity_key) SELECT @v, 'credential', credential_id FROM credentials WHERE tenant_id = @t
+                ON CONFLICT DO NOTHING
+                """, ("v", version), ("t", tenantId)).ExecuteNonQueryAsync(ct);
+        }
+
         await tx.CommitAsync(ct);
         return true;
     }
@@ -215,7 +275,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
 
         var grant = await IssueInTxAsync(conn, tx, tenantId, account, identity, level, scope, expiresAt, regionLock, canManage, null, actor, ct, requestedId);
         await AuditInTxAsync(conn, tx, tenantId, grant.CredentialId, actor, "credential.create", scope.ToString(), null, null, null, "Success", null, ct);
-        await BumpAsync(conn, tx, ct);
+        await BumpAsync(conn, tx, ct, Change.Credential(grant.CredentialId, secretChanged: true));
         await tx.CommitAsync(ct);
         return grant;
     }
@@ -250,7 +310,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         if (changed)
         {
             await AuditInTxAsync(conn, tx, tenantId, credentialId, actor, "credential.revoke", null, null, null, null, "Success", null, ct);
-            await BumpAsync(conn, tx, ct);
+            await BumpAsync(conn, tx, ct, Change.Credential(credentialId));
         }
 
         await tx.CommitAsync(ct);
@@ -294,7 +354,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         await Cmd(conn, tx, "UPDATE credentials SET rotated_to = @n WHERE credential_id = @c", ("n", grant.CredentialId), ("c", credentialId)).ExecuteNonQueryAsync(ct);
         await AuditInTxAsync(conn, tx, tenantId, credentialId, actor, "credential.rotate.revoke", $"rotated_to={grant.CredentialId}", null, null, null, "Success", null, ct);
         await AuditInTxAsync(conn, tx, tenantId, grant.CredentialId, actor, "credential.rotate.create", $"rotated_from={credentialId}", null, null, null, "Success", null, ct);
-        await BumpAsync(conn, tx, ct);
+        await BumpAsync(conn, tx, ct, Change.Credential(credentialId), Change.Credential(grant.CredentialId, secretChanged: true));
         await tx.CommitAsync(ct);
         return grant with { RotatedFrom = credentialId };
     }
@@ -310,15 +370,21 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         // A grace-period revocation is Revoked once its instant passes, though no one rewrote its status (review: Frank #8).
         await Cmd(conn, tx, "UPDATE credentials SET status = 'Revoked' WHERE status = 'Active' AND revoked_at IS NOT NULL AND revoked_at <= @now",
             ("now", now)).ExecuteNonQueryAsync(ct);
-        var pruned = await Cmd(conn, tx, "DELETE FROM credentials WHERE status = 'Revoked' AND expires_at IS NOT NULL AND expires_at < @cut",
-            ("cut", now - TimeSpan.FromDays(options.Value.RevocationHoldingDays))).ExecuteNonQueryAsync(ct);
-        if (pruned > 0)
+        var pruned = new List<string>();
+        await using (var r = await Cmd(conn, tx, "DELETE FROM credentials WHERE status = 'Revoked' AND expires_at IS NOT NULL AND expires_at < @cut RETURNING credential_id",
+                         ("cut", now - TimeSpan.FromDays(options.Value.RevocationHoldingDays))).ExecuteReaderAsync(ct))
         {
-            await BumpAsync(conn, tx, ct);
+            while (await r.ReadAsync(ct)) pruned.Add(r.GetString(0));
+        }
+
+        if (pruned.Count > 0)
+        {
+            // A pruned credential has no row left: deltas report it as a tombstone.
+            await BumpAsync(conn, tx, ct, [.. pruned.Select(id => Change.Credential(id))]);
         }
 
         await tx.CommitAsync(ct);
-        return pruned;
+        return pruned.Count;
     }
 
     private const string GrantColumns =
@@ -360,7 +426,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
 
         await AuditInTxAsync(conn, tx, tenantId, null, actor, key is null ? "policy.bucket.set" : "policy.object.set", key is null ? bucket : $"{bucket}/{key}",
             null, null, null, "Success", null, ct);
-        await BumpAsync(conn, tx, ct);
+        await BumpAsync(conn, tx, ct, Change.Rules(tenantId, bucket, key));
         await tx.CommitAsync(ct);
     }
 
@@ -371,7 +437,14 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     {
         await using var conn = await OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
-        var version = (long)(await Cmd(conn, tx, "SELECT version FROM state_version WHERE id = 1").ExecuteScalarAsync(ct))!;
+        long version;
+        string? epoch;
+        await using (var head = await Cmd(conn, tx, "SELECT version, epoch FROM state_version WHERE id = 1").ExecuteReaderAsync(ct))
+        {
+            await head.ReadAsync(ct);
+            (version, epoch) = (head.GetInt64(0), head.IsDBNull(1) ? null : head.GetString(1));
+        }
+
         var tenants = new List<TenantState>();
         await using (var r = await Cmd(conn, tx, "SELECT tenant_id, status FROM tenants").ExecuteReaderAsync(ct))
         {
@@ -390,7 +463,119 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         }
 
         await tx.CommitAsync(ct);
-        return new AuthoritySnapshot(version, tenants, credentials, rules);
+        return new AuthoritySnapshot(version, tenants, credentials, rules) { Epoch = epoch };
+    }
+
+    /// <summary>Why a delta can't be served: the gateway must take the full snapshot (HTTP 410).</summary>
+    public enum DeltaRefusal { None, BehindRetention, AheadOfAuthority, TooLarge }
+
+    /// <summary>
+    /// The changes after <paramref name="since"/>, each entity in its current state (#245 FR2), read in one
+    /// repeatable-read transaction so the delta is self-consistent. Secrets only for credentials created or
+    /// re-secreted in the window (FR3).
+    /// </summary>
+    public async Task<(AuthorityDelta? Delta, DeltaRefusal Refusal)> ChangesAsync(long since, CancellationToken ct)
+    {
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+        long version, floor;
+        string? epoch;
+        await using (var head = await Cmd(conn, tx, "SELECT version, log_floor, epoch FROM state_version WHERE id = 1").ExecuteReaderAsync(ct))
+        {
+            await head.ReadAsync(ct);
+            (version, floor, epoch) = (head.GetInt64(0), head.GetInt64(1), head.IsDBNull(2) ? null : head.GetString(2));
+        }
+
+        if (since < floor) return (null, DeltaRefusal.BehindRetention);
+        if (since > version) return (null, DeltaRefusal.AheadOfAuthority); // the database went backwards (a restore)
+
+        var changed = new List<(string Kind, string Key, bool Secret)>();
+        await using (var r = await Cmd(conn, tx, """
+                         SELECT kind, entity_key, bool_or(secret_changed) FROM change_log
+                         WHERE version > @since AND version <= @v GROUP BY kind, entity_key
+                         """, ("since", since), ("v", version)).ExecuteReaderAsync(ct))
+        {
+            while (await r.ReadAsync(ct))
+            {
+                changed.Add((r.GetString(0), r.GetString(1), r.GetBoolean(2)));
+                if (changed.Count > options.Value.MaxDeltaEntities)
+                {
+                    return (null, DeltaRefusal.TooLarge);
+                }
+            }
+        }
+
+        var credentialIds = changed.Where(c => c.Kind == "credential").Select(c => c.Key).ToArray();
+        var withSecret = changed.Where(c => c.Kind == "credential" && c.Secret).Select(c => c.Key).ToHashSet();
+        var credentials = credentialIds.Length == 0 ? []
+            : await ReadGrantsAsync(Cmd(conn, tx, $"SELECT {GrantColumns} FROM credentials WHERE credential_id = ANY(@ids)", ("ids", credentialIds)), false, ct);
+        if (withSecret.Count > 0)
+        {
+            var opened = await ReadGrantsAsync(Cmd(conn, tx, $"SELECT {GrantColumns} FROM credentials WHERE credential_id = ANY(@ids)",
+                ("ids", withSecret.ToArray())), true, ct);
+            var secrets = opened.ToDictionary(g => g.CredentialId, g => g.Secret);
+            credentials = [.. credentials.Select(g => secrets.TryGetValue(g.CredentialId, out var secret) ? g with { Secret = secret } : g)];
+        }
+
+        var deleted = credentialIds.Except(credentials.Select(c => c.CredentialId)).ToList();
+        var tenantIds = changed.Where(c => c.Kind == "tenant").Select(c => c.Key).ToArray();
+        var tenants = new List<TenantState>();
+        if (tenantIds.Length > 0)
+        {
+            await using var r = await Cmd(conn, tx, "SELECT tenant_id, status FROM tenants WHERE tenant_id = ANY(@ids)", ("ids", tenantIds)).ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct)) tenants.Add(new TenantState(r.GetString(0), Enum.Parse<TenantStatus>(r.GetString(1))));
+        }
+
+        var ruleSets = new List<RuleSet>();
+        foreach (var key in changed.Where(c => c.Kind == "rules").Select(c => c.Key))
+        {
+            var parts = key.Split(Sep);
+            var objectKey = parts[2].Length == 0 ? null : parts[2];
+            var rules = new List<PolicyRule>();
+            await using var r = await Cmd(conn, tx, "SELECT effect, kind, principal FROM policy_rules WHERE tenant_id = @t AND bucket = @b AND key = @k",
+                ("t", parts[0]), ("b", parts[1]), ("k", parts[2])).ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+            {
+                rules.Add(new PolicyRule(parts[0], parts[1], objectKey, Enum.Parse<PolicyEffect>(r.GetString(0)), Enum.Parse<PrincipalKind>(r.GetString(1)), r.GetString(2)));
+            }
+
+            ruleSets.Add(new RuleSet(parts[0], parts[1], objectKey, rules));
+        }
+
+        await tx.CommitAsync(ct);
+        return (new AuthorityDelta(since, version, epoch, tenants, credentials, deleted, ruleSets), DeltaRefusal.None);
+    }
+
+    /// <summary>
+    /// Drops change rows older than the retention window in batches (#245 FR1) and raises <c>log_floor</c> past them,
+    /// so a gateway still behind gets 410 even when the log is empty. Returns rows deleted.
+    /// </summary>
+    public async Task<int> PruneChangeLogAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var total = 0;
+        while (true)
+        {
+            await using var conn = await OpenAsync(ct);
+            await using var tx = await conn.BeginTransactionAsync(ct);
+            var versions = new List<long>();
+            await using (var r = await Cmd(conn, tx, """
+                             DELETE FROM change_log WHERE (version, kind, entity_key) IN
+                                 (SELECT version, kind, entity_key FROM change_log WHERE at < @cut ORDER BY version LIMIT 5000)
+                             RETURNING version
+                             """, ("cut", now - TimeSpan.FromDays(options.Value.ChangeLogRetentionDays))).ExecuteReaderAsync(ct))
+            {
+                while (await r.ReadAsync(ct)) versions.Add(r.GetInt64(0));
+            }
+
+            if (versions.Count == 0)
+            {
+                return total;
+            }
+
+            await Cmd(conn, tx, "UPDATE state_version SET log_floor = GREATEST(log_floor, @f) WHERE id = 1", ("f", versions.Max())).ExecuteNonQueryAsync(ct);
+            await tx.CommitAsync(ct);
+            total += versions.Count;
+        }
     }
 
     // ── Audit (FR8) ───────────────────────────────────────────────────────────
