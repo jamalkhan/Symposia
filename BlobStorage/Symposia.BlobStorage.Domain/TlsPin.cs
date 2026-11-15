@@ -5,7 +5,7 @@ namespace Symposia.BlobStorage.Domain;
 
 /// <summary>
 /// Certificate pinning shared by the Credential Authority and gateways (#245 mTLS). The fingerprint is the same wire
-/// format as storage-node pinning (<c>StorageTlsProof.Fingerprint</c>, #142): lower-case hex SHA-256 of the DER
+/// format as storage-node pinning (<c>StorageTlsProof.Fingerprint</c>, #142; to be merged in #252): lower-case hex SHA-256 of the DER
 /// certificate, so one runbook command produces pins for both. A test keeps the two definitions identical.
 /// </summary>
 public static class TlsPin
