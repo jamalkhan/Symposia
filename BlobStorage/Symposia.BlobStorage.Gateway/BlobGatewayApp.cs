@@ -87,7 +87,10 @@ public static class BlobGatewayApp
         builder.Services.AddHostedService(sp => sp.GetRequiredService<Integrity.ChallengeScheduler>());
         builder.Services.AddScoped<Objects.ObjectService>(); // scoped: it uses the scoped QuorumWriter
         builder.Services.AddSingleton<NodeReconciler>();
+        builder.Services.AddSingleton<SafetyInvariantGate>();
+        builder.Services.AddSingleton<IOnChainMetadataOracle, FailClosedOracle>(); // fail-closed until the chain layer answers (#16 FR5.3)
         builder.Services.AddHostedService<GcWorker>();
+        builder.Services.AddHostedService<GcEvaluator>();
         builder.Services.AddHostedService<MultipartReaper>();
         builder.Services.AddHostedService<RepairWorker>();
         builder.Services.AddSingleton<ReplicationMonitor>();
@@ -191,7 +194,11 @@ public static class BlobGatewayApp
 
         // A node coming online (new, or back from an outage) gets missing copies straight away (issue #135).
         var replicationMonitor = app.Services.GetRequiredService<ReplicationMonitor>();
-        app.Services.GetRequiredService<NodeRegistry>().NodeBecameHealthy += _ => replicationMonitor.RequestSweep();
+        app.Services.GetRequiredService<NodeRegistry>().NodeBecameHealthy += node =>
+        {
+            app.Services.GetRequiredService<GatewayMetadataStore>().ClearOffline(node.Id); // back: no longer Offline (#16 FR4)
+            replicationMonitor.RequestSweep();
+        };
         // Nodes refused by network policy (#145): re-replicate their objects now, not at the next scan.
         app.Services.GetRequiredService<NodeRegistry>().NodesDropped += _ => replicationMonitor.RequestSweep();
 

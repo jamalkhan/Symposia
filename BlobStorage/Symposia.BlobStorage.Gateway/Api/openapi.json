@@ -434,6 +434,20 @@
             "description": "Deleted or absent."
           }
         }
+      },
+      "post": {
+        "summary": "?restore: bring back a deleted object within its recovery window. ?retention: set { lockedUntil, legalHold } (#16).",
+        "responses": {
+          "200": {
+            "description": "The object, or its retention"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket, NoSuchKey or NoSuchVersion"
+          }
+        }
       }
     },
     "/v1/buckets/{bucket}/regions": {
@@ -540,6 +554,83 @@
           },
           "404": {
             "description": "NoSuchBucket"
+          }
+        }
+      }
+    },
+    "/v1/buckets/{bucket}/lifecycle": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "The bucket's lifecycle and retention rules (#16).",
+        "responses": {
+          "200": {
+            "description": "BucketLifecycle"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set versioning, version limits, minimum retention, recovery window (1\u2013365 days) and multipart TTL (1\u2013720 hours).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "versioning": {
+                    "type": "boolean"
+                  },
+                  "maxVersions": {
+                    "type": "integer"
+                  },
+                  "maxVersionAgeDays": {
+                    "type": "integer"
+                  },
+                  "minRetentionDays": {
+                    "type": "integer"
+                  },
+                  "recoveryDays": {
+                    "type": "integer"
+                  },
+                  "multipartTtlHours": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "BucketLifecycle"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          }
+        }
+      }
+    },
+    "/v1/gc": {
+      "get": {
+        "summary": "Objects pending physical deletion per bucket, with estimated purge time, and placement warnings, for the caller's tenant (#16).",
+        "responses": {
+          "200": {
+            "description": "{ pendingDeletion, placementWarnings }"
           }
         }
       }

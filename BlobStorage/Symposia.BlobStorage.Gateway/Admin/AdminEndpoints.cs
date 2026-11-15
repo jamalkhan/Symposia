@@ -27,6 +27,11 @@ internal static class AdminEndpoints
         group.MapPost("/nodes/penalty", SetPenalty).AddEndpointFilter(AdminAuthFilter);
         group.MapGet("/repair/sla", RepairSla).AddEndpointFilter(AdminAuthFilter);
         group.MapGet("/placement/ip-violations", IpViolations).AddEndpointFilter(AdminAuthFilter);
+        group.MapGet("/gc", (Metadata.GatewayMetadataStore store, IOptions<GatewayOptions> options, GC.SafetyInvariantGate gate) => Results.Ok(new
+        {
+            report = Api.BlobApiEndpoints.GcReport(store, options.Value, null),
+            safetyRefusals = gate.Refusals, // anything but 0 means an evaluator queued protected data (#16 AC10)
+        })).AddEndpointFilter(AdminAuthFilter);
     }
 
     private static IResult SetPenalty(PenaltyRequest request, Penalties.ManualPenaltySource penalties)

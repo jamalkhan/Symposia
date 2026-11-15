@@ -36,13 +36,19 @@ public sealed class NodeReconciler
     private readonly RepairQueue _repairQueue;
     private readonly INodeRegistry _nodes;
     private readonly ILogger<NodeReconciler> _logger;
+    private readonly GC.IOnChainMetadataOracle _oracle;
+    private readonly TimeSpan _orphanGrace;
 
     public NodeReconciler(
         GatewayMetadataStore store,
         RepairQueue repairQueue,
         INodeRegistry nodes,
-        ILogger<NodeReconciler> logger)
+        ILogger<NodeReconciler> logger,
+        GC.IOnChainMetadataOracle? oracle = null,
+        Microsoft.Extensions.Options.IOptions<GatewayOptions>? options = null)
     {
+        _oracle = oracle ?? new GC.FailClosedOracle();
+        _orphanGrace = TimeSpan.FromHours(options?.Value.Gc.OrphanGraceHours ?? 48);
         _store = store;
         _repairQueue = repairQueue;
         _nodes = nodes;
@@ -76,12 +82,21 @@ public sealed class NodeReconciler
         foreach (var cid in nodeCids)
         {
             ct.ThrowIfCancellationRequested();
-            if (!_store.IsCidReferenced(cid))
+            if (_store.IsCidReferenced(cid))
             {
-                // No object in the entire metadata store references this CID — true orphan.
-                _logger.LogDebug(
-                    "NodeReconciler: CID {Cid} on {Url} has no metadata; queuing GC deletion.", cid, node.Url);
-                _store.EnqueueNodeDeletion(cid, node.Id);
+                _store.ForgetOrphan(cid, node.Id); // referenced (again): not an orphan
+                continue;
+            }
+
+            // Nothing references this CID. It's an orphan candidate from its first sighting, and is deleted only
+            // after the 48 h grace (#16 FR5.2/5.4: never younger, however the scans fall) and once the chain
+            // confirms it has no record (FR5.3; fail-closed until that oracle exists).
+            var firstSeen = _store.SeeOrphan(cid, node.Id, DateTimeOffset.UtcNow);
+            if (DateTimeOffset.UtcNow - firstSeen >= _orphanGrace && await _oracle.ConfirmsNoRecordAsync(cid, ct))
+            {
+                _logger.LogDebug("NodeReconciler: CID {Cid} on {Url} is a confirmed orphan; queuing GC deletion.", cid, node.Url);
+                _store.EnqueueNodeDeletion(cid, node.Id, "OrphanReconcile", GatewayMetadataStore.PriorityLow);
+                _store.ForgetOrphan(cid, node.Id);
                 orphanQueued++;
             }
         }

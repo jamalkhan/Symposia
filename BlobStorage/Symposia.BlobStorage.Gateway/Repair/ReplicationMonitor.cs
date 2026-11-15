@@ -217,6 +217,11 @@ public sealed class ReplicationMonitor : BackgroundService
                         {
                             counted.Add(node);
                         }
+                        else
+                        {
+                            // Past the grace period: the reference is Offline until re-replication confirms (#16 FR4.1).
+                            _store.MarkOffline(record.Bucket, record.Key, record.Cid, nodeUrl);
+                        }
 
                         continue;
                     }
@@ -245,6 +250,17 @@ public sealed class ReplicationMonitor : BackgroundService
 
                 // d. Classify against the object's own target into exactly one tier (#8 FR4.1).
                 var target = Math.Max(1, record.TargetCopies);
+
+                // Re-replication confirmed healthy: the Offline references can go (#16 FR4.3). Until then they
+                // stay, so a node that comes back after all isn't forgotten.
+                if (online.Count >= target)
+                {
+                    foreach (var offline in _store.OfflineReplicas(record.Bucket, record.Key))
+                    {
+                        _store.PurgeOfflineReplica(record.Bucket, record.Key, record.Cid, offline);
+                    }
+                }
+
                 var observation = new ReplicaObservation(
                     target, online.Count, counted.Count,
                     counted.Count(n => n is { PenaltyStage: >= 2 }),

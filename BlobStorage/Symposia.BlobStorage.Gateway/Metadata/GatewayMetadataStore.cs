@@ -160,6 +160,7 @@ public sealed partial class GatewayMetadataStore
         InitializeTenancy(conn);
         InitializeReplication(conn, _minCopies);
         InitializeRedundancy(conn);
+        InitializeGc(conn);
     }
 
     public bool BucketExists(string name)
@@ -301,9 +302,22 @@ public sealed partial class GatewayMetadataStore
             }
         }
 
-        if (existed && previousScheme != "replica" && previous is not null)
+        // Versioned bucket (#16 FR3): the overwritten version is kept as noncurrent, still billed, not collected.
+        var archived = false;
+        if (existed && previous is not null)
         {
-            CollectShards(conn, tx, record.Bucket, record.Key); // the new version brings its own shards, if any
+            using var versioning = Query(conn, "SELECT versioning FROM bucket_lifecycle WHERE bucket = $b", ("$b", record.Bucket));
+            versioning.Transaction = tx;
+            if (versioning.ExecuteScalar() is long v && v != 0)
+            {
+                ArchiveVersion(conn, tx, record.Bucket, record.Key, "noncurrent", softDeleted: false);
+                archived = true;
+            }
+        }
+
+        if (existed && previousScheme != "replica" && previous is not null && !archived)
+        {
+            CollectShards(conn, tx, record.Bucket, record.Key, previous.Value.Cid); // the new version brings its own shards
         }
 
         var target = record.TargetCopies > 0 ? record.TargetCopies : (int?)null;
@@ -339,8 +353,8 @@ public sealed partial class GatewayMetadataStore
             ("$pg", GapsJson(record.PlacementGaps)), ("$mr", record.MerkleRoot), ("$sc", record.Scheme));
         RefreshReplicationState(conn, tx, "WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key));
         CancelPendingDeletion(conn, tx, record.Cid);
-        AdjustUsage(conn, tx, record.Bucket, record.SizeBytes - previousSize);
-        if (previous is { } p)
+        AdjustUsage(conn, tx, record.Bucket, archived ? record.SizeBytes : record.SizeBytes - previousSize);
+        if (previous is { } p && !archived)
         {
             CollectIfUnreferenced(conn, tx, p.Cid, p.NodeIds);
         }
@@ -357,7 +371,9 @@ public sealed partial class GatewayMetadataStore
     /// </summary>
     private const string ReferencedSql =
         "SELECT 1 FROM objects WHERE cid = $cid AND scheme = 'replica' UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid " +
-        "UNION ALL SELECT 1 FROM object_shards WHERE shard_cid = $cid LIMIT 1";
+        "UNION ALL SELECT 1 FROM object_shards WHERE shard_cid = $cid " +
+        // A soft-deleted or noncurrent version keeps its bytes until GC queues its purge (#16 FR2).
+        "UNION ALL SELECT 1 FROM object_versions WHERE cid = $cid AND physically_deleted_at IS NULL AND purge_queued_at IS NULL LIMIT 1";
 
     /// <summary>A blob is referenced again: drop any queued deletion of it (GC/dedup race, #5 review).</summary>
     internal static void CancelPendingDeletion(SqliteConnection conn, SqliteTransaction tx, string cid) =>
@@ -429,7 +445,7 @@ public sealed partial class GatewayMetadataStore
         CollectIfUnreferenced(conn, tx, record.Cid, record.NodeIds);
         if (record.IsErasureCoded)
         {
-            CollectShards(conn, tx, bucket, key);
+            CollectShards(conn, tx, bucket, key, record.Cid);
         }
 
         tx.Commit();
@@ -651,12 +667,39 @@ public sealed partial class GatewayMetadataStore
 
     // ── GC queue ──────────────────────────────────────────────────────────────
 
-    public void EnqueueNodeDeletion(string cid, string nodeUrl)
+    public void EnqueueNodeDeletion(string cid, string nodeUrl, string category = "BlobDelete", int priority = PriorityMedium)
     {
         using var conn = Open();
         Execute(Query(conn,
-            "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at) VALUES ($cid, $url, $t)",
-            ("$cid", cid), ("$url", nodeUrl), ("$t", Now())));
+            "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at, category, priority) VALUES ($cid, $url, $t, $cat, $p)",
+            ("$cid", cid), ("$url", nodeUrl), ("$t", Now()), ("$cat", category), ("$p", priority)));
+    }
+
+    public sealed record GcEntry(long Id, string Cid, string NodeUrl, int Attempts, string Category, int Priority);
+
+    /// <summary>
+    /// Due deletions by priority (#16 FR8.2: high, then medium, then low), oldest attempts first within a tier.
+    /// <paramref name="reserveLow"/> entries of every batch are kept for the low tier, so a sustained high
+    /// backlog defers low-priority work without starving it outright (FR8.3).
+    /// </summary>
+    public IReadOnlyList<GcEntry> DueDeletions(int limit, TimeSpan minAge, int reserveLow)
+    {
+        using var conn = Open();
+        var cutoff = (DateTimeOffset.UtcNow - minAge).ToString("O");
+        IReadOnlyList<GcEntry> Read(string where, int take)
+        {
+            using var r = Query(conn, $"SELECT id, cid, node_url, attempts, category, priority FROM gc_queue WHERE queued_at <= $cut AND {where} ORDER BY priority, attempts, id LIMIT $l",
+                ("$cut", cutoff), ("$l", take)).ExecuteReader();
+            var rows = new List<GcEntry>();
+            while (r.Read()) rows.Add(new GcEntry(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetInt32(3), r.GetString(4), r.GetInt32(5)));
+            return rows;
+        }
+
+        var low = Read($"priority = {PriorityLow}", reserveLow);
+        var rest = Read($"priority < {PriorityLow}", limit - low.Count);
+        return rest.Count + low.Count < limit
+            ? [.. rest, .. Read($"priority = {PriorityLow}", limit - rest.Count)]
+            : [.. rest, .. low];
     }
 
     /// <summary>

@@ -52,7 +52,7 @@ internal static class MultipartEndpoints
         var upload = new MultipartUpload(
             "up" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16)), tenantId, bucket, key,
             ctx.Request.ContentType ?? "application/octet-stream", algorithm,
-            ctx.Request.Headers["x-amz-checksum-type"].FirstOrDefault(), now, now + Options(ctx).MultipartUploadTtl, MultipartStatus.InProgress, null, null);
+            ctx.Request.Headers["x-amz-checksum-type"].FirstOrDefault(), now, now + Options(ctx).MultipartTtlFor(Store(ctx).Lifecycle(bucket).MultipartTtlHours), MultipartStatus.InProgress, null, null);
         store.CreateUpload(upload);
         Logger(ctx).LogInformation("Multipart upload {UploadId} started for {Bucket}/{Key}.", upload.UploadId, bucket, key);
 
@@ -137,7 +137,7 @@ internal static class MultipartEndpoints
                 store.AddPartReplica(upload.UploadId, partNumber, blob.Cid, nodeId);
             }
         }, CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
-        store.TouchUpload(upload.UploadId, DateTimeOffset.UtcNow + Options(ctx).MultipartUploadTtl);
+        store.TouchUpload(upload.UploadId, DateTimeOffset.UtcNow + Options(ctx).MultipartTtlFor(store.Lifecycle(bucket).MultipartTtlHours));
         Logger(ctx).LogDebug("Upload {UploadId} part {Part}: {Size} bytes, CID {Cid}.", upload.UploadId, partNumber, blob.SizeBytes, blob.Cid);
 
         foreach (var (algorithm, computed) in body.Computed.Where(c => c.Key != "md5"))

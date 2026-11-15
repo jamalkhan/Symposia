@@ -13,9 +13,9 @@ namespace Symposia.BlobStorage.StorageNode.Storage;
 ///    against the CID.  A mismatch means the file is corrupt; it is marked Orphaned so the
 ///    gateway's ReplicationMonitor can trigger re-replication from a healthy node.
 ///
-/// 2. Disk pass — enumerate all blob files on disk.  Any file whose CID is not in the manifest
-///    (i.e. no metadata was ever committed, or the manifest row was deleted before the file) is
-///    immediately deleted.  These are genuine write-orphans — no client can ever request them.
+/// 2. Disk pass — enumerate all blob files on disk. A file whose CID is not in the manifest and is
+///    older than the 48-hour orphan grace is recorded as Orphaned for the gateway's reconciliation
+///    (#16 FR5); the node never deletes it on its own.
 /// </summary>
 public sealed class IntegritySelfCheckWorker : BackgroundService
 {
@@ -115,23 +115,41 @@ public sealed class IntegritySelfCheckWorker : BackgroundService
             ok, corrupt, missing);
     }
 
-    // ── Pass 2: remove disk blobs with no manifest entry ─────────────────────
+    // ── Pass 2: disk blobs with no manifest entry ────────────────────────────
 
-    private void RunDiskOrphanPass()
+    /// <summary>How old an unlisted file must be before it's treated as an orphan (#16 FR5.2/5.4).</summary>
+    public static TimeSpan OrphanGrace { get; set; } = TimeSpan.FromHours(48);
+
+    /// <summary>
+    /// A blob file with no manifest row may be a write whose manifest entry is still landing, so it is never
+    /// touched before it is 48 hours old (#16 FR5.4). Past that it is recorded in the manifest as Orphaned,
+    /// which lists it to the gateway's reconciliation. Deleting is the coordination layer's call (#16 FR5.3),
+    /// not this node's, so nothing is deleted here.
+    /// </summary>
+    public int RunDiskOrphanPass()
     {
-        int purged = 0;
+        int flagged = 0;
         foreach (var cid in _blobStore.EnumerateCids())
         {
-            if (_manifest.Get(cid) is null)
+            if (_manifest.Get(cid) is not null)
             {
-                _logger.LogInformation("Purging disk-orphan blob {Cid} (no manifest entry).", cid);
-                _blobStore.Delete(cid);
-                purged++;
+                continue;
             }
+
+            var age = DateTimeOffset.UtcNow - _blobStore.WrittenAt(cid);
+            if (age < OrphanGrace)
+            {
+                continue;
+            }
+
+            _logger.LogInformation("Disk blob {Cid} has had no manifest entry for {Age}; recording it as an orphan.", cid, age);
+            _manifest.Upsert(new BlobRecord(cid, _blobStore.GetLength(cid), "", "", "", [], DateTimeOffset.UtcNow, null, BlobStatus.Orphaned));
+            flagged++;
         }
 
-        if (purged > 0)
-            _logger.LogInformation("Disk orphan pass purged {Count} blobs.", purged);
+        if (flagged > 0)
+            _logger.LogInformation("Disk orphan pass recorded {Count} orphan(s) for reconciliation.", flagged);
+        return flagged;
     }
 
     // ── Hash helper ───────────────────────────────────────────────────────────

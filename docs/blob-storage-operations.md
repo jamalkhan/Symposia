@@ -59,3 +59,13 @@ In network mode, placement follows `redundancy-and-data-integrity.md` (BlobStora
 - **Repair tiers.** P0 ≤ 5 min, P1 ≤ 30 min, P2 ≤ 2 h, P3 ≤ 24 h. `GET /admin/repair/sla?hours=24` reports compliance per tier. `GET /admin/placement/ip-violations` should always return `count: 0`.
 - **Bandwidth.** Repair traffic is capped per node at `Redundancy:BandwidthBudgetPercent` (25 %) of its `StorageNode:UploadBytesPerSecond`, or of `Redundancy:DefaultNodeUploadBytesPerSecond` when the node reports none. Stage 3 and 4 nodes get `RecoveryBandwidthBudgetPercent`.
 - **Challenges.** About every `Redundancy:ChallengeIntervalSeconds`, at random, a random replica must prove a random 64 KiB leaf against the Merkle root recorded at write time. Failures show in `/admin/nodes` as `challengeFailures` and `recommendedPenaltyStage`.
+
+## Garbage collection
+
+BlobStorage #16. A delete is a **soft delete**. The object disappears from the API at once, but its bytes stay for the bucket's recovery window (`Gateway:Gc:RecoveryDays`, default 30). The bucket lifecycle may set 1–365 days for ePHI. Within the window, `POST /v1/buckets/{b}/objects/{k}?restore` brings the object back. Storage is billed, and counts toward quota, until GC confirms deletion from every replica. That moment is recorded as a `blob.physically_deleted` event.
+
+- `PUT /v1/buckets/{b}/lifecycle` sets `versioning`, `maxVersions`, `maxVersionAgeDays`, `minRetentionDays`, `recoveryDays` and `multipartTtlHours` (1–720).
+- `POST /v1/buckets/{b}/objects/{k}?retention {"lockedUntil": "...", "legalHold": true}`: GC never deletes a locked or held object, at any age.
+- GC deletes in priority order: replicas on slashed or terminated nodes first, then purges and expired multipart uploads, then stale replicas and orphans. At most `Gc:DeletesPerSecondPerNode` deletions go to each node per second.
+- A blob a node holds that nothing references is deleted only after `Gc:OrphanGraceHours` (48) from first sighting, **and** once the chain confirms it has no record. That confirmation doesn't exist yet, so orphans are detected and aged but never deleted. The node itself never deletes them either; it records them for reconciliation.
+- `GET /v1/gc` (tenant) and `GET /admin/gc` show objects pending physical deletion, their estimated purge time and placement warnings. `safetyRefusals` in `/admin/gc` should stay at 0. Anything else means GC was asked to delete protected data and refused.

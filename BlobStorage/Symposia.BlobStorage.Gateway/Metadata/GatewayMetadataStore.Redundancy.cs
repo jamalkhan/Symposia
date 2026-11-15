@@ -62,7 +62,7 @@ public sealed partial class GatewayMetadataStore
                 shard_index INTEGER NOT NULL,
                 shard_cid   TEXT NOT NULL,
                 node_id     TEXT NOT NULL,
-                PRIMARY KEY (bucket, key, shard_index)
+                PRIMARY KEY (bucket, key, object_cid, shard_index)
             );
             CREATE INDEX IF NOT EXISTS idx_object_shards_cid ON object_shards (shard_cid);
             CREATE INDEX IF NOT EXISTS idx_object_shards_node ON object_shards (node_id);
@@ -244,11 +244,15 @@ public sealed partial class GatewayMetadataStore
 
     public sealed record Shard(int Index, string Cid, string NodeId);
 
-    public IReadOnlyList<Shard> Shards(string bucket, string key)
+    /// <summary>The shards of the object version <paramref name="objectCid"/> at the key (the current one when null).</summary>
+    public IReadOnlyList<Shard> Shards(string bucket, string key, string? objectCid = null)
     {
         using var conn = Open();
-        using var r = Query(conn, "SELECT shard_index, shard_cid, node_id FROM object_shards WHERE bucket = $b AND key = $k ORDER BY shard_index",
-            ("$b", bucket), ("$k", key)).ExecuteReader();
+        using var r = Query(conn, """
+            SELECT shard_index, shard_cid, node_id FROM object_shards
+            WHERE bucket = $b AND key = $k AND object_cid = COALESCE($o, (SELECT cid FROM objects WHERE bucket = $b AND key = $k))
+            ORDER BY shard_index
+            """, ("$b", bucket), ("$k", key), ("$o", objectCid)).ExecuteReader();
         var shards = new List<Shard>();
         while (r.Read())
         {
@@ -273,8 +277,8 @@ public sealed partial class GatewayMetadataStore
         }
 
         (string Cid, string Node)? old = null;
-        using (var read = Query(conn, "SELECT shard_cid, node_id FROM object_shards WHERE bucket = $b AND key = $k AND shard_index = $i",
-                   ("$b", bucket), ("$k", key), ("$i", shard.Index)))
+        using (var read = Query(conn, "SELECT shard_cid, node_id FROM object_shards WHERE bucket = $b AND key = $k AND shard_index = $i AND object_cid = $o",
+                   ("$b", bucket), ("$k", key), ("$i", shard.Index), ("$o", objectCid)))
         {
             read.Transaction = tx;
             using var r = read.ExecuteReader();
@@ -283,7 +287,7 @@ public sealed partial class GatewayMetadataStore
 
         Run(conn, tx, """
             INSERT INTO object_shards (bucket, key, object_cid, shard_index, shard_cid, node_id) VALUES ($b, $k, $o, $i, $c, $n)
-            ON CONFLICT(bucket, key, shard_index) DO UPDATE SET shard_cid = excluded.shard_cid, node_id = excluded.node_id, object_cid = excluded.object_cid
+            ON CONFLICT(bucket, key, object_cid, shard_index) DO UPDATE SET shard_cid = excluded.shard_cid, node_id = excluded.node_id
             """, ("$b", bucket), ("$k", key), ("$o", objectCid), ("$i", shard.Index), ("$c", shard.Cid), ("$n", shard.NodeId));
         CancelPendingDeletion(conn, tx, shard.Cid);
         if (old is { } o && (o.Cid != shard.Cid || o.Node != shard.NodeId))
@@ -303,7 +307,7 @@ public sealed partial class GatewayMetadataStore
         var outcome = UpsertObject(conn, tx, record);
         if (outcome.Applied)
         {
-            Run(conn, tx, "DELETE FROM object_shards WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key));
+            Run(conn, tx, "DELETE FROM object_shards WHERE bucket = $b AND key = $k AND object_cid = $o", ("$b", record.Bucket), ("$k", record.Key), ("$o", record.Cid));
             foreach (var shard in shards)
             {
                 Run(conn, tx, "INSERT INTO object_shards (bucket, key, object_cid, shard_index, shard_cid, node_id) VALUES ($b, $k, $o, $i, $c, $n)",
@@ -333,17 +337,18 @@ public sealed partial class GatewayMetadataStore
     }
 
     /// <summary>Removes an object's shard rows and queues every shard copy no longer referenced (same transaction).</summary>
-    internal static void CollectShards(SqliteConnection conn, SqliteTransaction tx, string bucket, string key)
+    internal static void CollectShards(SqliteConnection conn, SqliteTransaction tx, string bucket, string key, string objectCid)
     {
         var shards = new List<(string Cid, string Node)>();
-        using (var read = Query(conn, "SELECT shard_cid, node_id FROM object_shards WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key)))
+        using (var read = Query(conn, "SELECT shard_cid, node_id FROM object_shards WHERE bucket = $b AND key = $k AND object_cid = $o",
+                   ("$b", bucket), ("$k", key), ("$o", objectCid)))
         {
             read.Transaction = tx;
             using var r = read.ExecuteReader();
             while (r.Read()) shards.Add((r.GetString(0), r.GetString(1)));
         }
 
-        Run(conn, tx, "DELETE FROM object_shards WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key));
+        Run(conn, tx, "DELETE FROM object_shards WHERE bucket = $b AND key = $k AND object_cid = $o", ("$b", bucket), ("$k", key), ("$o", objectCid));
         foreach (var (cid, node) in shards)
         {
             CollectIfUnreferenced(conn, tx, cid, [node]);

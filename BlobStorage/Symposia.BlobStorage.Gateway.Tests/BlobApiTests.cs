@@ -188,7 +188,7 @@ public sealed class BlobApiTests(GatewayFixture f) : IClassFixture<GatewayFixtur
     // Review (Frank #1): a delete queues the blob for GC (behind GcMinAgeSeconds) rather than deleting it
     // from nodes inline, so a concurrent identical upload can't be left pointing at a deleted blob.
     [Fact]
-    public async Task Delete_QueuesTheBlobForGc_InsteadOfDeletingInline()
+    public async Task Delete_SoftDeletes_ThenGcQueuesTheBlobOnlyAfterTheRecoveryWindow()
     {
         var bucket = await CreateBucketAsync();
         var cid = (await Json(await PutAsync(bucket, "gc-me", "unique " + Guid.NewGuid()))).GetProperty("cid").GetString();
@@ -196,6 +196,15 @@ public sealed class BlobApiTests(GatewayFixture f) : IClassFixture<GatewayFixtur
 
         (await _api.DeleteAsync($"/v1/buckets/{bucket}/objects/gc-me")).EnsureSuccessStatusCode();
 
+        // Unreadable at once (#16 FR7.1), but its bytes stay recoverable (FR2.1): nothing queued yet.
+        Assert.Equal(HttpStatusCode.NotFound, (await _api.GetAsync($"/v1/buckets/{bucket}/objects/gc-me")).StatusCode);
+        Assert.DoesNotContain(store.GetPendingDeletions(1000), d => d.Cid == cid);
+
+        var evaluator = new GC.GcEvaluator(store, Microsoft.Extensions.Options.Options.Create(new GatewayOptions()),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<GC.GcEvaluator>.Instance);
+        evaluator.Evaluate(DateTimeOffset.UtcNow.AddDays(29));
+        Assert.DoesNotContain(store.GetPendingDeletions(1000), d => d.Cid == cid);
+        evaluator.Evaluate(DateTimeOffset.UtcNow.AddDays(31));
         Assert.Contains(store.GetPendingDeletions(1000), d => d.Cid == cid);
     }
 

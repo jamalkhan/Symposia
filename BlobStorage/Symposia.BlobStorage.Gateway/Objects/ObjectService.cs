@@ -89,7 +89,8 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
     public ObjectRecord? Delete(HttpContext ctx, string bucket, string key)
     {
         var deleted = History.HistoryCapture.Mark(ctx, History.HistoryOperation.Delete, bucket, key, History.HistoryCapture.ApiOf(ctx));
-        var record = store.DeleteObjectAndCollect(bucket, key);
+        // Soft delete (#16 FR2): unreadable at once, bytes kept for the recovery window, then purged by GC.
+        var record = store.SoftDeleteObject(bucket, key);
         if (record is null)
         {
             deleted.Outcome = "NotFound";

@@ -158,6 +158,8 @@ public sealed class RepairWorker : BackgroundService
         {
             _logger.LogDebug(
                 "Repair: no available target node for CID {Cid} (all healthy nodes already have it).", task.Cid);
+            // Shown as a placement warning rather than silently dropped (#16 FR4.4).
+            _store.FlagPlacementWarning(task.Cid, "no eligible node for another copy under its placement rules");
             return "Failed";
         }
 
@@ -188,7 +190,10 @@ public sealed class RepairWorker : BackgroundService
                 _store.RemoveReplica(holder.Bucket, holder.Key, holder.Cid, task.BadNodeId);
             }
 
-            _store.EnqueueNodeDeletion(task.Cid, task.BadNodeId);
+            // A slashed/terminated node's replicas are GC's highest priority (#16 FR8.2).
+            _store.EnqueueNodeDeletion(task.Cid, task.BadNodeId,
+                task.Reason == RepairReason.PenaltyPreReplication ? "SlashedNodePurge" : "StaleReplicaPurge",
+                task.Reason == RepairReason.PenaltyPreReplication ? GatewayMetadataStore.PriorityHigh : GatewayMetadataStore.PriorityLow);
         }
 
         // 7. If we evicted a bad node, schedule its blob for GC deletion.
@@ -215,6 +220,7 @@ public sealed class RepairWorker : BackgroundService
             _queue.Enqueue(task with { AuditId = 0, TriggeredAt = task.TriggeredAt });
         }
 
+        _store.ClearPlacementWarning(task.Cid);
         _logger.LogInformation("Repair complete for CID {Cid}: replica added on {Target}.", task.Cid, targetNode.Url);
         return "Repaired";
     }

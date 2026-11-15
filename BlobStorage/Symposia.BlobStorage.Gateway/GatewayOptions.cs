@@ -55,6 +55,13 @@ public sealed class GatewayOptions
     public TimeSpan MultipartUploadTtl => TimeSpan.FromDays(MultipartUploadTtlDays);
 
     /// <summary>
+    /// A bucket's multipart TTL (#16 FR1.1): its lifecycle's hours if set, else the gateway default, clamped to
+    /// 1 hour – 30 days.
+    /// </summary>
+    public TimeSpan MultipartTtlFor(int? bucketHours) =>
+        TimeSpan.FromHours(Math.Clamp(bucketHours ?? MultipartUploadTtlDays * 24, 1, 30 * 24));
+
+    /// <summary>
     /// How long a Complete may hold an upload in Completing before the lease is released (a gateway that
     /// crashed mid-assembly). Must exceed the longest expected assembly.
     /// </summary>
@@ -140,6 +147,9 @@ public sealed class GatewayOptions
 
     /// <summary>Copy counts, write quorum and placement (#7, #8).</summary>
     public RedundancyOptions Redundancy { get; set; } = new();
+
+    /// <summary>Garbage collection (#16).</summary>
+    public GcOptions Gc { get; set; } = new();
 }
 
 public enum RedundancyMode
@@ -230,4 +240,22 @@ public sealed class NodeRegion
     public string Node { get; set; } = "";
 
     public string Region { get; set; } = "";
+}
+
+public sealed class GcOptions
+{
+    /// <summary>How long a deleted object stays recoverable before its bytes are purged (#16 FR2.1); buckets may set up to 365.</summary>
+    public int RecoveryDays { get; set; } = 30;
+
+    /// <summary>How long an unreferenced blob found on a node waits before it can be deleted (#16 FR5.2).</summary>
+    public int OrphanGraceHours { get; set; } = 48;
+
+    /// <summary>Most deletions GC sends a node per second, so it never competes with client I/O (#16 FR8.1).</summary>
+    public int DeletesPerSecondPerNode { get; set; } = 20;
+
+    /// <summary>How often the GC evaluators look for newly eligible garbage (seconds).</summary>
+    public int EvaluateIntervalSeconds { get; set; } = 300;
+
+    /// <summary>Deletions per GC batch kept for the low tier (#16 FR8.3 starvation guard).</summary>
+    public int LowPriorityReserve { get; set; } = 5;
 }

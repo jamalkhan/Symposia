@@ -201,6 +201,62 @@ public static partial class BlobApiEndpoints
             return Results.Ok(new { scheme = body.Scheme ?? "replica" });
         });
 
+        // Lifecycle and retention (#16 FR1–FR3).
+        v1.MapPut("/buckets/{bucket}/lifecycle", (string bucket, BucketLifecycle body, HttpContext ctx, GatewayMetadataStore store) =>
+        {
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            if (body.RecoveryDays is < 1 or > 365 || body.MultipartTtlHours is < 1 or > 720 || body.MaxVersions is < 1
+                || body.MaxVersionAgeDays is < 1 || body.MinRetentionDays is < 0)
+            {
+                return Error(400, "InvalidArgument", "recoveryDays 1–365, multipartTtlHours 1–720, maxVersions ≥ 1, maxVersionAgeDays ≥ 1, minRetentionDays ≥ 0.");
+            }
+
+            store.SetLifecycle(bucket, body);
+            return Results.Ok(body);
+        });
+
+        v1.MapGet("/buckets/{bucket}/lifecycle", (string bucket, HttpContext ctx, GatewayMetadataStore store) =>
+            !OwnsBucket(ctx, store, bucket) ? NoSuchBucket(bucket) : Results.Ok(store.Lifecycle(bucket)));
+
+        // ?retention sets an object's lock and legal hold; ?restore brings back a deleted object within its recovery window.
+        v1.MapPost("/buckets/{bucket}/objects/{**key}", async (string bucket, string key, HttpContext ctx, GatewayMetadataStore store) =>
+        {
+            // The body is optional (?restore has none), so it's read by hand rather than bound.
+            var body = ctx.Request.ContentLength > 0
+                ? await ctx.Request.ReadFromJsonAsync<RetentionRequest>(ctx.RequestAborted)
+                : null;
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            if (ctx.Request.Query.ContainsKey("restore"))
+            {
+                return store.RestoreLatestVersion(bucket, key) is { } restored ? Results.Ok(Describe(restored))
+                    : Error(404, "NoSuchVersion", "No recoverable version of this key (the key is live, or its versions are past recovery).");
+            }
+
+            if (ctx.Request.Query.ContainsKey("retention"))
+            {
+                return store.SetRetention(bucket, key, body?.LockedUntil, body?.LegalHold ?? false)
+                    ? Results.Ok(new { lockedUntil = body?.LockedUntil, legalHold = body?.LegalHold ?? false })
+                    : NoSuchKey(key);
+            }
+
+            return Error(400, "InvalidArgument", "POST on an object takes ?restore or ?retention.");
+        });
+
+        // What's waiting for physical deletion and which copies can't be re-placed (#16 FR10), for the caller's tenant only.
+        v1.MapGet("/gc", (HttpContext ctx, GatewayMetadataStore store, Microsoft.Extensions.Options.IOptions<GatewayOptions> options) =>
+        {
+            var tenant = ctx.Items["TenantId"] as string ?? "";
+            return Results.Ok(GcReport(store, options.Value, tenant));
+        });
+
         v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects) =>
         {
             if (!store.BucketExists(bucket))
@@ -275,6 +331,23 @@ public static partial class BlobApiEndpoints
     private sealed record RegionAssignment(string[]? Regions);
 
     private sealed record SchemeChoice(string? Scheme);
+
+    private sealed record RetentionRequest(DateTimeOffset? LockedUntil, bool? LegalHold);
+
+    /// <summary>Pending physical deletions per bucket with an estimated purge time, and open placement warnings (#16 FR10).</summary>
+    internal static object GcReport(GatewayMetadataStore store, GatewayOptions options, string? tenant) => new
+    {
+        pendingDeletion = store.PendingDeletions(tenant).Select(p => new
+        {
+            bucket = p.Bucket,
+            objects = p.Pending,
+            queued = p.Queued,
+            // The oldest soft-deleted version is purgeable at the end of its window; queued ones within 72 h (#16 FR2.2).
+            estimatedPurgeBy = p.Queued > 0 ? DateTimeOffset.UtcNow.AddHours(72)
+                : p.OldestDeletedAt?.AddDays(store.Lifecycle(p.Bucket).RecoveryDays ?? options.Gc.RecoveryDays),
+        }),
+        placementWarnings = store.PlacementWarnings(tenant).Select(w => new { cid = w.Cid, bucket = w.Bucket, key = w.Key, reason = w.Reason, since = w.Since }),
+    };
 
     [System.Text.RegularExpressions.GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]
     private static partial System.Text.RegularExpressions.Regex RegionCode();

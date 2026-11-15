@@ -196,6 +196,9 @@ public sealed class RepairQueue
         }
     }
 
+    /// <summary>Whether a repair for <paramref name="cid"/> is waiting or running (#16 FR7.4).</summary>
+    public bool IsPending(string cid) => _pending.ContainsKey(cid);
+
     /// <summary>How many repairs are waiting.</summary>
     public int Pending => _pending.Count;
 

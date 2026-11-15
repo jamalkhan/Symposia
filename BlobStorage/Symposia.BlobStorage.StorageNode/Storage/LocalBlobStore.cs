@@ -116,6 +116,9 @@ public sealed class LocalBlobStore
 
     public long GetLength(Cid cid) => new FileInfo(GetFullPath(cid)).Length;
 
+    /// <summary>When the blob file was written (its last modification).</summary>
+    public DateTimeOffset WrittenAt(Cid cid) => File.GetLastWriteTimeUtc(GetFullPath(cid));
+
     public FileStream OpenRead(Cid cid, long offset = 0)
     {
         var stream = new FileStream(

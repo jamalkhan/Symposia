@@ -19,7 +19,7 @@ public sealed class MultipartReaper(GatewayMetadataStore store, IOptions<Gateway
         {
             try
             {
-                var (released, expired, purged) = store.ReapUploads(DateTimeOffset.UtcNow, o.CompletingLease, TimeSpan.FromDays(o.MultipartRetentionDays));
+                var (released, expired, purged) = store.ReapUploads(DateTimeOffset.UtcNow, o.CompletingLease, TimeSpan.FromDays(o.MultipartRetentionDays), emitEvents: true);
                 if (released + expired + purged > 0)
                 {
                     logger.LogInformation(

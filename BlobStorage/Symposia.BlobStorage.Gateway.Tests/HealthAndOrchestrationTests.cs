@@ -303,7 +303,17 @@ public sealed class HealthAndOrchestrationTests
         await cluster.PutAsync("usage/key", new byte[10]);
         Assert.Equal(before + 10, store.TenantUsageBytes("test-tenant"));
 
+        // Deleted bytes stay billed until physically deleted (#16 FR9), not at delete time.
         await cluster.S3.DeleteObjectAsync(TestCluster.Bucket, "usage/key");
+        Assert.Equal(before + 10, store.TenantUsageBytes("test-tenant"));
+        var version = store.Versions(TestCluster.Bucket, "usage/key").Single(v => v.Kind == "deleted");
+        store.QueueVersionPurge(version);
+        foreach (var entry in store.DueDeletions(100, TimeSpan.Zero, 0).Where(e => e.Cid == version.Cid))
+        {
+            store.RemoveFromGcQueue(entry.Id);
+        }
+
+        store.ConfirmReplicaDeleted(version.Cid);
         Assert.Equal(before, store.TenantUsageBytes("test-tenant"));
     }
 
