@@ -20,8 +20,9 @@ public sealed partial class Keyring
 {
     private readonly IReadOnlyDictionary<string, byte[]> _keys;
 
-    public Keyring(IReadOnlyDictionary<string, string> keys, string active)
+    public Keyring(IReadOnlyDictionary<string, string> keys, string active, SealFormat format = SealFormat.Bound)
     {
+        Format = format;
         if (keys.Count == 0)
         {
             throw new InvalidOperationException("CredentialAuthority: no master key configured (MasterKeys, or the legacy MasterKey).");
@@ -35,7 +36,15 @@ public sealed partial class Keyring
         _keys = keys.ToDictionary(k => k.Key, k => Convert.FromBase64String(k.Value) is { Length: 32 } bytes ? bytes
             : throw new InvalidOperationException($"CredentialAuthority: master key {k.Key} must be 32 bytes, base64."));
         Active = keys.ContainsKey(active) ? active : throw new InvalidOperationException($"CredentialAuthority: ActiveKey '{active}' is not in MasterKeys.");
+        if (format == SealFormat.Legacy && Active != "k1")
+        {
+            // The previous release reads only k1-sealed, unbound secrets: a k2 seal would be unreadable to it (Frank #2).
+            throw new InvalidOperationException("CredentialAuthority: ActiveKey other than k1 needs SealFormat Bound, set once every replica runs this release.");
+        }
     }
+
+    /// <summary>How new secrets are sealed.</summary>
+    public SealFormat Format { get; }
 
     /// <summary>The keyring from options: <c>MasterKeys</c> + <c>ActiveKey</c>, or the #3 single <c>MasterKey</c> as <c>k1</c>.</summary>
     public static Keyring From(AuthorityOptions o)
@@ -46,7 +55,7 @@ public sealed partial class Keyring
             keys.TryAdd("k1", o.MasterKey);
         }
 
-        return new Keyring(keys, o.ActiveKey.Length > 0 ? o.ActiveKey : keys.ContainsKey("k1") && keys.Count == 1 ? "k1" : o.ActiveKey);
+        return new Keyring(keys, o.ActiveKey.Length > 0 ? o.ActiveKey : keys.ContainsKey("k1") && keys.Count == 1 ? "k1" : o.ActiveKey, o.SealFormat);
     }
 
     /// <summary>The label new secrets are sealed with.</summary>
@@ -62,6 +71,12 @@ public sealed partial class Keyring
         var cipher = new byte[plain.Length];
         var tag = new byte[16];
         using var aes = new AesGcm(_keys[Active], 16);
+        if (Format == SealFormat.Legacy)
+        {
+            aes.Encrypt(nonce, plain, cipher, tag); // the #3 format, readable by the previous release
+            return $"{Active}:" + Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
+        }
+
         aes.Encrypt(nonce, plain, cipher, tag, Encoding.UTF8.GetBytes(credentialId));
         return $"{Active}:2:" + Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
     }
@@ -79,7 +94,14 @@ public sealed partial class Keyring
 
         var rest = sealedSecret[(label.Length + 1)..];
         var bound = rest.StartsWith("2:", StringComparison.Ordinal);
-        var raw = Convert.FromBase64String(bound ? rest[2..] : rest);
+        var raw = new byte[rest.Length];
+        if (!Convert.TryFromBase64String(bound ? rest[2..] : rest, raw, out var length) || length < 28)
+        {
+            // Truncated or corrupt: the same failure as a bad tag, so callers handle one exception type.
+            throw new CryptographicException($"Secret sealed under '{label}' is malformed.");
+        }
+
+        raw = raw[..length];
         var plain = new byte[raw.Length - 28];
         using var aes = new AesGcm(key, 16);
         aes.Decrypt(raw.AsSpan(0, 12), raw.AsSpan(28), raw.AsSpan(12, 16), plain, bound ? Encoding.UTF8.GetBytes(credentialId) : null);

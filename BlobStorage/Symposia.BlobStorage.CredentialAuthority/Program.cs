@@ -20,6 +20,7 @@ public static class AuthorityApp
         builder.Services.AddSingleton<AuthorityStore>();
         builder.Services.AddSingleton<InternalTls>();
         builder.Services.AddSingleton<ResealService>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<ResealService>());
         InternalTls.Configure(builder); // mTLS listener for /internal/* and Watch (#245 FR6)
         builder.Services.AddHostedService<RevocationPruner>();
         builder.Services.AddGrpc();
@@ -35,9 +36,11 @@ public static class AuthorityApp
 
         // ── Platform operator: tenant lifecycle (FR2) ─────────────────────────────────
 
-        var ops = app.MapGroup("/v1/tenants").AddEndpointFilter(async (ctx, next) =>
+        // One operator group, one token check, for every operator endpoint (review: Carl #9).
+        var operatorApi = app.MapGroup("/v1").AddEndpointFilter(async (ctx, next) =>
             Tokens.Matches(ctx.HttpContext.Request.Headers["X-Operator-Token"].FirstOrDefault(), Opts(ctx.HttpContext).OperatorToken)
                 ? await next(ctx) : Results.StatusCode(401));
+        var ops = operatorApi.MapGroup("/tenants");
 
         ops.MapPost("/", async (CreateTenant body, AuthorityStore store, CancellationToken ct) =>
         {
@@ -66,24 +69,33 @@ public static class AuthorityApp
 
         // ── Platform operator: master keys (#245 FR7) ──────────────────────────────
 
-        var keys = app.MapGroup("/v1/keys").AddEndpointFilter(async (ctx, next) =>
-            Tokens.Matches(ctx.HttpContext.Request.Headers["X-Operator-Token"].FirstOrDefault(), Opts(ctx.HttpContext).OperatorToken)
-                ? await next(ctx) : Results.StatusCode(401));
+        var keys = operatorApi.MapGroup("/keys");
 
         keys.MapGet("/", async (AuthorityStore store, ResealService reseal, CancellationToken ct) => Results.Ok(new
         {
             active = store.Keys.Active,
             configured = store.Keys.Labels,
+            sealFormat = store.Keys.Format.ToString(),
             secretsByKey = await store.KeyCountsAsync(ct),
+            unreadableSecrets = store.UnreadableSecrets,
             reseal = new { running = reseal.Running, resealed = reseal.Resealed, lastError = reseal.LastError },
         }));
 
-        keys.MapPost("/reseal", async (ResealService reseal, CancellationToken ct) =>
-            await reseal.StartAsync(ct) ? Results.Accepted("/v1/keys") : Results.Conflict(new { error = "a re-seal is already running" }));
+        keys.MapPost("/reseal", (AuthorityStore store, ResealService reseal) =>
+            store.Keys.Format != SealFormat.Bound
+                ? Results.Conflict(new { error = "SealFormatLegacy", message = "Set SealFormat to Bound (once every replica runs this release) before re-sealing." })
+                : reseal.Request() ? Results.Accepted("/v1/keys") : Results.Conflict(new { error = "a re-seal is already running" }));
 
         // ── Gateways: state and audit, and management on behalf of a tenant credential ───
 
-        var internalApi = app.MapGroup("/internal").AddEndpointFilter(async (ctx, next) =>
+        var internalApi = app.MapGroup("/internal");
+        if (app.Services.GetRequiredService<InternalTlsBinding>() is { Mode: not InternalTlsMode.Off } bound)
+        {
+            // Routed only on the internal listener: elsewhere /internal/* doesn't exist (the filter below re-checks).
+            internalApi.RequireHost($"*:{bound.Port}");
+        }
+
+        internalApi.AddEndpointFilter(async (ctx, next) =>
         {
             // Both factors (#245 FR6): the mTLS listener and allowlisted certificate, then the service token.
             if (ctx.HttpContext.RequestServices.GetRequiredService<InternalTls>().Refuse(ctx.HttpContext) is { } why)

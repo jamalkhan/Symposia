@@ -101,14 +101,19 @@ BlobStorage #245. Gateways pull only what changed (`/internal/changes`). A crede
 
 **Turning on mutual TLS for `/internal/*` and Watch:**
 1. Give the Authority a server certificate (`CredentialAuthority:InternalTls:CertificatePath`). The internal API then listens on `InternalTls:Port` (default 5443). `/v1` and `/health` stay on `OperatorPort`, or on whatever `Kestrel:Endpoints` declares.
-2. Set `InternalTls:Mode` to `Permissive`. This is already the default when a certificate is configured and the environment isn't Development.
-3. Give each gateway a client certificate (`Gateway:CredentialAuthority:ClientCertificatePath`). Pin the Authority with `ServerFingerprints`, or trust it through a CA with `ServerCaPath`. Add each gateway's fingerprint to `InternalTls:ClientFingerprints`. A fingerprint is the lower-case hex SHA-256 of the certificate's DER, the same format storage-node pins use.
+2. Set `InternalTls:Mode` to `Permissive`. Outside Development this is already the default, and an Authority with no certificate configured refuses to start rather than serve the internal API without TLS. Only an explicit `Mode: Off` turns it off. The mode and port are read once at startup, so changing either needs a restart. The allowlist reloads live.
+3. Give each gateway a client certificate (`Gateway:CredentialAuthority:ClientCertificatePath`). Pin the Authority with `ServerFingerprints`, or trust it through a CA with `ServerCaPath`. Add each gateway's fingerprint to `InternalTls:ClientFingerprints`. A fingerprint is the hex SHA-256 of the certificate's DER, the same format storage-node pins use. Colons and upper case (as `openssl x509 -fingerprint -sha256` prints them) are accepted. Anything that isn't 64 hex digits fails startup. A certificate is refused before its NotBefore date or after its NotAfter date, and also when it declares extended key usages without serverAuth (for the Authority) or clientAuth (for gateways).
 4. Watch `authority_internal_requests_without_cert_total`. When it stays at 0, set `Mode` to `Enforced`. Production must run `Enforced`.
 
 **Rotating the master key:**
+0. Once, after every Authority replica runs this release, set `CredentialAuthority:SealFormat` to `Bound` on all of them. Until then the Authority seals new secrets in the previous release's format, so a rollback can still read them. While the format is `Legacy`, an `ActiveKey` other than `k1` fails startup and `POST /v1/keys/reseal` answers 409 `SealFormatLegacy`. Don't roll back to the previous release after switching.
 1. On every Authority replica, add the new key to `CredentialAuthority:MasterKeys`, for example `"k2": "<base64 32 bytes>"`, but don't make it active yet. The legacy single `MasterKey` is read as `k1`.
 2. On every replica, set `ActiveKey` to `k2`.
 3. Run `POST /v1/keys/reseal` with the operator token. Watch `GET /v1/keys` until `secretsByKey` shows only `k2`. The job is batched and resumable, and runs one at a time across replicas.
 4. Remove `k1`. An Authority refuses to start while any stored secret still names a key it doesn't have.
+
+A secret that can't be opened (corrupt, or sealed under a key that has since been lost) never blocks the rest of the system. The snapshot leaves that credential out, so the credential fails closed on its own, and the Authority counts it in `unreadableSecrets` on `GET /v1/keys`. The re-seal marks it `bad:<label>` in `secretsByKey` and carries on. A quarantined row doesn't count as using its key. Re-issue that credential.
+
+The re-seal lock, the migration lock and the state-version row lock are Postgres session or transaction locks. Connect the Authority directly or through session pooling. Transaction-mode PgBouncer would break the re-seal's advisory lock.
 
 Make the new key active only after every replica has it, or one replica will seal secrets that another can't open.

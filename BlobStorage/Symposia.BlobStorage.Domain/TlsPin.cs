@@ -14,8 +14,30 @@ public static class TlsPin
 
     public static string Fingerprint(X509Certificate certificate) => Fingerprint(certificate.GetRawCertData());
 
-    /// <summary>Whether the certificate is one of <paramref name="pins"/> and, when it carries one, not past its expiry.</summary>
-    public static bool Matches(X509Certificate? certificate, IEnumerable<string> pins, DateTimeOffset now)
+    /// <summary>TLS Web Server Authentication (what a gateway requires of the Authority).</summary>
+    public const string ServerAuth = "1.3.6.1.5.5.7.3.1";
+
+    /// <summary>TLS Web Client Authentication (what the Authority requires of a gateway).</summary>
+    public const string ClientAuth = "1.3.6.1.5.5.7.3.2";
+
+    /// <summary>
+    /// A configured pin in canonical form: colons and whitespace removed, lower case. Throws unless it is a SHA-256
+    /// fingerprint (64 hex digits), so a pin copied with colons from openssl works and a typo fails at startup rather
+    /// than silently matching nothing (review: Carl #6).
+    /// </summary>
+    public static string Normalize(string pin)
+    {
+        var hex = new string(pin.Where(c => c != ':' && !char.IsWhiteSpace(c)).ToArray()).ToLowerInvariant();
+        return hex.Length == 64 && hex.All(Uri.IsHexDigit)
+            ? hex
+            : throw new FormatException($"'{pin}' is not a SHA-256 certificate fingerprint (64 hex digits, colons allowed).");
+    }
+
+    /// <summary>
+    /// Whether the certificate is one of <paramref name="pins"/> (canonical, see <see cref="Normalize"/>), inside its
+    /// validity period and, when it declares extended key usages, allowed <paramref name="usage"/> (review: Lenny #7).
+    /// </summary>
+    public static bool Matches(X509Certificate? certificate, IEnumerable<string> pins, DateTimeOffset now, string? usage = null)
     {
         if (certificate is null)
         {
@@ -23,9 +45,27 @@ public static class TlsPin
         }
 
         var fingerprint = Fingerprint(certificate);
-        var notAfter = certificate is X509Certificate2 c2 ? new DateTimeOffset(c2.NotAfter.ToUniversalTime(), TimeSpan.Zero) : (DateTimeOffset?)null;
-        return pins.Any(p => string.Equals(p, fingerprint, StringComparison.OrdinalIgnoreCase)) && (notAfter is null || notAfter > now);
+        if (!pins.Any(p => string.Equals(p, fingerprint, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if (certificate is not X509Certificate2 c2)
+        {
+            return true;
+        }
+
+        if (c2.NotBefore.ToUniversalTime() > now.UtcDateTime || c2.NotAfter.ToUniversalTime() <= now.UtcDateTime)
+        {
+            return false;
+        }
+
+        var eku = c2.Extensions.OfType<X509EnhancedKeyUsageExtension>().FirstOrDefault();
+        return usage is null || eku is null || eku.EnhancedKeyUsages.Cast<System.Security.Cryptography.Oid>().Any(o => o.Value == usage);
     }
+
+    /// <summary>A certificate with no private key (a CA or a pin source): PEM or DER.</summary>
+    public static X509Certificate2 LoadCertificate(string path) => X509CertificateLoader.LoadCertificateFromFile(path);
 
     /// <summary>Loads a PFX, or a PEM certificate with its PEM key (in the same file or <paramref name="keyPath"/>).</summary>
     public static X509Certificate2 Load(string path, string? keyPath = null, string? password = null)

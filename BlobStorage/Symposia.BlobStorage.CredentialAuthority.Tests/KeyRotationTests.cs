@@ -26,9 +26,9 @@ public sealed class KeyRotationTests(AuthorityFixture f) : IClassFixture<Authori
         return new NpgsqlConnectionStringBuilder(f.ConnectionString) { Database = name }.ToString();
     }
 
-    private static async Task<AuthorityStore> StoreAsync(string db, Dictionary<string, string> keys, string active, int batch = 500)
+    private static async Task<AuthorityStore> StoreAsync(string db, Dictionary<string, string> keys, string active, int batch = 500, SealFormat format = SealFormat.Bound)
     {
-        var store = new AuthorityStore(Options.Create(new AuthorityOptions { ConnectionString = db, MasterKeys = keys, ActiveKey = active, ResealBatchSize = batch }));
+        var store = new AuthorityStore(Options.Create(new AuthorityOptions { ConnectionString = db, MasterKeys = keys, ActiveKey = active, ResealBatchSize = batch, SealFormat = format }));
         await store.MigrateAsync(CancellationToken.None);
         return store;
     }
@@ -128,6 +128,45 @@ public sealed class KeyRotationTests(AuthorityFixture f) : IClassFixture<Authori
         var v2 = await StoreAsync(db, new() { ["k1"] = K1, ["k2"] = K2 }, "k2");
         await Reseal(v2).RunAsync(CancellationToken.None);
         Assert.Equal(issued.Secret, (await v2.SnapshotAsync(CancellationToken.None)).Credentials.Single().Secret);
+    }
+
+    [Fact]
+    public void LegacySealFormat_WritesThe3Format_AndRefusesARotation() // Frank #2: N-1 must read what we write
+    {
+        var keys = new Dictionary<string, string> { ["k1"] = K1 };
+        var legacy = new Keyring(keys, "k1", SealFormat.Legacy);
+        var sealedSecret = legacy.Seal("secret", "cred_a");
+
+        Assert.Matches("^k1:[A-Za-z0-9+/=]+$", sealedSecret); // no "2:" marker, no associated data
+        Assert.Equal("secret", legacy.Open(sealedSecret, "cred_a"));
+        Assert.Throws<InvalidOperationException>(() => new Keyring(new Dictionary<string, string> { ["k1"] = K1, ["k2"] = K2 }, "k2", SealFormat.Legacy));
+        Assert.False(Reseal(new AuthorityStore(Options.Create(new AuthorityOptions { ConnectionString = "Host=unused", MasterKeys = keys, SealFormat = SealFormat.Legacy }))).Request());
+    }
+
+    [Fact]
+    public async Task UnreadableRow_IsSkippedBySnapshot_AndQuarantinedByReseal_WhileTheRestMove() // Lenny #2, #3
+    {
+        var db = await DatabaseAsync();
+        var issued = await IssueAsync(await StoreAsync(db, new() { ["k1"] = K1 }, "k1"), 3);
+        await using (var conn = new NpgsqlConnection(db))
+        {
+            await conn.OpenAsync();
+            await using var cmd = new NpgsqlCommand("UPDATE credentials SET secret_sealed = 'k1:2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' WHERE credential_id = @c", conn);
+            cmd.Parameters.AddWithValue("c", issued[1].CredentialId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var v2 = await StoreAsync(db, new() { ["k1"] = K1, ["k2"] = K2 }, "k2");
+        var snapshot = await v2.SnapshotAsync(CancellationToken.None);
+        Assert.DoesNotContain(snapshot.Credentials, c => c.CredentialId == issued[1].CredentialId);
+        Assert.Equal(3, snapshot.Credentials.Count);
+        Assert.True(v2.UnreadableSecrets.Values.Sum() >= 1);
+
+        await Reseal(v2).RunAsync(CancellationToken.None);
+        var counts = await v2.KeyCountsAsync(CancellationToken.None);
+        Assert.Equal(3, counts["k2"]);
+        Assert.Equal(1, counts["bad:k1"]);
+        await v2.CheckKeysAsync(CancellationToken.None); // a quarantined row doesn't pin k1
     }
 
     [Fact]

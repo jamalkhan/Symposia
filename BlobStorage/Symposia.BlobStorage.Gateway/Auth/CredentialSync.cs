@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -19,18 +20,20 @@ namespace Symposia.BlobStorage.Gateway.Auth;
 /// pre-#245 Authority (404), and on a jittered reconcile every <see cref="CredentialAuthorityOptions.ReconcileMinutes"/>
 /// as a self-healing backstop. Revocation still reaches this gateway within one poll interval (FR5).
 /// </summary>
-public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOptions> options, IHttpClientFactory http, ILogger<CredentialSync> logger)
+public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOptions> options, IHttpClientFactory http, ILogger<CredentialSync> logger, IMeterFactory meters)
     : BackgroundService
 {
     public const string HttpClientName = "credential-authority";
 
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
-    private static readonly System.Diagnostics.Metrics.Meter Meter = new("Symposia.BlobStorage.Gateway.CredentialSync");
-    private static readonly System.Diagnostics.Metrics.Counter<long> Syncs = Meter.CreateCounter<long>("credential_sync_total");
+    // From IMeterFactory, so each host (and each test server) gets its own instruments (review: Carl #7).
+    private readonly Meter _meter = meters.Create("Symposia.BlobStorage.Gateway.CredentialSync");
+    private Counter<long>? _syncs;
 
     // One sync at a time: a Watch tick arriving mid-sync coalesces into the running one (#245 Arch §1.3).
     private readonly SemaphoreSlim _single = new(1, 1);
+    private int _dirty;
     private volatile bool _deltaUnsupported;
 
     /// <summary>Counts of each kind of sync (delta, snapshot, fallback_410, fallback_404, reconcile), for tests and diagnostics.</summary>
@@ -44,8 +47,8 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
             return;
         }
 
-        Meter.CreateObservableGauge("credential_state_version", () => cache.Version);
-        Meter.CreateObservableGauge("credential_state_seconds_since_applied", () =>
+        _meter.CreateObservableGauge("credential_state_version", () => cache.Version);
+        _meter.CreateObservableGauge("credential_state_seconds_since_applied", () =>
             cache.LastApplied == default ? -1 : (DateTimeOffset.UtcNow - cache.LastApplied).TotalSeconds);
         await SnapshotAsync("snapshot", stoppingToken);
         await Task.WhenAll(WatchLoopAsync(stoppingToken), PollLoopAsync(stoppingToken), ReconcileLoopAsync(stoppingToken));
@@ -60,10 +63,32 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
     {
         if (!await _single.WaitAsync(wait ? Timeout.Infinite : 0, ct))
         {
-            // A sync is running; it will pick up this version (or the next tick will).
+            // A sync is running. Mark it dirty so it runs once more when done: the change behind this request may
+            // have committed after that sync's read, and must not wait a whole poll interval (review: Lenny #9).
+            Volatile.Write(ref _dirty, 1);
             return false;
         }
 
+        try
+        {
+            var applied = false;
+            do
+            {
+                Volatile.Write(ref _dirty, 0);
+                applied |= await SyncOnceAsync(ct);
+            }
+            while (Volatile.Read(ref _dirty) == 1 && !ct.IsCancellationRequested);
+
+            return applied;
+        }
+        finally
+        {
+            _single.Release();
+        }
+    }
+
+    private async Task<bool> SyncOnceAsync(CancellationToken ct)
+    {
         try
         {
             if (!cache.Loaded || _deltaUnsupported)
@@ -91,7 +116,11 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
 
                     return result == CredentialStore.DeltaResult.Applied;
                 case 410:
-                    return await SnapshotCoreAsync("fallback_410", ct);
+                    // AheadOfAuthority: the Authority's version is below ours, so its database went backwards (a
+                    // restore without a new epoch). Its state is the truth now; install it whatever its version, or
+                    // the cache would freeze until the Authority caught up (review: Lenny #1, Frank #3).
+                    var refusal = await ReadRefusalAsync(response, ct);
+                    return await SnapshotCoreAsync("fallback_410", ct, force: refusal == "AheadOfAuthority");
                 case 404:
                     // An Authority from before #245: snapshot polling until the next reconcile checks again (FR9).
                     _deltaUnsupported = true;
@@ -106,9 +135,18 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
             logger.LogWarning("Credential Authority sync failed: {Message}. Keeping version {Version}.", ex.Message, cache.Version);
             return false;
         }
-        finally
+    }
+
+    private static async Task<string?> ReadRefusalAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
         {
-            _single.Release();
+            using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            return body.RootElement.TryGetProperty("reason", out var reason) ? reason.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null; // an older Authority's 410 carries no reason: an ordinary fallback
         }
     }
 
@@ -133,11 +171,11 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
         }
     }
 
-    private async Task<bool> SnapshotCoreAsync(string kind, CancellationToken ct)
+    private async Task<bool> SnapshotCoreAsync(string kind, CancellationToken ct, bool force = false)
     {
         var snapshot = await http.CreateClient(HttpClientName).GetFromJsonAsync<AuthoritySnapshot>("internal/snapshot", Json, ct);
         Count(kind);
-        if (snapshot is not null && cache.Apply(snapshot))
+        if (snapshot is not null && cache.Apply(snapshot, force))
         {
             logger.LogDebug("Credential state now at version {Version} (full snapshot, {Kind}).", snapshot.Version, kind);
             return true;
@@ -149,7 +187,7 @@ public sealed class CredentialSync(CredentialStore cache, IOptions<GatewayOption
     private void Count(string kind)
     {
         Counts.AddOrUpdate(kind, 1, (_, n) => n + 1);
-        Syncs.Add(1, new KeyValuePair<string, object?>("kind", kind));
+        (_syncs ??= _meter.CreateCounter<long>("credential_sync_total")).Add(1, new KeyValuePair<string, object?>("kind", kind));
     }
 
     private async Task PollLoopAsync(CancellationToken ct)
@@ -403,13 +441,14 @@ public static class AuthorityTls
 
         if (o.ServerFingerprints.Length > 0)
         {
-            var pins = o.ServerFingerprints;
+            var pins = o.ServerFingerprints.Select(Domain.TlsPin.Normalize).ToArray();
             handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) =>
-                Domain.TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow);
+                Domain.TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow, Domain.TlsPin.ServerAuth);
         }
         else if (o.ServerCaPath.Length > 0)
         {
-            var ca = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromPemFile(o.ServerCaPath);
+            // A CA file holds no private key: CreateFromPemFile would demand one and throw (review: Carl #1).
+            var ca = Domain.TlsPin.LoadCertificate(o.ServerCaPath);
             handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
             {
                 if (certificate is null || errors.HasFlag(System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch)

@@ -136,6 +136,30 @@ public sealed class DeltaTests(AuthorityFixture f) : IClassFixture<AuthorityFixt
     }
 
     [Fact]
+    public async Task VersionBumpWithoutChangeRows_IsRefusedAsIncompleteLog() // review: Frank #1 (a previous-release writer)
+    {
+        var name = "gap_" + Guid.NewGuid().ToString("N")[..12];
+        await using (var admin = new Npgsql.NpgsqlConnection(f.ConnectionString))
+        {
+            await admin.OpenAsync();
+            await new Npgsql.NpgsqlCommand($"CREATE DATABASE {name}", admin).ExecuteNonQueryAsync();
+        }
+
+        var db = new Npgsql.NpgsqlConnectionStringBuilder(f.ConnectionString) { Database = name }.ToString();
+        var store = new AuthorityStore(Microsoft.Extensions.Options.Options.Create(new AuthorityOptions { ConnectionString = db, MasterKey = Convert.ToBase64String(new byte[32]) }));
+        await store.MigrateAsync(CancellationToken.None);
+        await store.CreateTenantAsync("t", "admin@t", "operator", CancellationToken.None);
+        var since = await store.VersionAsync(CancellationToken.None);
+        await using (var conn = new Npgsql.NpgsqlConnection(db))
+        {
+            await conn.OpenAsync();
+            await new Npgsql.NpgsqlCommand("UPDATE state_version SET version = version + 1 WHERE id = 1", conn).ExecuteNonQueryAsync(); // as #3 bumps
+        }
+
+        Assert.Equal(AuthorityStore.DeltaRefusal.IncompleteLog, (await store.ChangesAsync(since, CancellationToken.None)).Refusal);
+    }
+
+    [Fact]
     public async Task Snapshot_AndChanges_AreNeverCached()
     {
         using var http = f.Service();

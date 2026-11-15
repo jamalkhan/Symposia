@@ -1,5 +1,17 @@
 namespace Symposia.BlobStorage.CredentialAuthority;
 
+/// <summary>
+/// How new secrets are sealed (#245, expand/contract). <see cref="Legacy"/> writes the #3 format (<c>k1:</c>, no
+/// associated data), which the previous release can read; <see cref="Bound"/> writes <c>&lt;label&gt;:2:</c> with the
+/// credential ID bound in. Both are always readable. Switch to Bound only once no previous-release Authority replica
+/// remains; key rotation and re-seal require it.
+/// </summary>
+public enum SealFormat
+{
+    Legacy,
+    Bound,
+}
+
 public enum InternalTlsMode
 {
     /// <summary>No TLS on the internal API (development): the Authority warns at startup.</summary>
@@ -63,6 +75,9 @@ public sealed class AuthorityOptions
 
     /// <summary>The key new secrets are sealed with; empty = k1 when it's the only key.</summary>
     public string ActiveKey { get; set; } = "";
+
+    /// <summary>The seal format for new secrets (see <see cref="CredentialAuthority.SealFormat"/>).</summary>
+    public SealFormat SealFormat { get; set; } = SealFormat.Legacy;
 
     /// <summary>Credentials re-sealed per batch (each batch one short transaction).</summary>
     public int ResealBatchSize { get; set; } = 500;

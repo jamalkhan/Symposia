@@ -118,7 +118,8 @@ public sealed class MutualTlsTests(AuthorityFixture f) : IClassFixture<Authority
         using var http = new HttpClient { BaseAddress = new Uri($"http://localhost:{authority.OperatorPort}/") };
         http.DefaultRequestHeaders.Add("X-Service-Token", AuthorityFixture.ServiceToken);
 
-        Assert.Equal(HttpStatusCode.Forbidden, (await http.GetAsync("internal/snapshot")).StatusCode);
+        // Not routed there at all (RequireHost), and the guard would refuse it if it were.
+        Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync("internal/snapshot")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await http.GetAsync("health")).StatusCode); // operator side unaffected
     }
 
@@ -137,6 +138,91 @@ public sealed class MutualTlsTests(AuthorityFixture f) : IClassFixture<Authority
         Assert.Equal(1, tls.RequestsWithoutCertificate);
         using var stranger = Client(authority.InternalPort, authority.Server, strangerPath);
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => stranger.GetAsync("internal/snapshot"));
+    }
+
+    [Fact]
+    public void UnsetMode_IsOffOnlyInDevelopment_AndPermissiveWithoutACertificateFailsStartup() // review: Carl #2
+    {
+        var env = new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { EnvironmentName = "Development" };
+        Assert.Equal(InternalTlsMode.Off, InternalTls.Resolve(new InternalTlsOptions(), env));
+        env.EnvironmentName = "Production";
+        Assert.Equal(InternalTlsMode.Permissive, InternalTls.Resolve(new InternalTlsOptions(), env));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => InternalTls.Configure(WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Production" })));
+        Assert.Contains("CertificatePath", ex.Message);
+    }
+
+    [Fact]
+    public async Task GatewayTrustingACaFile_ConnectsToAnAuthorityItSigned() // review: Carl #1 (a key-less CA file)
+    {
+        using var caKey = RSA.Create(2048);
+        var caRequest = new CertificateRequest("CN=sym-test-ca", caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        caRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        caRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+        caRequest.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(caRequest.PublicKey, false));
+        using var ca = caRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        var caPath = Path.Combine(_dir, "ca.pem");
+        File.WriteAllText(caPath, ca.ExportCertificatePem());
+
+        using var serverKey = RSA.Create(2048);
+        var leaf = new CertificateRequest("CN=localhost", serverKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddDnsName("localhost");
+        leaf.CertificateExtensions.Add(san.Build());
+        leaf.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid(TlsPin.ServerAuth)], false));
+        leaf.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        using var signed = leaf.Create(ca, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1), [1, 2, 3, 4]);
+        var serverPath = Path.Combine(_dir, "ca-signed.pfx");
+        File.WriteAllBytes(serverPath, signed.CopyWithPrivateKey(serverKey).Export(X509ContentType.Pkcs12));
+
+        var (internalPort, operatorPort) = (FreePort(), FreePort());
+        await using var app = await AuthorityApp.CreateAsync(new WebApplicationOptions { EnvironmentName = "Production" }, b =>
+            b.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["CredentialAuthority:ConnectionString"] = f.ConnectionString,
+                ["CredentialAuthority:ServiceToken"] = AuthorityFixture.ServiceToken,
+                ["CredentialAuthority:OperatorToken"] = AuthorityFixture.OperatorToken,
+                ["CredentialAuthority:MasterKey"] = Convert.ToBase64String(new byte[32].Select((_, i) => (byte)i).ToArray()),
+                ["CredentialAuthority:InternalTls:Mode"] = "Permissive",
+                ["CredentialAuthority:InternalTls:Port"] = internalPort.ToString(),
+                ["CredentialAuthority:InternalTls:OperatorPort"] = operatorPort.ToString(),
+                ["CredentialAuthority:InternalTls:CertificatePath"] = serverPath,
+            }));
+        await app.StartAsync();
+
+        using var http = new HttpClient(GatewayAlias::Symposia.BlobStorage.Gateway.Auth.AuthorityTls.Handler(
+            new GatewayAlias::Symposia.BlobStorage.Gateway.CredentialAuthorityOptions { ServerCaPath = caPath }))
+        { BaseAddress = new Uri($"https://localhost:{internalPort}/") };
+        http.DefaultRequestHeaders.Add("X-Service-Token", AuthorityFixture.ServiceToken);
+
+        Assert.Equal(HttpStatusCode.OK, (await http.GetAsync("internal/snapshot")).StatusCode);
+    }
+
+    [Fact]
+    public void Pins_AreNormalised_AndMalformedOnesRejected() // review: Carl #6
+    {
+        Pfx("pin", out var certificate);
+        var fingerprint = TlsPin.Fingerprint(certificate);
+        var openssl = string.Join(':', Enumerable.Range(0, 32).Select(i => fingerprint.Substring(i * 2, 2))).ToUpperInvariant();
+
+        Assert.Equal(fingerprint, TlsPin.Normalize(openssl));
+        Assert.Throws<FormatException>(() => TlsPin.Normalize("abc123"));
+        Assert.True(TlsPin.Matches(certificate, [TlsPin.Normalize(openssl)], DateTimeOffset.UtcNow, TlsPin.ClientAuth));
+    }
+
+    [Fact]
+    public void Matches_RefusesANotYetValidCertificate_AndOneWithoutTheRequiredUsage() // review: Lenny #7
+    {
+        using var key = RSA.Create(2048);
+        var future = new CertificateRequest("CN=future", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+            .CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(1), DateTimeOffset.UtcNow.AddDays(2));
+        Assert.False(TlsPin.Matches(future, [TlsPin.Fingerprint(future)], DateTimeOffset.UtcNow));
+
+        var serverOnly = new CertificateRequest("CN=server-only", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        serverOnly.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid(TlsPin.ServerAuth)], false));
+        using var cert = serverOnly.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+        Assert.True(TlsPin.Matches(cert, [TlsPin.Fingerprint(cert)], DateTimeOffset.UtcNow, TlsPin.ServerAuth));
+        Assert.False(TlsPin.Matches(cert, [TlsPin.Fingerprint(cert)], DateTimeOffset.UtcNow, TlsPin.ClientAuth));
     }
 
     [Fact]

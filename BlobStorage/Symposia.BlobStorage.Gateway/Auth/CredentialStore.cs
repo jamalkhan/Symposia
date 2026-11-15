@@ -76,9 +76,11 @@ public sealed class CredentialStore
     /// <summary>
     /// Installs a full snapshot unless an equal or newer one from the same database is already in place. A snapshot
     /// from a different epoch (the Authority database was restored or replaced) is installed whatever its version,
-    /// so a restore can't freeze the cache behind an unreachable version. Returns whether it was applied.
+    /// so a restore can't freeze the cache behind an unreachable version. <paramref name="force"/> installs it even
+    /// from the same epoch and at a lower version: the Authority said its database went backwards. Returns whether
+    /// it was applied.
     /// </summary>
-    public bool Apply(AuthoritySnapshot snapshot)
+    public bool Apply(AuthoritySnapshot snapshot, bool force = false)
     {
         var next = new State(snapshot.Version, snapshot.Epoch,
             snapshot.Credentials.ToImmutableDictionary(c => c.AccessKeyId, StringComparer.Ordinal),
@@ -88,7 +90,7 @@ public sealed class CredentialStore
                 .ToImmutableDictionary(g => g.Key, g => (IReadOnlyList<PolicyRule>)g.ToList()));
         // Compare-and-swap: sync paths race, and a slower, older snapshot must never replace a newer one (that would
         // un-revoke a credential until the next pull; #3 review: Frank #9).
-        return Swap(current => current.Loaded && snapshot.Version <= current.Version && SameEpoch(current.Epoch, snapshot.Epoch) ? null : next);
+        return Swap(current => !force && current.Loaded && snapshot.Version <= current.Version && SameEpoch(current.Epoch, snapshot.Epoch) ? null : next);
     }
 
     /// <summary>What applying a delta did.</summary>

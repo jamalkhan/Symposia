@@ -43,10 +43,27 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         return cmd;
     }
 
+    /// <summary>The schema generation this build creates; migrations are skipped once a database has it.</summary>
+    public const int SchemaGeneration = 2; // 1 = #3, 2 = #245
+
+    /// <summary>
+    /// Creates or extends the schema (expand-only). Runs under a cluster-wide advisory lock with a lock timeout, and is
+    /// skipped entirely once the database is at <see cref="SchemaGeneration"/>: <c>ALTER TABLE … IF NOT EXISTS</c> takes
+    /// ACCESS EXCLUSIVE before it checks, so re-running it on every replica start would queue all traffic behind any
+    /// long read (#245 review: Frank #5), and two replicas starting together could race the catalog.
+    /// </summary>
     public async Task MigrateAsync(CancellationToken ct)
     {
         await using var conn = await OpenAsync(ct);
-        await Cmd(conn, null, """
+        await Cmd(conn, null, "CREATE TABLE IF NOT EXISTS schema_meta (id INT PRIMARY KEY, generation INT NOT NULL)").ExecuteNonQueryAsync(ct);
+        if (await Cmd(conn, null, "SELECT generation FROM schema_meta WHERE id = 1").ExecuteScalarAsync(ct) is int current && current >= SchemaGeneration)
+        {
+            return;
+        }
+
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await Cmd(conn, tx, "SET LOCAL lock_timeout = '10s'; SELECT pg_advisory_xact_lock(hashtext('symposia.authority.migrate'))").ExecuteNonQueryAsync(ct);
+        await Cmd(conn, tx, """
             CREATE TABLE IF NOT EXISTS state_version (id INT PRIMARY KEY, version BIGINT NOT NULL);
             INSERT INTO state_version (id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
 
@@ -56,7 +73,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
                 kind           TEXT        NOT NULL,   -- credential | tenant | rules
                 entity_key     TEXT        NOT NULL,   -- credential_id | tenant_id | tenant_id \x1f bucket \x1f key
                 secret_changed BOOLEAN     NOT NULL DEFAULT FALSE,
-                at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+                at             TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
                 PRIMARY KEY (version, kind, entity_key)
             );
             CREATE INDEX IF NOT EXISTS idx_change_log_at ON change_log (at);
@@ -116,6 +133,8 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
             -- #245: which master key seals each secret (NULL = k1 from #3), so re-seal and key counts are index-backed.
             ALTER TABLE credentials ADD COLUMN IF NOT EXISTS seal_key TEXT NULL;
             CREATE INDEX IF NOT EXISTS idx_credentials_seal_key ON credentials (seal_key, credential_id);
+            -- The re-seal queue's legacy (#3, NULL) arm in credential order, without re-walking re-sealed rows (Frank #6).
+            CREATE INDEX IF NOT EXISTS idx_credentials_unsealed ON credentials (credential_id) WHERE seal_key IS NULL;
 
             CREATE TABLE IF NOT EXISTS policy_rules (
                 tenant_id TEXT NOT NULL,
@@ -146,6 +165,9 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
             CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_events (tenant_id, seq);
             CREATE INDEX IF NOT EXISTS idx_audit_credential ON audit_events (credential_id, seq);
             """).ExecuteNonQueryAsync(ct);
+        await Cmd(conn, tx, "INSERT INTO schema_meta (id, generation) VALUES (1, @g) ON CONFLICT (id) DO UPDATE SET generation = GREATEST(schema_meta.generation, excluded.generation)",
+            ("g", SchemaGeneration)).ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     // ── Master keys (#245 FR7) ────────────────────────────────────────────────
@@ -158,11 +180,12 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     {
         await using var conn = await OpenAsync(ct);
         var missing = new List<string>();
-        await using (var r = await Cmd(conn, null, "SELECT DISTINCT COALESCE(seal_key, 'k1') FROM credentials").ExecuteReaderAsync(ct))
+        await using (var r = await Cmd(conn, null, "SELECT DISTINCT seal_key FROM credentials").ExecuteReaderAsync(ct))
         {
             while (await r.ReadAsync(ct))
             {
-                if (!_keys.Labels.Contains(r.GetString(0))) missing.Add(r.GetString(0));
+                var label = r.IsDBNull(0) ? "k1" : r.GetString(0);
+                if (!label.StartsWith(Quarantined, StringComparison.Ordinal) && !_keys.Labels.Contains(label)) missing.Add(label);
             }
         }
 
@@ -178,8 +201,14 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     {
         await using var conn = await OpenAsync(ct);
         var counts = new Dictionary<string, long>();
-        await using var r = await Cmd(conn, null, "SELECT COALESCE(seal_key, 'k1'), count(*) FROM credentials GROUP BY 1").ExecuteReaderAsync(ct);
-        while (await r.ReadAsync(ct)) counts[r.GetString(0)] = r.GetInt64(1);
+        // Grouped on the bare column, so the index can serve it; NULL (a #3-era k1 seal) is mapped here.
+        await using var r = await Cmd(conn, null, "SELECT seal_key, count(*) FROM credentials GROUP BY seal_key").ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            var label = r.IsDBNull(0) ? "k1" : r.GetString(0);
+            counts[label] = counts.GetValueOrDefault(label) + r.GetInt64(1);
+        }
+
         return counts;
     }
 
@@ -209,10 +238,23 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
 
         foreach (var (id, sealedSecret, hash) in rows)
         {
-            var secret = _keys.Open(sealedSecret, id);
-            if (Keyring.Hash(secret) != hash)
+            string? secret;
+            try
             {
-                throw new CryptographicException($"Credential {id}: its sealed secret doesn't match its stored hash; refusing to re-seal it.");
+                secret = _keys.Open(sealedSecret, id);
+            }
+            catch (CryptographicException)
+            {
+                secret = null;
+            }
+
+            if (secret is null || Keyring.Hash(secret) != hash)
+            {
+                // Quarantined, not retried forever: one bad row must not stop the run, or the old key can never be
+                // retired (#245 review: Lenny #3, Frank #7). It stays listed under /v1/keys for an operator.
+                await Cmd(conn, tx, "UPDATE credentials SET seal_key = @q WHERE credential_id = @c",
+                    ("q", Quarantined + Keyring.LabelOf(sealedSecret)), ("c", id)).ExecuteNonQueryAsync(ct);
+                continue;
             }
 
             await Cmd(conn, tx, "UPDATE credentials SET secret_sealed = @new, seal_key = @active WHERE credential_id = @c AND secret_sealed = @old",
@@ -222,6 +264,9 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         await tx.CommitAsync(ct);
         return rows.Count;
     }
+
+    /// <summary>seal_key prefix of a secret re-seal couldn't open or verify; excluded from the queue and the key check.</summary>
+    public const string Quarantined = "bad:";
 
     /// <summary>The cluster-wide re-seal lock, held on the returned connection (one re-seal at a time across replicas).</summary>
     public async Task<NpgsqlConnection?> TryLockResealAsync(CancellationToken ct)
@@ -326,15 +371,10 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         }
 
         await AuditInTxAsync(conn, tx, tenantId, null, actor, $"tenant.{status.ToString().ToLowerInvariant()}", null, null, null, null, "Success", null, ct);
-        var version = await BumpAsync(conn, tx, ct, Change.Tenant(tenantId));
-        if (status == TenantStatus.Purged)
-        {
-            // Every credential of the purged tenant was revoked above (idx_credentials_tenant).
-            await Cmd(conn, tx, """
-                INSERT INTO change_log (version, kind, entity_key) SELECT @v, 'credential', credential_id FROM credentials WHERE tenant_id = @t
-                ON CONFLICT DO NOTHING
-                """, ("v", version), ("t", tenantId)).ExecuteNonQueryAsync(ct);
-        }
+        // One tenant change, even for a purge: gateways refuse every credential of a non-active tenant already, so a
+        // per-credential fan-out would only push a large tenant's purge past MaxDeltaEntities and send the whole fleet
+        // to a full snapshot at once (#245 review: Lenny #10, Frank #10). The next reconcile drops the rows.
+        await BumpAsync(conn, tx, ct, Change.Tenant(tenantId));
 
         await tx.CommitAsync(ct);
         return true;
@@ -497,10 +537,31 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
                 rows.Add(new CredentialGrant(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4),
                     Enum.Parse<AccessLevel>(r.GetString(5)), new ResourceScope(Str(6), Str(7), Str(8)), At(9), (string[])r.GetValue(10),
                     r.GetBoolean(11), Enum.Parse<CredentialStatus>(r.GetString(12)), At(13)!.Value, At(14), Str(15), Str(16),
-                    withSecret ? _keys.Open(r.GetString(17), r.GetString(0)) : null));
+                    withSecret ? OpenOrNull(r.GetString(17), r.GetString(0)) : null));
             }
 
             return rows;
+        }
+    }
+
+    /// <summary>Secrets that failed to open while serving gateways (missing key, tampered row), by key label.</summary>
+    public System.Collections.Concurrent.ConcurrentDictionary<string, long> UnreadableSecrets { get; } = new();
+
+    /// <summary>
+    /// Opens one secret, or null when it can't be: one unreadable row must not fail every snapshot and delta for every
+    /// gateway (#245 review: Lenny #2). A credential with no secret is never accepted by a gateway, so this fails closed
+    /// for that credential alone; it is counted and logged by key label.
+    /// </summary>
+    private string? OpenOrNull(string sealedSecret, string credentialId)
+    {
+        try
+        {
+            return _keys.Open(sealedSecret, credentialId);
+        }
+        catch (CryptographicException)
+        {
+            UnreadableSecrets.AddOrUpdate(Keyring.LabelOf(sealedSecret), 1, (_, n) => n + 1);
+            return null;
         }
     }
 
@@ -544,7 +605,8 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
             while (await r.ReadAsync(ct)) tenants.Add(new TenantState(r.GetString(0), Enum.Parse<TenantStatus>(r.GetString(1))));
         }
 
-        var credentials = await ReadGrantsAsync(Cmd(conn, tx, $"SELECT {GrantColumns} FROM credentials"), true, ct);
+        // A credential whose secret couldn't be opened is left out (fail-closed for it alone).
+        var credentials = (await ReadGrantsAsync(Cmd(conn, tx, $"SELECT {GrantColumns} FROM credentials"), true, ct)).Where(c => c.Secret is not null).ToList();
         var rules = new List<PolicyRule>();
         await using (var r = await Cmd(conn, tx, "SELECT tenant_id, bucket, key, effect, kind, principal FROM policy_rules").ExecuteReaderAsync(ct))
         {
@@ -560,7 +622,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     }
 
     /// <summary>Why a delta can't be served: the gateway must take the full snapshot (HTTP 410).</summary>
-    public enum DeltaRefusal { None, BehindRetention, AheadOfAuthority, TooLarge }
+    public enum DeltaRefusal { None, BehindRetention, AheadOfAuthority, TooLarge, IncompleteLog }
 
     /// <summary>
     /// The changes after <paramref name="since"/>, each entity in its current state (#245 FR2), read in one
@@ -581,6 +643,16 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
 
         if (since < floor) return (null, DeltaRefusal.BehindRetention);
         if (since > version) return (null, DeltaRefusal.AheadOfAuthority); // the database went backwards (a restore)
+        // Every version holds at least one change, so the span bounds the entities: refuse before aggregating a long
+        // range inside this snapshot (#245 review: Frank #9).
+        if (version - since > options.Value.MaxDeltaEntities) return (null, DeltaRefusal.TooLarge);
+
+        // Every version in the window must have its change rows. A bump without them came from an Authority binary
+        // older than #245 (during a rolling deploy); serving that window as a delta would silently drop its change, a
+        // revocation perhaps (#245 review: Frank #1). Index-only over the PK range, bounded by the cap above.
+        var logged = (long)(await Cmd(conn, tx, "SELECT count(DISTINCT version) FROM change_log WHERE version > @since AND version <= @v",
+            ("since", since), ("v", version)).ExecuteScalarAsync(ct))!;
+        if (logged != version - since) return (null, DeltaRefusal.IncompleteLog);
 
         var changed = new List<(string Kind, string Key, bool Secret)>();
         await using (var r = await Cmd(conn, tx, """
@@ -622,7 +694,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         var ruleSets = new List<RuleSet>();
         foreach (var key in changed.Where(c => c.Kind == "rules").Select(c => c.Key))
         {
-            var parts = key.Split(Sep);
+            var parts = key.Split(Sep, 3); // tenant and bucket can't contain the separator; an object key can (Frank #4)
             var objectKey = parts[2].Length == 0 ? null : parts[2];
             var rules = new List<PolicyRule>();
             await using var r = await Cmd(conn, tx, "SELECT effect, kind, principal FROM policy_rules WHERE tenant_id = @t AND bucket = @b AND key = @k",
@@ -645,25 +717,35 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
     /// </summary>
     public async Task<int> PruneChangeLogAsync(DateTimeOffset now, CancellationToken ct)
     {
+        // The newest version past retention, then fixed slices of versions up to it, each its own transaction with
+        // the floor raised to exactly what was deleted (#245 review: Frank #8: bounded batches, nothing in retention lost).
+        long upTo;
+        await using (var conn = await OpenAsync(ct))
+        {
+            if (await Cmd(conn, null, "SELECT version FROM change_log WHERE at < @cut ORDER BY at DESC LIMIT 1",
+                    ("cut", now - TimeSpan.FromDays(options.Value.ChangeLogRetentionDays))).ExecuteScalarAsync(ct) is not long newest)
+            {
+                return 0;
+            }
+
+            upTo = newest;
+        }
+
         var total = 0;
         while (true)
         {
             await using var conn = await OpenAsync(ct);
             await using var tx = await conn.BeginTransactionAsync(ct);
-            // A version range on the primary key. Versions rise with time, so "the oldest 5000 rows past the cutoff"
-            // is everything up to the 5000th's version, found first so the DELETE is planned against a known bound
-            // (as one statement the planner can't see the bound and scans the table).
-            var upTo = await Cmd(conn, tx, "SELECT max(version) FROM (SELECT version FROM change_log WHERE at < @cut ORDER BY version LIMIT 5000) oldest",
-                ("cut", now - TimeSpan.FromDays(options.Value.ChangeLogRetentionDays))).ExecuteScalarAsync(ct) as long?;
-            if (upTo is null)
+            var floor = (long)(await Cmd(conn, tx, "SELECT log_floor FROM state_version WHERE id = 1 FOR UPDATE").ExecuteScalarAsync(ct))!;
+            if (floor >= upTo)
             {
                 return total;
             }
 
-            var deleted = await Cmd(conn, tx, "DELETE FROM change_log WHERE version <= @upTo", ("upTo", upTo.Value)).ExecuteNonQueryAsync(ct);
-            await Cmd(conn, tx, "UPDATE state_version SET log_floor = GREATEST(log_floor, @f) WHERE id = 1", ("f", upTo.Value)).ExecuteNonQueryAsync(ct);
+            var slice = Math.Min(upTo, floor + 5000);
+            total += await Cmd(conn, tx, "DELETE FROM change_log WHERE version > @floor AND version <= @slice", ("floor", floor), ("slice", slice)).ExecuteNonQueryAsync(ct);
+            await Cmd(conn, tx, "UPDATE state_version SET log_floor = @slice WHERE id = 1", ("slice", slice)).ExecuteNonQueryAsync(ct);
             await tx.CommitAsync(ct);
-            total += deleted;
         }
     }
 

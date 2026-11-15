@@ -8,13 +8,21 @@ public sealed class RevocationPruner(AuthorityStore store, ILogger<RevocationPru
         using var timer = new PeriodicTimer(TimeSpan.FromHours(24));
         do
         {
+            // Separate tries: one failing retention job never skips the other (review: Carl #10).
             try
             {
                 if (await store.PruneRevocationsAsync(DateTimeOffset.UtcNow, stoppingToken) is var pruned and > 0)
                 {
                     logger.LogInformation("Pruned {Count} expired revocation(s) past their holding period.", pruned);
                 }
+            }
+            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+            {
+                logger.LogError(ex, "Revocation pruning failed; retrying tomorrow.");
+            }
 
+            try
+            {
                 if (await store.PruneChangeLogAsync(DateTimeOffset.UtcNow, stoppingToken) is var changes and > 0)
                 {
                     logger.LogInformation("Pruned {Count} change-log row(s) past retention (#245).", changes);
@@ -22,7 +30,7 @@ public sealed class RevocationPruner(AuthorityStore store, ILogger<RevocationPru
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
-                logger.LogError(ex, "Revocation pruning failed; retrying tomorrow.");
+                logger.LogError(ex, "Change-log pruning failed; retrying tomorrow.");
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));
