@@ -148,6 +148,9 @@ public sealed class GatewayOptions
     /// <summary>Copy counts, write quorum and placement (#7, #8).</summary>
     public RedundancyOptions Redundancy { get; set; } = new();
 
+    /// <summary>The Credential Authority this gateway caches credentials from (#3); empty Url = configured credentials only.</summary>
+    public CredentialAuthorityOptions CredentialAuthority { get; set; } = new();
+
     /// <summary>Garbage collection (#16).</summary>
     public GcOptions Gc { get; set; } = new();
 }
@@ -258,4 +261,25 @@ public sealed class GcOptions
 
     /// <summary>Deletions per GC batch kept for the low tier (#16 FR8.3 starvation guard).</summary>
     public int LowPriorityReserve { get; set; } = 5;
+}
+
+public sealed class CredentialAuthorityOptions
+{
+    /// <summary>Base URL of the Credential Authority (HTTP/2 for Watch).</summary>
+    public string Url { get; set; } = "";
+
+    /// <summary>The service token the Authority accepts from gateways.</summary>
+    public string ServiceToken { get; set; } = "";
+
+    /// <summary>
+    /// Fallback full pull interval (#3 FR5.18): bounds propagation even with the Watch stream down. Keep it
+    /// at most half the 60 s revocation SLA.
+    /// </summary>
+    public int PollSeconds { get; set; } = 15;
+
+    /// <summary>This gateway's ID in audit events; empty = the machine name.</summary>
+    public string GatewayId { get; set; } = "";
+
+    /// <summary>Most use events kept locally while the Authority is unreachable before the oldest are dropped (with an error).</summary>
+    public int AuditSpoolLimit { get; set; } = 1_000_000;
 }

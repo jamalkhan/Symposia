@@ -69,3 +69,22 @@ BlobStorage #16. A delete is a **soft delete**. The object disappears from the A
 - GC deletes in priority order: replicas on slashed or terminated nodes first, then purges and expired multipart uploads, then stale replicas and orphans. At most `Gc:DeletesPerSecondPerNode` deletions go to each node per second.
 - A blob a node holds that nothing references is deleted only after `Gc:OrphanGraceHours` (48) from first sighting, **and** once the chain confirms it has no record. That confirmation doesn't exist yet, so orphans are detected and aged but never deleted. The node itself never deletes them either; it records them for reconciliation.
 - `GET /v1/gc` (tenant) and `GET /admin/gc` show objects pending physical deletion, their estimated purge time and placement warnings. `safetyRefusals` in `/admin/gc` should stay at 0. Anything else means GC was asked to delete protected data and refused.
+
+## Tenants and credentials
+
+BlobStorage #3. The **Credential Authority** (`BlobStorage/Symposia.BlobStorage.CredentialAuthority`) is the source of truth for tenants, credentials, bucket policies, object ACLs and the credential audit log. It needs Postgres. Configure:
+
+| Setting | Purpose |
+|---|---|
+| `CredentialAuthority:ConnectionString` | Postgres. Run it with standard HA; tenant data has no other copy. |
+| `CredentialAuthority:OperatorToken` | Platform operators: `POST /v1/tenants/` and `POST /v1/tenants/{id}/suspend|reactivate|delete|purge`. |
+| `CredentialAuthority:ServiceToken` | Gateways only. Every `/internal/*` call and the Watch stream need it. |
+| `CredentialAuthority:MasterKey` | 32 bytes, base64. Encrypts credential secrets at rest. |
+
+On each gateway, set `Gateway:CredentialAuthority:Url` and `ServiceToken`. The gateway caches the Authority's state in memory. The Watch stream pushes each change, and a full pull every `PollSeconds` (default 15) covers stream outages, so a revocation reaches every gateway in at most one poll interval. A credential the cache doesn't know is refused. Credentials listed in `Gateway:Credentials` still work as tenant-wide managers of their tenant (development and bootstrap deployments). They exist only on the gateways that list them.
+
+Creating a tenant returns its first admin credential, and the secret appears only in that response. Tenants then manage their own credentials through any gateway, signed with SigV4: `/v1/credentials` (issue, list), `/v1/credentials/{id}/revoke`, `/v1/credentials/{id}/rotate`, `/v1/policies/{bucket}[?key=]`, `/v1/audit` and `/v1/audit/verify`. A credential can never mint one broader than itself.
+
+A bucket belongs to the tenant that created it. Any other tenant gets `403 CrossTenantAccessDenied` for it, the same answer as for a bucket that doesn't exist. On a single-tenant gateway, buckets from before this release are assigned to its one configured tenant at startup. With several tenants, assign them yourself first.
+
+**Secrets at rest.** SigV4 needs the secret itself to check a signature, so secrets can't be stored only as a one-way hash. The Authority stores each one AES-GCM encrypted, alongside a SHA-256 hash, and never returns it after issuance. Gateways receive it over the service-token channel and hold it only in memory.

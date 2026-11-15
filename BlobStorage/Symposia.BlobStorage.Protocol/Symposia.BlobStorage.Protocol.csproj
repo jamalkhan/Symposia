@@ -18,6 +18,7 @@
   <ItemGroup>
     <!-- GrpcServices="Both": the node hosts the server side; the future gateway project references this assembly for the client side. -->
     <Protobuf Include="Protos/storage_node.proto" GrpcServices="Both" />
+    <Protobuf Include="Protos/credential_authority.proto" GrpcServices="Both" />
   </ItemGroup>
 
 </Project>

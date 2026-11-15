@@ -157,11 +157,11 @@ public sealed class BlobApiTests(GatewayFixture f) : IClassFixture<GatewayFixtur
     public async Task ErrorsAndNames_FollowS3()
     {
         Assert.Equal(HttpStatusCode.BadRequest, (await _api.PutAsync("/v1/buckets/Not_Valid", null)).StatusCode);
-        var missing = await _api.GetAsync($"/v1/buckets/{NewBucket()}/objects/nope");
+        var bucket = await CreateBucketAsync();
+        var missing = await _api.GetAsync($"/v1/buckets/{bucket}/objects/nope");
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
         Assert.Equal("NoSuchKey", (await Json(missing)).GetProperty("error").GetProperty("code").GetString());
 
-        var bucket = await CreateBucketAsync();
         Assert.Equal(HttpStatusCode.OK, (await _api.PutAsync($"/v1/buckets/{bucket}", null)).StatusCode); // idempotent
         var listed = await Json(await _api.GetAsync("/v1/buckets"));
         Assert.Contains(listed.GetProperty("buckets").EnumerateArray(), b => b.GetProperty("name").GetString() == bucket);
@@ -176,13 +176,14 @@ public sealed class BlobApiTests(GatewayFixture f) : IClassFixture<GatewayFixtur
         Assert.Equal("InvalidBucketName", ex.ErrorCode);
     }
 
-    // Review (Lenny #12): deletes in a missing bucket say so, like the other /v1 routes.
+    // #3 FR1.2/1.3: a bucket the tenant doesn't own is refused the same way whether or not it exists, so
+    // another tenant's bucket names can't be probed (this replaced #203's NoSuchBucket for missing buckets).
     [Fact]
-    public async Task DeleteInAMissingBucket_IsNoSuchBucket()
+    public async Task DeleteInABucketTheTenantDoesNotOwn_IsCrossTenantAccessDenied()
     {
         var r = await _api.DeleteAsync($"/v1/buckets/{NewBucket()}/objects/k");
-        Assert.Equal(HttpStatusCode.NotFound, r.StatusCode);
-        Assert.Equal("NoSuchBucket", (await Json(r)).GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+        Assert.Equal("CrossTenantAccessDenied", (await Json(r)).GetProperty("error").GetProperty("code").GetString());
     }
 
     // Review (Frank #1): a delete queues the blob for GC (behind GcMinAgeSeconds) rather than deleting it

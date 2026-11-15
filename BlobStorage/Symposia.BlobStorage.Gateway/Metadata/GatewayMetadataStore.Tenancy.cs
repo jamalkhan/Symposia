@@ -68,6 +68,16 @@ public sealed partial class GatewayMetadataStore
             ("$n", name), ("$t", Now()), ("$tenant", tenantId))) > 0;
     }
 
+    /// <summary>A tenant's buckets by name (idx_buckets_tenant).</summary>
+    public IReadOnlyList<(string Name, DateTimeOffset CreatedAt)> ListBuckets(string tenantId)
+    {
+        using var conn = Open();
+        using var r = Query(conn, "SELECT name, created_at FROM buckets WHERE tenant_id = $t ORDER BY name", ("$t", tenantId)).ExecuteReader();
+        var buckets = new List<(string, DateTimeOffset)>();
+        while (r.Read()) buckets.Add((r.GetString(0), DateTimeOffset.Parse(r.GetString(1))));
+        return buckets;
+    }
+
     /// <summary>The bucket's owner, or null when it has none (created before ownership existed) or doesn't exist.</summary>
     public string? BucketTenant(string name)
     {

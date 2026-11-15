@@ -634,6 +634,175 @@
           }
         }
       }
+    },
+    "/v1/credentials": {
+      "get": {
+        "summary": "The tenant's credentials (#3). Secrets are never returned after issuance.",
+        "responses": {
+          "200": {
+            "description": "credential[]"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      },
+      "post": {
+        "summary": "Issue a credential: { identity, accessLevel: Read|ReadWrite, bucket?, prefix?, key?, expiresAt?, regionLock?, canManage? }. Never broader than the caller's. The secret is in this response only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ credential, accessKeyId, secretAccessKey }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/credentials/{id}/revoke": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Revoke; every gateway refuses it within 60 s.",
+        "responses": {
+          "200": {
+            "description": "{ revoked }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/credentials/{id}/rotate": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Issue a replacement with the same configuration and revoke this one, now or after { graceSeconds }.",
+        "responses": {
+          "200": {
+            "description": "{ credential, accessKeyId, secretAccessKey }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/policies/{bucket}": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "key",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Set an object ACL instead of the bucket policy."
+        }
+      ],
+      "put": {
+        "summary": "Replace the bucket policy (or object ACL): [{ effect: Allow|Deny, kind: Credential|Tenant|AccessLevel|Identity, principal }]. Explicit deny wins.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Set"
+          },
+          "403": {
+            "description": "Needs a manager credential"
+          }
+        }
+      }
+    },
+    "/v1/audit": {
+      "get": {
+        "summary": "The tenant's hash-chained credential audit trail, optionally for one credentialId, paged by after/limit.",
+        "responses": {
+          "200": {
+            "description": "AuditEvent[]"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/audit/verify": {
+      "get": {
+        "summary": "Recompute the tenant's audit hash chain.",
+        "responses": {
+          "200": {
+            "description": "{ intact }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
     }
   }
 }

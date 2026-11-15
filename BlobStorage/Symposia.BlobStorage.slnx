@@ -1,4 +1,6 @@
 <Solution>
+  <Project Path="Symposia.BlobStorage.CredentialAuthority.Tests/Symposia.BlobStorage.CredentialAuthority.Tests.csproj" />
+  <Project Path="Symposia.BlobStorage.CredentialAuthority/Symposia.BlobStorage.CredentialAuthority.csproj" />
   <Project Path="Symposia.BlobStorage.Domain/Symposia.BlobStorage.Domain.csproj" />
   <Project Path="Symposia.BlobStorage.Gateway/Symposia.BlobStorage.Gateway.csproj" />
   <Project Path="Symposia.BlobStorage.Gateway.Tests/Symposia.BlobStorage.Gateway.Tests.csproj" />

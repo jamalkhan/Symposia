@@ -34,6 +34,19 @@ public static class BlobGatewayApp
         // ── Services ─────────────────────────────────────────────────────────────────
 
         builder.Services.AddSingleton<CredentialStore>();
+        // The Credential Authority (#3): its state is cached here and enforced per request; uses are audited there.
+        builder.Services.AddHttpClient(CredentialSync.HttpClientName, (sp, http) =>
+        {
+            var authority = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.CredentialAuthority;
+            if (authority.Url.Length > 0) http.BaseAddress = new Uri(authority.Url.TrimEnd('/') + "/");
+            http.DefaultRequestHeaders.Add("X-Service-Token", authority.ServiceToken);
+            http.Timeout = TimeSpan.FromSeconds(10);
+        });
+        builder.Services.AddHttpClient(CredentialSync.HttpClientName + "-grpc", http => http.Timeout = Timeout.InfiniteTimeSpan);
+        builder.Services.AddSingleton<CredentialSync>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<CredentialSync>());
+        builder.Services.AddSingleton<AuditForwarder>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<AuditForwarder>());
         builder.Services.AddSingleton<SigV4Verifier>();
         builder.Services.AddSingleton<GatewayMetadataStore>();
 
@@ -242,9 +255,34 @@ public static class BlobGatewayApp
                 return;
             }
 
+            // Authorization (#3 FR4), from cached Authority state: revoked, suspended, expired, region-locked,
+            // cross-tenant, out-of-scope and policy-denied requests stop here, each with its own code.
+            var cache = ctx.RequestServices.GetRequiredService<CredentialStore>();
+            var grant = cache.Grant(sigv4!.AccessKeyId)!;
+            var gatewayOptions = ctx.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value;
+            var decision = Authorization.Decide(ctx, grant, cache, ctx.RequestServices.GetRequiredService<GatewayMetadataStore>(),
+                gatewayOptions.Region, sigv4.Scope.Split('/') is { Length: > 1 } scope ? scope[1] : null, DateTimeOffset.UtcNow);
+            ctx.Items[Health.RequestLog.CredentialItem] = grant.CredentialId;
+            var audit = ctx.RequestServices.GetRequiredService<AuditForwarder>();
+            UseReport Use(string outcome, string? reason) => new(grant.CredentialId, $"{ctx.Request.Method} {Authorization.Classify(ctx.Request) switch
+            {
+                (null, _, _, _) => "service",
+                (_, null, _, _) => "bucket",
+                _ => "object",
+            }}", ctx.Request.Path.Value, ctx.Connection.RemoteIpAddress?.ToString(), gatewayOptions.Region,
+                gatewayOptions.CredentialAuthority.GatewayId is { Length: > 0 } id ? id : Environment.MachineName, outcome, reason, DateTimeOffset.UtcNow);
+            if (decision != Symposia.BlobStorage.Domain.Credentials.AccessDecision.Allowed)
+            {
+                audit.Report(Use("Rejected", decision.ToString()));
+                Health.RequestLog.Error(ctx, decision.ToString());
+                await Authorization.Refusal(ctx, decision).ExecuteAsync(ctx);
+                return;
+            }
+
             ctx.Items["TenantId"] = tenantId;
             ctx.Items[nameof(SigV4Context)] = sigv4;
             await next();
+            audit.Report(Use(ctx.Response.StatusCode < 400 ? "Success" : "Failed", ctx.Response.StatusCode < 400 ? null : ctx.Response.StatusCode.ToString()));
         });
 
         // After auth, so each recorded operation carries its caller (#204).
@@ -274,6 +312,7 @@ public static class BlobGatewayApp
 
         // The literal /v1 segment outranks S3's {bucket} parameter; registered first for clarity.
         BlobApiEndpoints.Map(app);
+        Authorization.MapManagement(app);
 
         // Object routes must be registered before bucket routes so /{bucket}/{**key}
         // takes priority over /{bucket} when a key is present.

@@ -349,7 +349,7 @@ public sealed class HealthAndOrchestrationTests
         Assert.Equal(2, lines.Count);
         var put = lines[0].State.ToDictionary(kv => kv.Key, kv => kv.Value);
         Assert.Equal("test-tenant", put["TenantId"]);
-        Assert.Equal("AKIAIOSFODNN7EXAMPLE", put["CredentialId"]);
+        Assert.Equal("static:AKIAIOSFODNN7EXAMPLE", put["CredentialId"]); // the credential's ID (#3), not its access key
         Assert.Equal("PutObject", put["Operation"]);
         Assert.Equal(TestCluster.Bucket, put["Bucket"]);
         Assert.Equal("log/key", put["Key"]);

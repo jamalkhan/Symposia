@@ -25,8 +25,9 @@ public static partial class BlobApiEndpoints
         var v1 = app.MapGroup(Prefix);
         v1.MapGet("/openapi.json", () => Results.Text(OpenApi.Value, "application/json"));
 
-        v1.MapGet("/buckets", (GatewayMetadataStore store) =>
-            Results.Ok(new { buckets = store.ListBuckets().Select(b => new { name = b.Name, createdAt = b.CreatedAt }) }));
+        // Only the caller's tenant's buckets: listing never reveals another tenant's names (#3 FR1.3).
+        v1.MapGet("/buckets", (HttpContext ctx, GatewayMetadataStore store) =>
+            Results.Ok(new { buckets = store.ListBuckets(ctx.Items["TenantId"] as string ?? "").Select(b => new { name = b.Name, createdAt = b.CreatedAt }) }));
 
         v1.MapPut("/buckets/{bucket}", (string bucket, HttpContext ctx, GatewayMetadataStore store) =>
         {
