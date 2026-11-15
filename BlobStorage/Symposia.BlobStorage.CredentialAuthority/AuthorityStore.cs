@@ -20,7 +20,9 @@ public sealed record AuditEvent(
 /// </summary>
 public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
 {
-    private readonly SecretBox _box = SecretBox.FromBase64(options.Value.MasterKey);
+    private readonly Keyring _keys = Keyring.From(options.Value);
+
+    public Keyring Keys => _keys;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private async Task<NpgsqlConnection> OpenAsync(CancellationToken ct)
@@ -111,6 +113,9 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
             );
             CREATE INDEX IF NOT EXISTS idx_credentials_tenant ON credentials (tenant_id);
             CREATE INDEX IF NOT EXISTS idx_credentials_prunable ON credentials (expires_at) WHERE status = 'Revoked';
+            -- #245: which master key seals each secret (NULL = k1 from #3), so re-seal and key counts are index-backed.
+            ALTER TABLE credentials ADD COLUMN IF NOT EXISTS seal_key TEXT NULL;
+            CREATE INDEX IF NOT EXISTS idx_credentials_seal_key ON credentials (seal_key, credential_id);
 
             CREATE TABLE IF NOT EXISTS policy_rules (
                 tenant_id TEXT NOT NULL,
@@ -141,6 +146,94 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
             CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_events (tenant_id, seq);
             CREATE INDEX IF NOT EXISTS idx_audit_credential ON audit_events (credential_id, seq);
             """).ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Master keys (#245 FR7) ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Refuses to start when any stored secret names a key missing from the keyring (#245): a removed key then fails
+    /// at deploy time, not halfway through a gateway snapshot.
+    /// </summary>
+    public async Task CheckKeysAsync(CancellationToken ct)
+    {
+        await using var conn = await OpenAsync(ct);
+        var missing = new List<string>();
+        await using (var r = await Cmd(conn, null, "SELECT DISTINCT COALESCE(seal_key, 'k1') FROM credentials").ExecuteReaderAsync(ct))
+        {
+            while (await r.ReadAsync(ct))
+            {
+                if (!_keys.Labels.Contains(r.GetString(0))) missing.Add(r.GetString(0));
+            }
+        }
+
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException($"Stored secrets are sealed under master key(s) {string.Join(", ", missing)}, which MasterKeys doesn't contain. " +
+                "Restore the key, or re-seal before removing it.");
+        }
+    }
+
+    /// <summary>How many secrets each key version seals (index-only on idx_credentials_seal_key).</summary>
+    public async Task<IReadOnlyDictionary<string, long>> KeyCountsAsync(CancellationToken ct)
+    {
+        await using var conn = await OpenAsync(ct);
+        var counts = new Dictionary<string, long>();
+        await using var r = await Cmd(conn, null, "SELECT COALESCE(seal_key, 'k1'), count(*) FROM credentials GROUP BY 1").ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct)) counts[r.GetString(0)] = r.GetInt64(1);
+        return counts;
+    }
+
+    /// <summary>
+    /// Re-seals up to one batch of secrets not under the active key (#245 FR7). One short transaction per batch, rows
+    /// taken FOR UPDATE SKIP LOCKED so a live rotate or revoke never waits on it; each secret is checked against its
+    /// stored hash before the old ciphertext is replaced, and replaced only if unchanged meanwhile. No state version
+    /// bump and no change rows: gateways hold the plaintext, which doesn't change. Returns rows taken (0 = done).
+    /// </summary>
+    public async Task<int> ResealBatchAsync(int batch, CancellationToken ct)
+    {
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var rows = new List<(string Id, string Sealed, string Hash)>();
+        // One equality lookup per key that isn't active: NULL (k1 from #3), then every other configured label. Each is
+        // an index range on (seal_key, credential_id) in index order; "IS NULL OR <> @active" plans as a full scan
+        // and sort. Labels outside the keyring can't exist (CheckKeysAsync refuses to start).
+        foreach (var label in new string?[] { null }.Concat(_keys.Labels.Where(l => l != _keys.Active)))
+        {
+            if (rows.Count >= batch) break;
+            await using var r = await Cmd(conn, tx, label is null
+                    ? "SELECT credential_id, secret_sealed, secret_hash FROM credentials WHERE seal_key IS NULL ORDER BY credential_id LIMIT @n FOR UPDATE SKIP LOCKED"
+                    : "SELECT credential_id, secret_sealed, secret_hash FROM credentials WHERE seal_key = @l ORDER BY credential_id LIMIT @n FOR UPDATE SKIP LOCKED",
+                ("l", label), ("n", batch - rows.Count)).ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct)) rows.Add((r.GetString(0), r.GetString(1), r.GetString(2)));
+        }
+
+        foreach (var (id, sealedSecret, hash) in rows)
+        {
+            var secret = _keys.Open(sealedSecret, id);
+            if (Keyring.Hash(secret) != hash)
+            {
+                throw new CryptographicException($"Credential {id}: its sealed secret doesn't match its stored hash; refusing to re-seal it.");
+            }
+
+            await Cmd(conn, tx, "UPDATE credentials SET secret_sealed = @new, seal_key = @active WHERE credential_id = @c AND secret_sealed = @old",
+                ("new", _keys.Seal(secret, id)), ("active", _keys.Active), ("c", id), ("old", sealedSecret)).ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return rows.Count;
+    }
+
+    /// <summary>The cluster-wide re-seal lock, held on the returned connection (one re-seal at a time across replicas).</summary>
+    public async Task<NpgsqlConnection?> TryLockResealAsync(CancellationToken ct)
+    {
+        var conn = await OpenAsync(ct);
+        if (await Cmd(conn, null, "SELECT pg_try_advisory_lock(hashtext('symposia.reseal'))").ExecuteScalarAsync(ct) is true)
+        {
+            return conn;
+        }
+
+        await conn.DisposeAsync();
+        return null;
     }
 
     /// <summary>One entity a mutation changed (#245 FR1).</summary>
@@ -284,7 +377,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         AccessLevel level, ResourceScope scope, DateTimeOffset? expiresAt, IReadOnlyList<string> regionLock, bool canManage, string? rotatedFrom,
         string actor, CancellationToken ct, string? requestedId = null)
     {
-        var (accessKey, secret) = SecretBox.NewKeyPair();
+        var (accessKey, secret) = Keyring.NewKeyPair();
         var id = requestedId ?? "cred_" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
         // The ledger's primary key rejects any reuse, including an ID from a revoked or purged credential (AC8).
         await Cmd(conn, tx, "INSERT INTO issued_ids (credential_id, access_key_id, issued_at, tenant_id) VALUES (@c, @k, now(), @t)",
@@ -292,11 +385,11 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         var now = DateTimeOffset.UtcNow;
         await Cmd(conn, tx, """
             INSERT INTO credentials (credential_id, access_key_id, secret_sealed, secret_hash, tenant_id, account_id, identity, access_level,
-                scope_bucket, scope_prefix, scope_key, expires_at, region_lock, can_manage, status, created_at, rotated_from)
-            VALUES (@c, @k, @s, @h, @t, @a, @i, @l, @sb, @sp, @sk, @e, @r, @m, 'Active', @now, @rf)
-            """, ("c", id), ("k", accessKey), ("s", _box.Seal(secret)), ("h", SecretBox.Hash(secret)), ("t", tenantId), ("a", account), ("i", identity),
+                scope_bucket, scope_prefix, scope_key, expires_at, region_lock, can_manage, status, created_at, rotated_from, seal_key)
+            VALUES (@c, @k, @s, @h, @t, @a, @i, @l, @sb, @sp, @sk, @e, @r, @m, 'Active', @now, @rf, @key)
+            """, ("c", id), ("k", accessKey), ("s", _keys.Seal(secret, id)), ("h", Keyring.Hash(secret)), ("t", tenantId), ("a", account), ("i", identity),
             ("l", level.ToString()), ("sb", scope.Bucket), ("sp", scope.Prefix), ("sk", scope.Key), ("e", expiresAt), ("r", regionLock.ToArray()),
-            ("m", canManage), ("now", now), ("rf", rotatedFrom)).ExecuteNonQueryAsync(ct);
+            ("m", canManage), ("now", now), ("rf", rotatedFrom), ("key", _keys.Active)).ExecuteNonQueryAsync(ct);
         return new CredentialGrant(id, accessKey, tenantId, account, identity, level, scope, expiresAt, regionLock, canManage, CredentialStatus.Active, now,
             RotatedFrom: rotatedFrom, Secret: secret);
     }
@@ -404,7 +497,7 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
                 rows.Add(new CredentialGrant(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4),
                     Enum.Parse<AccessLevel>(r.GetString(5)), new ResourceScope(Str(6), Str(7), Str(8)), At(9), (string[])r.GetValue(10),
                     r.GetBoolean(11), Enum.Parse<CredentialStatus>(r.GetString(12)), At(13)!.Value, At(14), Str(15), Str(16),
-                    withSecret ? _box.Open(r.GetString(17)) : null));
+                    withSecret ? _keys.Open(r.GetString(17), r.GetString(0)) : null));
             }
 
             return rows;
@@ -557,24 +650,20 @@ public sealed class AuthorityStore(IOptions<AuthorityOptions> options)
         {
             await using var conn = await OpenAsync(ct);
             await using var tx = await conn.BeginTransactionAsync(ct);
-            var versions = new List<long>();
-            await using (var r = await Cmd(conn, tx, """
-                             DELETE FROM change_log WHERE (version, kind, entity_key) IN
-                                 (SELECT version, kind, entity_key FROM change_log WHERE at < @cut ORDER BY version LIMIT 5000)
-                             RETURNING version
-                             """, ("cut", now - TimeSpan.FromDays(options.Value.ChangeLogRetentionDays))).ExecuteReaderAsync(ct))
-            {
-                while (await r.ReadAsync(ct)) versions.Add(r.GetInt64(0));
-            }
-
-            if (versions.Count == 0)
+            // A version range on the primary key. Versions rise with time, so "the oldest 5000 rows past the cutoff"
+            // is everything up to the 5000th's version, found first so the DELETE is planned against a known bound
+            // (as one statement the planner can't see the bound and scans the table).
+            var upTo = await Cmd(conn, tx, "SELECT max(version) FROM (SELECT version FROM change_log WHERE at < @cut ORDER BY version LIMIT 5000) oldest",
+                ("cut", now - TimeSpan.FromDays(options.Value.ChangeLogRetentionDays))).ExecuteScalarAsync(ct) as long?;
+            if (upTo is null)
             {
                 return total;
             }
 
-            await Cmd(conn, tx, "UPDATE state_version SET log_floor = GREATEST(log_floor, @f) WHERE id = 1", ("f", versions.Max())).ExecuteNonQueryAsync(ct);
+            var deleted = await Cmd(conn, tx, "DELETE FROM change_log WHERE version <= @upTo", ("upTo", upTo.Value)).ExecuteNonQueryAsync(ct);
+            await Cmd(conn, tx, "UPDATE state_version SET log_floor = GREATEST(log_floor, @f) WHERE id = 1", ("f", upTo.Value)).ExecuteNonQueryAsync(ct);
             await tx.CommitAsync(ct);
-            total += versions.Count;
+            total += deleted;
         }
     }
 

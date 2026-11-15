@@ -1,45 +1,88 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Symposia.BlobStorage.CredentialAuthority;
 
 /// <summary>
-/// Credential secrets at rest (#3 FR3.11). SigV4 needs the secret itself to verify a signature, so a one-way
-/// hash alone can't authenticate requests: the secret is stored AES-256-GCM encrypted under the master key,
-/// beside a SHA-256 hash for lookups and audits, and is never returned by any API after issuance. Only
-/// gateways receive it, over the service-token channel, to verify signatures in memory.
+/// Credential secrets at rest (#3 FR3.11), under a rotatable keyring (#245 FR7). SigV4 needs the secret itself to
+/// verify a signature, so a one-way hash alone can't authenticate requests: the secret is stored AES-256-GCM
+/// encrypted beside a SHA-256 hash for lookups and checks, and is never returned by any API after issuance. Only
+/// gateways receive it, over the mTLS + service-token channel, to verify signatures in memory.
 /// </summary>
-public sealed class SecretBox(byte[] key)
+/// <remarks>
+/// <para>Ciphertexts name the key that sealed them: <c>k1:&lt;b64&gt;</c> (#3, no associated data) or
+/// <c>k2:2:&lt;b64&gt;</c> (#245: the credential ID bound in as AES-GCM associated data, so a sealed secret copied
+/// onto another row won't open). New secrets are sealed with the active key; any configured key opens what it sealed.</para>
+/// <para>A ciphertext naming a key that isn't configured fails loudly; it is never served as a secret (AC9).</para>
+/// </remarks>
+public sealed partial class Keyring
 {
-    public static SecretBox FromBase64(string key) =>
-        new(Convert.FromBase64String(key) is { Length: 32 } bytes ? bytes : throw new InvalidOperationException("CredentialAuthority:MasterKey must be 32 bytes, base64."));
+    private readonly IReadOnlyDictionary<string, byte[]> _keys;
 
-    public string Seal(string secret)
+    public Keyring(IReadOnlyDictionary<string, string> keys, string active)
+    {
+        if (keys.Count == 0)
+        {
+            throw new InvalidOperationException("CredentialAuthority: no master key configured (MasterKeys, or the legacy MasterKey).");
+        }
+
+        foreach (var label in keys.Keys.Where(l => !Label().IsMatch(l)))
+        {
+            throw new InvalidOperationException($"CredentialAuthority: master key label '{label}' must look like k1, k2, ...");
+        }
+
+        _keys = keys.ToDictionary(k => k.Key, k => Convert.FromBase64String(k.Value) is { Length: 32 } bytes ? bytes
+            : throw new InvalidOperationException($"CredentialAuthority: master key {k.Key} must be 32 bytes, base64."));
+        Active = keys.ContainsKey(active) ? active : throw new InvalidOperationException($"CredentialAuthority: ActiveKey '{active}' is not in MasterKeys.");
+    }
+
+    /// <summary>The keyring from options: <c>MasterKeys</c> + <c>ActiveKey</c>, or the #3 single <c>MasterKey</c> as <c>k1</c>.</summary>
+    public static Keyring From(AuthorityOptions o)
+    {
+        var keys = new Dictionary<string, string>(o.MasterKeys, StringComparer.Ordinal);
+        if (o.MasterKey.Length > 0)
+        {
+            keys.TryAdd("k1", o.MasterKey);
+        }
+
+        return new Keyring(keys, o.ActiveKey.Length > 0 ? o.ActiveKey : keys.ContainsKey("k1") && keys.Count == 1 ? "k1" : o.ActiveKey);
+    }
+
+    /// <summary>The label new secrets are sealed with.</summary>
+    public string Active { get; }
+
+    public IReadOnlyCollection<string> Labels => [.. _keys.Keys];
+
+    /// <summary>Seals under the active key, bound to <paramref name="credentialId"/>.</summary>
+    public string Seal(string secret, string credentialId)
     {
         var nonce = RandomNumberGenerator.GetBytes(12);
         var plain = Encoding.UTF8.GetBytes(secret);
         var cipher = new byte[plain.Length];
         var tag = new byte[16];
-        using var aes = new AesGcm(key, 16);
-        aes.Encrypt(nonce, plain, cipher, tag);
-        // Versioned, so the master key can be rotated later without re-issuing credentials (review: Carl #3).
-        return KeyVersion + Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
+        using var aes = new AesGcm(_keys[Active], 16);
+        aes.Encrypt(nonce, plain, cipher, tag, Encoding.UTF8.GetBytes(credentialId));
+        return $"{Active}:2:" + Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
     }
 
-    /// <summary>The prefix marking which master key sealed a secret.</summary>
-    public const string KeyVersion = "k1:";
+    /// <summary>The key label a ciphertext names.</summary>
+    public static string LabelOf(string sealedSecret) => sealedSecret[..Math.Max(0, sealedSecret.IndexOf(':'))];
 
-    public string Open(string sealedSecret)
+    public string Open(string sealedSecret, string credentialId)
     {
-        if (!sealedSecret.StartsWith(KeyVersion, StringComparison.Ordinal))
+        var label = LabelOf(sealedSecret);
+        if (!_keys.TryGetValue(label, out var key))
         {
-            throw new CryptographicException($"Secret sealed under an unknown key version: {sealedSecret.Split(':')[0]}.");
+            throw new CryptographicException($"Secret sealed under unknown key version '{label}'; is that key missing from MasterKeys?");
         }
 
-        var raw = Convert.FromBase64String(sealedSecret[KeyVersion.Length..]);
+        var rest = sealedSecret[(label.Length + 1)..];
+        var bound = rest.StartsWith("2:", StringComparison.Ordinal);
+        var raw = Convert.FromBase64String(bound ? rest[2..] : rest);
         var plain = new byte[raw.Length - 28];
         using var aes = new AesGcm(key, 16);
-        aes.Decrypt(raw.AsSpan(0, 12), raw.AsSpan(28), raw.AsSpan(12, 16), plain);
+        aes.Decrypt(raw.AsSpan(0, 12), raw.AsSpan(28), raw.AsSpan(12, 16), plain, bound ? Encoding.UTF8.GetBytes(credentialId) : null);
         return Encoding.UTF8.GetString(plain);
     }
 
@@ -53,4 +96,7 @@ public sealed class SecretBox(byte[] key)
         var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(30));
         return (id, secret);
     }
+
+    [GeneratedRegex("^k[0-9]+$")]
+    private static partial Regex Label();
 }

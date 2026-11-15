@@ -19,6 +19,7 @@ public static class AuthorityApp
         builder.Services.Configure<AuthorityOptions>(builder.Configuration.GetSection("CredentialAuthority"));
         builder.Services.AddSingleton<AuthorityStore>();
         builder.Services.AddSingleton<InternalTls>();
+        builder.Services.AddSingleton<ResealService>();
         InternalTls.Configure(builder); // mTLS listener for /internal/* and Watch (#245 FR6)
         builder.Services.AddHostedService<RevocationPruner>();
         builder.Services.AddGrpc();
@@ -27,6 +28,7 @@ public static class AuthorityApp
         var app = builder.Build();
         await app.Services.GetRequiredService<AuthorityStore>().MigrateAsync(CancellationToken.None);
         app.Services.GetRequiredService<InternalTls>().Attach();
+        await app.Services.GetRequiredService<AuthorityStore>().CheckKeysAsync(CancellationToken.None); // no missing master keys (#245)
 
         app.MapGrpcService<WatchService>();
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
@@ -61,6 +63,23 @@ public static class AuthorityApp
                 ? Results.Ok(new { tenantId, status = status.Value.ToString() })
                 : Results.Conflict(new { error = "transition not allowed now" });
         });
+
+        // ── Platform operator: master keys (#245 FR7) ──────────────────────────────
+
+        var keys = app.MapGroup("/v1/keys").AddEndpointFilter(async (ctx, next) =>
+            Tokens.Matches(ctx.HttpContext.Request.Headers["X-Operator-Token"].FirstOrDefault(), Opts(ctx.HttpContext).OperatorToken)
+                ? await next(ctx) : Results.StatusCode(401));
+
+        keys.MapGet("/", async (AuthorityStore store, ResealService reseal, CancellationToken ct) => Results.Ok(new
+        {
+            active = store.Keys.Active,
+            configured = store.Keys.Labels,
+            secretsByKey = await store.KeyCountsAsync(ct),
+            reseal = new { running = reseal.Running, resealed = reseal.Resealed, lastError = reseal.LastError },
+        }));
+
+        keys.MapPost("/reseal", async (ResealService reseal, CancellationToken ct) =>
+            await reseal.StartAsync(ct) ? Results.Accepted("/v1/keys") : Results.Conflict(new { error = "a re-seal is already running" }));
 
         // ── Gateways: state and audit, and management on behalf of a tenant credential ───
 

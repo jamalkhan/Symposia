@@ -94,3 +94,21 @@ Creating a tenant returns its first admin credential, and the secret appears onl
 A bucket belongs to the tenant that created it. Any other tenant gets `403 CrossTenantAccessDenied` for it, the same answer as for a bucket that doesn't exist. On a single-tenant gateway, buckets from before this release are assigned to its one configured tenant at startup. With several tenants, assign them yourself first.
 
 **Secrets at rest.** SigV4 needs the secret itself to check a signature, so secrets can't be stored only as a one-way hash. The Authority stores each one AES-GCM encrypted, alongside a SHA-256 hash, and never returns it after issuance. Gateways receive it over the service-token channel and hold it only in memory.
+
+### Credential sync, mutual TLS and master keys
+
+BlobStorage #245. Gateways pull only what changed (`/internal/changes`). A credential's secret crosses the wire only when the credential is created. A full snapshot is pulled only at startup, every `Gateway:CredentialAuthority:ReconcileMinutes` (default 10, jittered), and when the Authority answers 410. The Authority returns 410 when a gateway is further behind than `ChangeLogRetentionDays` (default 7), when the Authority's database has been restored, or when the delta would exceed `MaxDeltaEntities`.
+
+**Turning on mutual TLS for `/internal/*` and Watch:**
+1. Give the Authority a server certificate (`CredentialAuthority:InternalTls:CertificatePath`). The internal API then listens on `InternalTls:Port` (default 5443). `/v1` and `/health` stay on `OperatorPort`, or on whatever `Kestrel:Endpoints` declares.
+2. Set `InternalTls:Mode` to `Permissive`. This is already the default when a certificate is configured and the environment isn't Development.
+3. Give each gateway a client certificate (`Gateway:CredentialAuthority:ClientCertificatePath`). Pin the Authority with `ServerFingerprints`, or trust it through a CA with `ServerCaPath`. Add each gateway's fingerprint to `InternalTls:ClientFingerprints`. A fingerprint is the lower-case hex SHA-256 of the certificate's DER, the same format storage-node pins use.
+4. Watch `authority_internal_requests_without_cert_total`. When it stays at 0, set `Mode` to `Enforced`. Production must run `Enforced`.
+
+**Rotating the master key:**
+1. On every Authority replica, add the new key to `CredentialAuthority:MasterKeys`, for example `"k2": "<base64 32 bytes>"`, but don't make it active yet. The legacy single `MasterKey` is read as `k1`.
+2. On every replica, set `ActiveKey` to `k2`.
+3. Run `POST /v1/keys/reseal` with the operator token. Watch `GET /v1/keys` until `secretsByKey` shows only `k2`. The job is batched and resumable, and runs one at a time across replicas.
+4. Remove `k1`. An Authority refuses to start while any stored secret still names a key it doesn't have.
+
+Make the new key active only after every replica has it, or one replica will seal secrets that another can't open.

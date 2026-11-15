@@ -52,8 +52,23 @@ public sealed class AuthorityOptions
     /// <summary>Token gateways present on /internal/* and Watch. Gateways are the only callers of the data paths.</summary>
     public string ServiceToken { get; set; } = "";
 
-    /// <summary>Base64 AES-256 key encrypting credential secrets at rest.</summary>
+    /// <summary>Base64 AES-256 key encrypting credential secrets at rest (#3). Read as keyring key <c>k1</c>.</summary>
     public string MasterKey { get; set; } = "";
+
+    /// <summary>
+    /// The master keyring (#245 FR7): label (<c>k1</c>, <c>k2</c>, ...) to base64 AES-256 key. Rotation: add the new key
+    /// on every replica, then make it <see cref="ActiveKey"/> everywhere, then run re-seal, then remove the old key.
+    /// </summary>
+    public Dictionary<string, string> MasterKeys { get; set; } = [];
+
+    /// <summary>The key new secrets are sealed with; empty = k1 when it's the only key.</summary>
+    public string ActiveKey { get; set; } = "";
+
+    /// <summary>Credentials re-sealed per batch (each batch one short transaction).</summary>
+    public int ResealBatchSize { get; set; } = 500;
+
+    /// <summary>Pause between re-seal batches, so live mutations and co-located services aren't starved.</summary>
+    public int ResealPauseMilliseconds { get; set; } = 100;
 
     /// <summary>How long a revoked and expired credential is kept before pruning (#16 FR6.1).</summary>
     public int RevocationHoldingDays { get; set; } = 90;
