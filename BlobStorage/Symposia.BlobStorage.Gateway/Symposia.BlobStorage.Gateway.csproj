@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
+    <ProjectReference Include="..\..\Security\Symposia.Security.TlsPinning\Symposia.Security.TlsPinning.csproj" />
     <ProjectReference Include="..\Symposia.BlobStorage.Domain\Symposia.BlobStorage.Domain.csproj" />
     <ProjectReference Include="..\Symposia.BlobStorage.Protocol\Symposia.BlobStorage.Protocol.csproj" />
     <ProjectReference Include="..\..\Network\Symposia.Network.Node\Symposia.Network.Node.csproj" />
@@ -9,6 +10,7 @@
   <ItemGroup>
     <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="prometheus-net" Version="8.2.1" />
   </ItemGroup>
 
   <PropertyGroup>

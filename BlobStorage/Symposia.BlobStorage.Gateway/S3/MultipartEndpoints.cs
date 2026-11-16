@@ -52,7 +52,7 @@ internal static class MultipartEndpoints
         var upload = new MultipartUpload(
             "up" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16)), tenantId, bucket, key,
             ctx.Request.ContentType ?? "application/octet-stream", algorithm,
-            ctx.Request.Headers["x-amz-checksum-type"].FirstOrDefault(), now, now + Options(ctx).MultipartUploadTtl, MultipartStatus.InProgress, null, null);
+            ctx.Request.Headers["x-amz-checksum-type"].FirstOrDefault(), now, now + Options(ctx).MultipartTtlFor(Store(ctx).Lifecycle(bucket).MultipartTtlHours), MultipartStatus.InProgress, null, null);
         store.CreateUpload(upload);
         Logger(ctx).LogInformation("Multipart upload {UploadId} started for {Bucket}/{Key}.", upload.UploadId, bucket, key);
 
@@ -97,6 +97,8 @@ internal static class MultipartEndpoints
         BlobWriteResult? blob;
         try
         {
+            // Each part is checked against quota before placement (#1 FR-2).
+            ctx.RequestServices.GetRequiredService<TenantQuota>().EnsureRoom(tenantId, UploadBody.ExpectedLength(ctx.Request));
             body = UploadBody.Open(ctx);
             blob = await writer.WriteBlobAsync(tenantId, bucket, key, body, ctx.RequestAborted, UploadBody.ExpectedLength(ctx.Request));
         }
@@ -127,7 +129,15 @@ internal static class MultipartEndpoints
 
         // A replaced part's old blob was queued for deletion in the same transaction, if unreferenced.
         _ = replaced;
-        store.TouchUpload(upload.UploadId, DateTimeOffset.UtcNow + Options(ctx).MultipartUploadTtl);
+        // Copies confirming after quorum join the part's replicas as they land (#7 FR5).
+        _ = blob.Remainder.ContinueWith(late =>
+        {
+            foreach (var nodeId in late.Result)
+            {
+                store.AddPartReplica(upload.UploadId, partNumber, blob.Cid, nodeId);
+            }
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+        store.TouchUpload(upload.UploadId, DateTimeOffset.UtcNow + Options(ctx).MultipartTtlFor(store.Lifecycle(bucket).MultipartTtlHours));
         Logger(ctx).LogDebug("Upload {UploadId} part {Part}: {Size} bytes, CID {Cid}.", upload.UploadId, partNumber, blob.SizeBytes, blob.Cid);
 
         foreach (var (algorithm, computed) in body.Computed.Where(c => c.Key != "md5"))
@@ -279,8 +289,9 @@ internal static class MultipartEndpoints
             }
 
             // Quota (quota-management.md) would be enforced here once a quota engine exists; descoped (#5 addendum).
-            var record = new ObjectRecord(upload.Bucket, upload.Key, blob.Cid, blob.SizeBytes, upload.ContentType,
-                DateTimeOffset.UtcNow, blob.NodeIds, finalEtag);
+            // The same object row and post-commit path as a single PUT (#7 FR10): no divergent multipart variant.
+            var writer = services.GetRequiredService<QuorumWriter>();
+            var record = QuorumWriter.ToRecord(blob, upload.Bucket, upload.Key, upload.ContentType, finalEtag);
             switch (store.CompleteUpload(upload.UploadId, record, finalEtag, CommittedJson(parts.Select(p => (p.PartNumber, p.Cid))), ifNoneMatch, out var replaced))
             {
                 case CompleteOutcome.PreconditionFailed:
@@ -290,7 +301,7 @@ internal static class MultipartEndpoints
             }
 
             committed = true;
-            services.GetRequiredService<QuorumWriter>().RepairIfShort(blob);
+            writer.AfterCommit(blob, upload.Bucket, upload.Key);
             logger.LogInformation("Multipart upload {UploadId} completed: {Parts} parts, {Size} bytes, CID {Cid}, in {ElapsedMs} ms.",
                 upload.UploadId, parts.Count, blob.SizeBytes, blob.Cid, started.ElapsedMilliseconds);
             return (true, 200, "", "", replaced);

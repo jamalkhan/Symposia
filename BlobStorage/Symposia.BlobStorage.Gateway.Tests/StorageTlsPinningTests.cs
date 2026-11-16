@@ -7,6 +7,7 @@ using Nethereum.Signer;
 using Symposia.BlobStorage.Gateway.Metadata;
 using Symposia.BlobStorage.Gateway.Nodes;
 using Symposia.Network.Node;
+using Symposia.Security.TlsPinning;
 
 namespace Symposia.BlobStorage.Gateway.Tests;
 
@@ -39,16 +40,21 @@ public sealed class StorageTlsPinningTests : IDisposable
     }
 
     [Fact]
-    public void PinMatches_OnlyTheExactCertificate()
+    public void PinMatches_OnlyTheExactCertificate() // moved to the shared TlsPin (#252); same rules
     {
-        var der = RandomNumberGenerator.GetBytes(64);
-        var pin = Convert.ToHexStringLower(SHA256.HashData(der));
         var now = DateTimeOffset.UtcNow;
-        Assert.True(StorageTlsProof.PinMatches(der, now.AddDays(1), pin, now));
-        Assert.True(StorageTlsProof.PinMatches(der, now.AddDays(1), pin.ToUpperInvariant(), now));
-        Assert.False(StorageTlsProof.PinMatches(RandomNumberGenerator.GetBytes(64), now.AddDays(1), pin, now));
-        Assert.False(StorageTlsProof.PinMatches(null, now.AddDays(1), pin, now));
-        Assert.False(StorageTlsProof.PinMatches(der, now.AddSeconds(-1), pin, now)); // expired certificate
+        using var key = ECDsa.Create();
+        using var cert = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=n", key, HashAlgorithmName.SHA256)
+            .CreateSelfSigned(now.AddMinutes(-5), now.AddDays(1));
+        using var other = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=o", key, HashAlgorithmName.SHA256)
+            .CreateSelfSigned(now.AddMinutes(-5), now.AddDays(1));
+        var pin = Convert.ToHexStringLower(SHA256.HashData(cert.RawData));
+
+        Assert.True(TlsPin.Matches(cert, [pin], now, TlsPin.ServerAuth));
+        Assert.True(TlsPin.Matches(cert, [TlsPin.Normalize(pin.ToUpperInvariant())], now, TlsPin.ServerAuth)); // as NodeConnection normalises
+        Assert.False(TlsPin.Matches(other, [pin], now));
+        Assert.False(TlsPin.Matches(null, [pin], now));
+        Assert.False(TlsPin.Matches(cert, [pin], now.AddDays(2))); // expired certificate
     }
 
     [Fact]

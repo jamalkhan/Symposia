@@ -30,9 +30,32 @@ internal static class S3Xml
 
     internal static IResult Error(int status, string code, string message) => ErrorXml(status, code, message);
 
+    /// <summary>Seconds a client should wait before retrying a 503 (#1 FR-18).</summary>
+    internal const int RetryAfterSeconds = 5;
+
     internal static IResult ServiceUnavailable() =>
-        ErrorXml(503, "ServiceUnavailable",
-            "Write quorum was not reached. Not enough storage nodes confirmed the write.");
+        WithRetryAfter(ErrorXml(503, "ServiceUnavailable",
+            "No replica of this object is reachable right now; it is temporarily unavailable. Retry shortly."));
+
+    /// <summary>
+    /// Every replica reports the blob missing (#8 FR7.2): permanently lost rather than temporarily
+    /// unavailable. Still 503, as repair may yet restore it from a copy outside the metadata's view.
+    /// </summary>
+    internal static IResult DataLost() =>
+        ErrorXml(503, "ObjectDataLost",
+            "Every replica of this object reports it missing; the data is lost, not temporarily unavailable.");
+
+    /// <summary>Adds <c>Retry-After</c> to a 503 (#1 FR-18).</summary>
+    internal static IResult WithRetryAfter(IResult inner) => new RetryAfterResult(inner);
+
+    private sealed class RetryAfterResult(IResult inner) : IResult
+    {
+        public Task ExecuteAsync(HttpContext ctx)
+        {
+            ctx.Response.Headers.RetryAfter = RetryAfterSeconds.ToString();
+            return inner.ExecuteAsync(ctx);
+        }
+    }
 
     /// <summary>
     /// Write quorum not reached (#199): too few storage nodes took the write, typically because some
@@ -40,8 +63,8 @@ internal static class S3Xml
     /// the nodes that refused.
     /// </summary>
     internal static IResult SlowDown() =>
-        ErrorXml(503, "SlowDown",
-            "Write quorum was not reached: not enough storage nodes accepted the write. Retry shortly.");
+        WithRetryAfter(ErrorXml(503, "SlowDown",
+            "Write quorum was not reached: not enough storage nodes accepted the write. Retry shortly."));
 
     internal static IResult BadRequest(string message) =>
         ErrorXml(400, "BadRequest", message);

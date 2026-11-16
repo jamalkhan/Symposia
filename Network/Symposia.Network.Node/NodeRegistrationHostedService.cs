@@ -17,35 +17,45 @@ public sealed class NodeRegistrationHostedService(
     NodeIdentity identity,
     INodeRegistryClient registry,
     IOptions<NodeNetworkOptions> options,
-    ILogger<NodeRegistrationHostedService> logger) : BackgroundService
+    ILogger<NodeRegistrationHostedService> logger,
+    NodeNetworkStatus? status = null) : BackgroundService
 {
     internal static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(10);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!await ShouldRegisterAsync(stoppingToken))
+        {
+            status?.ConfirmRegistration(); // nothing on chain to wait for
+        }
+    }
+
+    /// <summary>Runs registration when this host is configured for it; false when it isn't.</summary>
+    private async Task<bool> ShouldRegisterAsync(CancellationToken stoppingToken)
+    {
         var o = options.Value;
         if (!o.EnableRegistration)
         {
             logger.LogInformation("On-chain registration disabled for this host (EnableRegistration=false).");
-            return;
+            return false;
         }
 
         if (string.IsNullOrWhiteSpace(o.BlockchainGatewayUrl) || string.IsNullOrWhiteSpace(o.NodeRegistryAddress))
         {
             logger.LogInformation("Blockchain gateway not configured; skipping on-chain node registration.");
-            return;
+            return false;
         }
 
         if (string.IsNullOrWhiteSpace(o.AdvertisedEndpoint))
         {
             logger.LogWarning("No AdvertisedEndpoint configured; skipping on-chain node registration, so peers cannot discover this node.");
-            return;
+            return false;
         }
 
         if (NodeEndpoint.Normalize(o.AdvertisedEndpoint) is null)
         {
             logger.LogError("AdvertisedEndpoint '{Endpoint}' must be an absolute http(s) URL with no path; skipping registration.", o.AdvertisedEndpoint);
-            return;
+            return false;
         }
 
         while (!stoppingToken.IsCancellationRequested)
@@ -53,7 +63,8 @@ public sealed class NodeRegistrationHostedService(
             try
             {
                 await RegisterOnceAsync(stoppingToken);
-                return;
+                status?.ConfirmRegistration();
+                return true;
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
@@ -62,6 +73,8 @@ public sealed class NodeRegistrationHostedService(
 
             await Task.Delay(RetryDelay, stoppingToken);
         }
+
+        return true;
     }
 
     public async Task RegisterOnceAsync(CancellationToken ct)

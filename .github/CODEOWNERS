@@ -7,6 +7,9 @@
 # Protocol definitions and the compatibility tooling
 /protocol/                                              @jamalkhan
 /tools/protocol-compat/                                 @jamalkhan
+
+# Shared security primitives (#252): certificate pinning for storage nodes and the Credential Authority
+/Security/                                              @jamalkhan
 /docs/engineering/                                      @jamalkhan
 /BlobStorage/Symposia.BlobStorage.Protocol/Protos/      @jamalkhan
 

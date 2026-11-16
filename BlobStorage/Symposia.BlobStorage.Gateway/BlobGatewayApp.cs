@@ -34,6 +34,22 @@ public static class BlobGatewayApp
         // ── Services ─────────────────────────────────────────────────────────────────
 
         builder.Services.AddSingleton<CredentialStore>();
+        // The Credential Authority (#3): its state is cached here and enforced per request; uses are audited there.
+        builder.Services.AddHttpClient(CredentialSync.HttpClientName, (sp, http) =>
+        {
+            var authority = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.CredentialAuthority;
+            if (authority.Url.Length > 0) http.BaseAddress = new Uri(authority.Url.TrimEnd('/') + "/");
+            http.DefaultRequestHeaders.Add("X-Service-Token", authority.ServiceToken);
+            http.Timeout = TimeSpan.FromSeconds(10);
+        }).ConfigurePrimaryHttpMessageHandler(sp => AuthorityTls.Handler(
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.CredentialAuthority)); // mTLS (#245)
+        builder.Services.AddHttpClient(CredentialSync.HttpClientName + "-grpc", http => http.Timeout = Timeout.InfiniteTimeSpan)
+            .ConfigurePrimaryHttpMessageHandler(sp => AuthorityTls.Handler(
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.CredentialAuthority));
+        builder.Services.AddSingleton<CredentialSync>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<CredentialSync>());
+        builder.Services.AddSingleton<AuditForwarder>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<AuditForwarder>());
         builder.Services.AddSingleton<SigV4Verifier>();
         builder.Services.AddSingleton<GatewayMetadataStore>();
 
@@ -54,17 +70,44 @@ public static class BlobGatewayApp
         // The IHostedService delegate resolves NodeRegistry, so NodeRegistry must stay registered.
         // INodeRegistry is separately registered so QuorumWriter, endpoints, and background services
         // can inject it without knowing the concrete type (and tests can replace it).
+        builder.Services.AddSingleton<ITlsRefusalSink, NodeTlsRefusals>(); // #252
         builder.Services.AddSingleton<NodeRegistry>();
         builder.Services.AddSingleton<INodeRegistry>(sp => sp.GetRequiredService<NodeRegistry>());
         builder.Services.AddHostedService(sp => sp.GetRequiredService<NodeRegistry>());
 
+        builder.Services.AddSingleton<Placement.PlacementEngine>();
+        builder.Services.AddSingleton<Placement.RegionAssignmentResolver>();
         builder.Services.AddScoped<QuorumWriter>();
+        builder.Services.AddSingleton<TenantQuota>();
+        builder.Services.AddSingleton<IWriteQuorumRequirement, ConfiguredWriteQuorum>();
+
+        // Health, readiness, metrics and drain (#1).
+        builder.Services.AddSingleton<Health.GatewayMetrics>();
+        builder.Services.AddSingleton<Health.ShutdownState>();
+        builder.Services.AddSingleton<Health.MetadataIndexMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<Health.MetadataIndexMonitor>());
+        builder.Services.Configure<HostOptions>(host =>
+            host.ShutdownTimeout = TimeSpan.FromSeconds(Math.Max(1, gatewayConfig.ShutdownTimeoutSeconds)));
 
         // Repair / resilience services.
-        builder.Services.AddSingleton<RepairQueue>();
+        builder.Services.AddSingleton<RepairQueue>(sp => new RepairQueue(sp.GetRequiredService<GatewayMetadataStore>()));
+        builder.Services.AddSingleton<BandwidthBudget>(sp => new BandwidthBudget(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>()));
+        builder.Services.AddSingleton<Erasure.ErasureObjects>();
+
+        // Penalty stages (#8 FR3): operator-set until the on-chain penalty system lands; its reactions run here.
+        builder.Services.AddSingleton<Penalties.ManualPenaltySource>();
+        builder.Services.AddSingleton<Penalties.INodePenaltyEventSource>(sp => sp.GetRequiredService<Penalties.ManualPenaltySource>());
+        builder.Services.AddSingleton<Penalties.IIntegrityFailureSink, Penalties.LoggingIntegrityFailureSink>();
+        builder.Services.AddSingleton<Penalties.PenaltyResponder>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<Penalties.PenaltyResponder>());
+        builder.Services.AddSingleton<Integrity.ChallengeScheduler>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<Integrity.ChallengeScheduler>());
         builder.Services.AddScoped<Objects.ObjectService>(); // scoped: it uses the scoped QuorumWriter
         builder.Services.AddSingleton<NodeReconciler>();
+        builder.Services.AddSingleton<SafetyInvariantGate>();
+        builder.Services.AddSingleton<IOnChainMetadataOracle, FailClosedOracle>(); // fail-closed until the chain layer answers (#16 FR5.3)
         builder.Services.AddHostedService<GcWorker>();
+        builder.Services.AddHostedService<GcEvaluator>();
         builder.Services.AddHostedService<MultipartReaper>();
         builder.Services.AddHostedService<RepairWorker>();
         builder.Services.AddSingleton<ReplicationMonitor>();
@@ -148,16 +191,38 @@ public static class BlobGatewayApp
         // ── Init ──────────────────────────────────────────────────────────────────────
 
         app.Services.GetRequiredService<GatewayMetadataStore>().Initialize();
+        app.Services.GetRequiredService<Health.MetadataIndexMonitor>().Check();
+        ClaimUnownedBuckets(app);
+
+        // Drain (#1 FR-28): /ready goes 503 first, so the load balancer stops sending new connections
+        // during the notice period; Kestrel then stops listening and in-flight requests finish within
+        // HostOptions.ShutdownTimeout.
+        var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            app.Services.GetRequiredService<Health.ShutdownState>().BeginDrain();
+            var notice = gatewayConfig.DrainNoticeSeconds;
+            if (notice > 0)
+            {
+                app.Logger.LogInformation("Draining: reporting not ready for {Notice}s before closing listeners.", notice);
+                Thread.Sleep(TimeSpan.FromSeconds(notice));
+            }
+        });
 
         // A node coming online (new, or back from an outage) gets missing copies straight away (issue #135).
         var replicationMonitor = app.Services.GetRequiredService<ReplicationMonitor>();
-        app.Services.GetRequiredService<NodeRegistry>().NodeBecameHealthy += _ => replicationMonitor.RequestSweep();
+        app.Services.GetRequiredService<NodeRegistry>().NodeBecameHealthy += node =>
+        {
+            app.Services.GetRequiredService<GatewayMetadataStore>().ClearOffline(node.Id); // back: no longer Offline (#16 FR4)
+            replicationMonitor.RequestSweep();
+        };
         // Nodes refused by network policy (#145): re-replicate their objects now, not at the next scan.
         app.Services.GetRequiredService<NodeRegistry>().NodesDropped += _ => replicationMonitor.RequestSweep();
 
         // ── SigV4 middleware ──────────────────────────────────────────────────────────
 
         app.UseRequestIds();
+        Health.RequestLog.UseRequestLog(app);
         if (servesPrimary)
         {
             app.UseNodeNetwork();
@@ -167,7 +232,7 @@ public static class BlobGatewayApp
         app.Use(async (ctx, next) =>
         {
             var path = ctx.Request.Path.Value ?? "";
-            if (path.StartsWith("/healthz/", StringComparison.Ordinal) ||
+            if (Health.HealthEndpoints.IsHealthPath(path) ||
                 path.StartsWith("/admin/", StringComparison.Ordinal) ||
                 path == BlobApiEndpoints.OpenApiPath ||
                 (servesPrimary && Symposia.Network.Node.PrimaryEndpointPaths.Contains(path)))
@@ -194,9 +259,40 @@ public static class BlobGatewayApp
                 return;
             }
 
+            // Authorization (#3 FR4), from cached Authority state: revoked, suspended, expired, region-locked,
+            // cross-tenant, out-of-scope and policy-denied requests stop here, each with its own code.
+            var cache = ctx.RequestServices.GetRequiredService<CredentialStore>();
+            // Gone between authentication and here (a sync just removed it): refuse, never crash (review: Carl #5).
+            if (cache.Grant(sigv4!.AccessKeyId) is not { } grant)
+            {
+                await Authorization.Refusal(ctx, Symposia.BlobStorage.Domain.Credentials.AccessDecision.CredentialRevoked).ExecuteAsync(ctx);
+                return;
+            }
+
+            var gatewayOptions = ctx.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value;
+            var decision = Authorization.Decide(ctx, grant, cache, ctx.RequestServices.GetRequiredService<GatewayMetadataStore>(),
+                gatewayOptions.Region, sigv4.Scope.Split('/') is { Length: > 1 } scope ? scope[1] : null, DateTimeOffset.UtcNow);
+            ctx.Items[Health.RequestLog.CredentialItem] = grant.CredentialId;
+            var audit = ctx.RequestServices.GetRequiredService<AuditForwarder>();
+            Symposia.BlobStorage.Domain.Credentials.UseReport Use(string outcome, string? reason) => new(grant.CredentialId, $"{ctx.Request.Method} {Authorization.Classify(ctx.Request) switch
+            {
+                (null, _, _, _) => "service",
+                (_, null, _, _) => "bucket",
+                _ => "object",
+            }}", ctx.Request.Path.Value, ctx.Connection.RemoteIpAddress?.ToString(), gatewayOptions.Region,
+                gatewayOptions.CredentialAuthority.GatewayId is { Length: > 0 } id ? id : Environment.MachineName, outcome, reason, DateTimeOffset.UtcNow);
+            if (decision != Symposia.BlobStorage.Domain.Credentials.AccessDecision.Allowed)
+            {
+                audit.Report(Use("Rejected", decision.ToString()));
+                Health.RequestLog.Error(ctx, decision.ToString());
+                await Authorization.Refusal(ctx, decision).ExecuteAsync(ctx);
+                return;
+            }
+
             ctx.Items["TenantId"] = tenantId;
             ctx.Items[nameof(SigV4Context)] = sigv4;
             await next();
+            audit.Report(Use(ctx.Response.StatusCode < 400 ? "Success" : "Failed", ctx.Response.StatusCode < 400 ? null : ctx.Response.StatusCode.ToString()));
         });
 
         // After auth, so each recorded operation carries its caller (#204).
@@ -204,15 +300,7 @@ public static class BlobGatewayApp
 
         // ── Health endpoints ──────────────────────────────────────────────────────────
 
-        app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));
-
-        app.MapGet("/healthz/ready", (INodeRegistry nodes) =>
-        {
-            var healthy = nodes.Healthy;
-            return healthy.Count > 0
-                ? Results.Ok(new { status = "ready", nodes = healthy.Count })
-                : Results.StatusCode(503);
-        });
+        Health.HealthEndpoints.Map(app);
 
         // ── Admin endpoints ───────────────────────────────────────────────────────────
 
@@ -234,6 +322,7 @@ public static class BlobGatewayApp
 
         // The literal /v1 segment outranks S3's {bucket} parameter; registered first for clarity.
         BlobApiEndpoints.Map(app);
+        Authorization.MapManagement(app);
 
         // Object routes must be registered before bucket routes so /{bucket}/{**key}
         // takes priority over /{bucket} when a key is present.
@@ -241,6 +330,21 @@ public static class BlobGatewayApp
         ObjectEndpoints.Map(app);
         BucketEndpoints.Map(app);
         return app;
+    }
+
+    /// <summary>
+    /// Buckets created before ownership existed have no tenant. A single-tenant deployment (one tenant in
+    /// its configured credentials) adopts them on upgrade, so its existing buckets stay usable under tenant
+    /// isolation (#3); with several tenants the operator assigns them, and they stay unusable until then.
+    /// </summary>
+    private static void ClaimUnownedBuckets(WebApplication app)
+    {
+        var tenants = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<GatewayOptions>>().Value.Credentials
+            .Select(c => c.TenantId).Where(t => t.Length > 0).Distinct().ToList();
+        if (tenants.Count == 1 && app.Services.GetRequiredService<GatewayMetadataStore>().ClaimUnownedBuckets(tenants[0]) is var claimed and > 0)
+        {
+            app.Logger.LogInformation("Assigned {Count} bucket(s) created before bucket ownership to tenant {Tenant}.", claimed, tenants[0]);
+        }
     }
 
     /// <summary>

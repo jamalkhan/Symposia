@@ -61,7 +61,7 @@ public sealed class StorageListenerOverlapTests : IAsyncLifetime
         if (pin is not null)
         {
             handler.SslOptions.RemoteCertificateValidationCallback = (_, cert, _, _) =>
-                cert is not null && StorageTlsProof.PinMatches(cert.GetRawCertData(), DateTimeOffset.UtcNow.AddDays(1), pin, DateTimeOffset.UtcNow);
+                Symposia.Security.TlsPinning.TlsPin.Matches(cert, [pin], DateTimeOffset.UtcNow, Symposia.Security.TlsPinning.TlsPin.ServerAuth);
         }
 
         using var channel = GrpcChannel.ForAddress(url, new GrpcChannelOptions { HttpHandler = handler });
@@ -100,7 +100,7 @@ public sealed class StorageListenerOverlapTests : IAsyncLifetime
         var (_, services) = await StartAsync(grpcPort: FreePort(), grpcTlsPort: 0);
         Assert.Null(services.Storage!.GrpcTls);
         Assert.Null(services.Storage.TlsFingerprint);
-        Assert.Equal([ProtocolFeatures.StorageGrpcPlaintext], services.Features!);
+        Assert.Equal([ProtocolFeatures.StorageGrpcPlaintext, ProtocolFeatures.StorageIntegrityMerkleV1], services.Features!);
     }
 
     public Task InitializeAsync() => Task.CompletedTask;

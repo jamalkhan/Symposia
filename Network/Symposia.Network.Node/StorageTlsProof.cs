@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using Nethereum.ABI;
 using Nethereum.Signer;
 using Nethereum.Util;
@@ -11,22 +10,14 @@ namespace Symposia.Network.Node;
 /// fingerprint and its expiry. A gateway that recovers the node's registry address from the proof pins
 /// that fingerprint until that expiry, so no certificate authority is involved and an old, replaced
 /// certificate can't be replayed once it has expired.
-/// Both sides use <see cref="Fingerprint"/> and <see cref="PinMatches"/>: the fingerprint is a wire contract.
+/// The fingerprint and pin matching are <see cref="Symposia.Security.TlsPinning.TlsPin"/> (#252), shared with the
+/// Credential Authority; this class is only the on-chain proof.
 /// </summary>
 public static class StorageTlsProof
 {
     public const string Domain = "Symposia.StorageTls.v2";
 
     private static readonly EthereumMessageSigner MessageSigner = new();
-
-    /// <summary>Lower-case hex SHA-256 of the DER certificate.</summary>
-    public static string Fingerprint(byte[] certificateDer) => Convert.ToHexStringLower(SHA256.HashData(certificateDer));
-
-    /// <summary>True when the presented certificate is exactly the pinned one and hasn't expired.</summary>
-    public static bool PinMatches(byte[]? certificateDer, DateTimeOffset? notAfter, string pinnedFingerprint, DateTimeOffset now) =>
-        certificateDer is not null
-        && string.Equals(Fingerprint(certificateDer), pinnedFingerprint, StringComparison.OrdinalIgnoreCase)
-        && (notAfter is null || notAfter > now);
 
     public static byte[] Digest(ulong chainId, string registryAddress, string node, byte[] fingerprint, long notAfterUnixSeconds)
     {

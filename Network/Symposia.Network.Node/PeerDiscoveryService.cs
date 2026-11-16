@@ -17,7 +17,8 @@ public sealed class PeerDiscoveryService(
     PeerVerifier verifier,
     PeerTable table,
     IOptions<NodeNetworkOptions> options,
-    ILogger<PeerDiscoveryService> logger) : BackgroundService
+    ILogger<PeerDiscoveryService> logger,
+    NodeNetworkStatus? status = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -25,12 +26,14 @@ public sealed class PeerDiscoveryService(
         if (!o.EnableDiscovery)
         {
             logger.LogInformation("Peer discovery disabled for this host (EnableDiscovery=false).");
+            status?.MarkNetworkJoined();
             return;
         }
 
         if (string.IsNullOrWhiteSpace(o.BlockchainGatewayUrl) || string.IsNullOrWhiteSpace(o.NodeRegistryAddress))
         {
             logger.LogInformation("Blockchain gateway not configured; peer discovery disabled.");
+            status?.MarkNetworkJoined();
             return;
         }
 
@@ -112,6 +115,7 @@ public sealed class PeerDiscoveryService(
         }
 
         table.Replace(results);
+        status?.MarkNetworkJoined();
         logger.LogDebug("Discovery cycle finished in {ElapsedMs} ms: {Recognized} recognized, {Unrecognized} not recognized.",
             started.ElapsedMilliseconds, results.Count(r => r.Status == PeerStatus.Recognized), results.Count(r => r.Status != PeerStatus.Recognized));
     }

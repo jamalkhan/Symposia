@@ -13,7 +13,7 @@ namespace Symposia.BlobStorage.Gateway.Api;
 /// placement) now, operation history (#204) next. <c>/v1</c> can't collide with S3 paths because
 /// S3 bucket names are at least three characters. Auth is SigV4 with the gateway's access keys.
 /// </summary>
-public static class BlobApiEndpoints
+public static partial class BlobApiEndpoints
 {
     public const string Prefix = "/v1";
     public const string OpenApiPath = "/v1/openapi.json";
@@ -25,17 +25,18 @@ public static class BlobApiEndpoints
         var v1 = app.MapGroup(Prefix);
         v1.MapGet("/openapi.json", () => Results.Text(OpenApi.Value, "application/json"));
 
-        v1.MapGet("/buckets", (GatewayMetadataStore store) =>
-            Results.Ok(new { buckets = store.ListBuckets().Select(b => new { name = b.Name, createdAt = b.CreatedAt }) }));
+        // Only the caller's tenant's buckets: listing never reveals another tenant's names (#3 FR1.3).
+        v1.MapGet("/buckets", (HttpContext ctx, GatewayMetadataStore store) =>
+            Results.Ok(new { buckets = store.ListBuckets(ctx.Items["TenantId"] as string ?? "").Select(b => new { name = b.Name, createdAt = b.CreatedAt }) }));
 
-        v1.MapPut("/buckets/{bucket}", (string bucket, GatewayMetadataStore store) =>
+        v1.MapPut("/buckets/{bucket}", (string bucket, HttpContext ctx, GatewayMetadataStore store) =>
         {
             if (!BucketNames.IsValid(bucket))
             {
                 return Error(400, "InvalidBucketName", BucketNames.Rule);
             }
 
-            store.CreateBucket(bucket); // idempotent, as in S3
+            store.CreateBucket(bucket, ctx.Items["TenantId"] as string ?? ""); // idempotent, as in S3; the creator owns it
             return Results.Ok(new { name = bucket });
         });
 
@@ -111,6 +112,14 @@ public static class BlobApiEndpoints
                 {
                     bucket = record.Bucket, key = record.Key, size = record.SizeBytes, contentType = record.ContentType,
                     etag = record.ETag, cid = record.Cid, lastModified = record.LastModified, replicas = record.NodeIds,
+                    // #7 FR5: "quorum" until every target copy has confirmed, then "full".
+                    replication = record.Replication == ReplicationState.Full ? "full" : "quorum",
+                    targetCopies = record.TargetCopies, regions = record.Regions,
+                    // #8: soft placement rules bent for this object, and its storage scheme and shards.
+                    placementGaps = record.PlacementGaps.Select(g => new { rule = g.Rule, detail = g.Detail }),
+                    scheme = record.Scheme,
+                    shards = record.IsErasureCoded ? store.Shards(bucket, key).Select(sh => new { index = sh.Index, cid = sh.Cid, node = sh.NodeId }) : null,
+                    pendingReplicas = store.PendingReplicas(record.Cid).Select(p => new { node = p.NodeId, stage = p.Stage, extra = p.Extra, done = p.Done }),
                 });
             }
 
@@ -118,6 +127,7 @@ public static class BlobApiEndpoints
             {
                 ServeOutcome.NotFound => NoSuchKey(key),
                 ServeOutcome.NoReplica => Unavailable(),
+                ServeOutcome.Lost => Error(503, "ObjectDataLost", "Every replica of this object reports it missing; the data is lost, not temporarily unavailable."),
                 _ => Results.Empty,
             };
         });
@@ -134,6 +144,118 @@ public static class BlobApiEndpoints
             ctx.Response.ContentType = record.ContentType;
             ctx.Response.ContentLength = record.SizeBytes;
             return Results.Ok();
+        });
+
+        // Region assignment (#7 FR1/FR3, #8 FR1.1): where the bucket's new objects are placed and which
+        // regions their write quorum must include. Applies to writes from now on; existing objects keep theirs.
+        // ?prefix= sets a folder rule instead (#8 FR1.1): object header, then longest folder rule, then bucket.
+        v1.MapGet("/buckets/{bucket}/regions", (string bucket, string? prefix, HttpContext ctx, GatewayMetadataStore store) =>
+            !OwnsBucket(ctx, store, bucket) ? NoSuchBucket(bucket)
+            : prefix is null
+                ? Results.Ok(new { regions = store.BucketRegions(bucket), folders = store.PrefixRegions(bucket).Select(r => new { prefix = r.Prefix, regions = r.Regions }) })
+                : Results.Ok(new { prefix, regions = store.PrefixRegions(bucket).FirstOrDefault(r => r.Prefix == prefix).Regions ?? [] }));
+
+        v1.MapPut("/buckets/{bucket}/regions", (string bucket, string? prefix, RegionAssignment body, HttpContext ctx, GatewayMetadataStore store,
+            Microsoft.Extensions.Options.IOptions<GatewayOptions> options) =>
+        {
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            var regions = (body.Regions ?? []).Select(r => r.Trim().ToLowerInvariant()).Distinct().ToList();
+            if (regions.FirstOrDefault(r => !RegionCode().IsMatch(r)) is { } bad)
+            {
+                return Error(400, "InvalidArgument", $"'{bad}' is not a region code (lowercase letters, digits and dashes, up to 32).");
+            }
+
+            if (regions.Count > 0 && options.Value.Redundancy.Mode != RedundancyMode.Network)
+            {
+                // Bootstrap clusters don't place by region; accepting the setting would promise a constraint nobody enforces.
+                return Error(409, "RegionsNotEnforced", "This gateway runs in bootstrap redundancy mode and does not place by region.");
+            }
+
+            if (prefix is { Length: > 0 })
+            {
+                store.SetPrefixRegions(bucket, prefix, regions);
+                return Results.Ok(new { prefix, regions });
+            }
+
+            store.SetBucketRegions(bucket, regions);
+            return Results.Ok(new { regions });
+        });
+
+        // Erasure coding per bucket (#8 FR5.1): "rs:k+m" stores new objects as shards; "replica" (default) as copies.
+        v1.MapPut("/buckets/{bucket}/scheme", (string bucket, SchemeChoice body, HttpContext ctx, GatewayMetadataStore store) =>
+        {
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            if (body.Scheme is not ("replica" or null) && !Domain.Erasure.ErasureScheme.TryParse(body.Scheme, out _))
+            {
+                return Error(400, "InvalidArgument", "scheme must be \"replica\" or \"rs:k+m\" with 1 ≤ k, 1 ≤ m, k + m ≤ 32.");
+            }
+
+            store.SetBucketScheme(bucket, body.Scheme is "replica" ? null : body.Scheme);
+            return Results.Ok(new { scheme = body.Scheme ?? "replica" });
+        });
+
+        // Lifecycle and retention (#16 FR1–FR3).
+        v1.MapPut("/buckets/{bucket}/lifecycle", (string bucket, BucketLifecycle body, HttpContext ctx, GatewayMetadataStore store) =>
+        {
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            if (body.RecoveryDays is < 1 or > 365 || body.MultipartTtlHours is < 1 or > 720 || body.MaxVersions is < 1
+                || body.MaxVersionAgeDays is < 1 || body.MinRetentionDays is < 0)
+            {
+                return Error(400, "InvalidArgument", "recoveryDays 1–365, multipartTtlHours 1–720, maxVersions ≥ 1, maxVersionAgeDays ≥ 1, minRetentionDays ≥ 0.");
+            }
+
+            store.SetLifecycle(bucket, body);
+            return Results.Ok(body);
+        });
+
+        v1.MapGet("/buckets/{bucket}/lifecycle", (string bucket, HttpContext ctx, GatewayMetadataStore store) =>
+            !OwnsBucket(ctx, store, bucket) ? NoSuchBucket(bucket) : Results.Ok(store.Lifecycle(bucket)));
+
+        // ?retention sets an object's lock and legal hold; ?restore brings back a deleted object within its recovery window.
+        v1.MapPost("/buckets/{bucket}/objects/{**key}", async (string bucket, string key, HttpContext ctx, GatewayMetadataStore store) =>
+        {
+            // The body is optional (?restore has none), so it's read by hand rather than bound.
+            var body = ctx.Request.ContentLength > 0
+                ? await ctx.Request.ReadFromJsonAsync<RetentionRequest>(ctx.RequestAborted)
+                : null;
+            if (!OwnsBucket(ctx, store, bucket))
+            {
+                return NoSuchBucket(bucket);
+            }
+
+            if (ctx.Request.Query.ContainsKey("restore"))
+            {
+                return store.RestoreLatestVersion(bucket, key) is { } restored ? Results.Ok(Describe(restored))
+                    : Error(404, "NoSuchVersion", "No recoverable version of this key (the key is live, or its versions are past recovery).");
+            }
+
+            if (ctx.Request.Query.ContainsKey("retention"))
+            {
+                return store.SetRetention(bucket, key, body?.LockedUntil, body?.LegalHold ?? false)
+                    ? Results.Ok(new { lockedUntil = body?.LockedUntil, legalHold = body?.LegalHold ?? false })
+                    : NoSuchKey(key);
+            }
+
+            return Error(400, "InvalidArgument", "POST on an object takes ?restore or ?retention.");
+        });
+
+        // What's waiting for physical deletion and which copies can't be re-placed (#16 FR10), for the caller's tenant only.
+        v1.MapGet("/gc", (HttpContext ctx, GatewayMetadataStore store, Microsoft.Extensions.Options.IOptions<GatewayOptions> options) =>
+        {
+            var tenant = ctx.Items["TenantId"] as string ?? "";
+            return Results.Ok(GcReport(store, options.Value, tenant));
         });
 
         v1.MapDelete("/buckets/{bucket}/objects/{**key}", (string bucket, string key, HttpContext ctx, GatewayMetadataStore store, ObjectService objects) =>
@@ -203,6 +325,34 @@ public static class BlobApiEndpoints
         });
     }
 
+    /// <summary>Whether the caller's tenant owns <paramref name="bucket"/>; a stranger's bucket reads as absent.</summary>
+    private static bool OwnsBucket(HttpContext ctx, GatewayMetadataStore store, string bucket) =>
+        store.BucketExists(bucket) && store.BucketTenant(bucket) == ctx.Items["TenantId"] as string;
+
+    private sealed record RegionAssignment(string[]? Regions);
+
+    private sealed record SchemeChoice(string? Scheme);
+
+    private sealed record RetentionRequest(DateTimeOffset? LockedUntil, bool? LegalHold);
+
+    /// <summary>Pending physical deletions per bucket with an estimated purge time, and open placement warnings (#16 FR10).</summary>
+    internal static object GcReport(GatewayMetadataStore store, GatewayOptions options, string? tenant) => new
+    {
+        pendingDeletion = store.PendingDeletions(tenant).Select(p => new
+        {
+            bucket = p.Bucket,
+            objects = p.Pending,
+            queued = p.Queued,
+            // The oldest soft-deleted version is purgeable at the end of its window; queued ones within 72 h (#16 FR2.2).
+            estimatedPurgeBy = p.Queued > 0 ? DateTimeOffset.UtcNow.AddHours(72)
+                : p.OldestDeletedAt?.AddDays(store.Lifecycle(p.Bucket).RecoveryDays ?? options.Gc.RecoveryDays),
+        }),
+        placementWarnings = store.PlacementWarnings(tenant).Select(w => new { cid = w.Cid, bucket = w.Bucket, key = w.Key, reason = w.Reason, since = w.Since }),
+    };
+
+    [System.Text.RegularExpressions.GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]
+    private static partial System.Text.RegularExpressions.Regex RegionCode();
+
     /// <summary>A JSON error, <c>{"error":{"code","message","requestId"}}</c>, with S3's codes and statuses.</summary>
     public static IResult Error(int status, string code, string message) => new ErrorResult(status, code, message);
 
@@ -210,7 +360,7 @@ public static class BlobApiEndpoints
 
     private static IResult NoSuchKey(string key) => Error(404, "NoSuchKey", $"The key '{key}' does not exist.");
 
-    private static IResult Unavailable() => Error(503, "ServiceUnavailable", "No storage node could serve the request; try again.");
+    private static IResult Unavailable() => S3Xml.WithRetryAfter(Error(503, "ServiceUnavailable", "No storage node could serve the request; try again."));
 
     private static object Describe(ObjectRecord r) => new
     {

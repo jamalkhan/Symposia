@@ -12,7 +12,9 @@
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
     <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.Testing" Version="9.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.4.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
   </ItemGroup>
@@ -26,6 +28,7 @@
     <ProjectReference Include="..\Symposia.BlobStorage.Gateway\Symposia.BlobStorage.Gateway.csproj" Aliases="global,GatewayAlias" />
     <!-- StorageNode gets a named alias to disambiguate its Program class from Gateway's. -->
     <ProjectReference Include="..\Symposia.BlobStorage.StorageNode\Symposia.BlobStorage.StorageNode.csproj" Aliases="NodeAlias" />
+    <ProjectReference Include="..\Symposia.BlobStorage.CredentialAuthority\Symposia.BlobStorage.CredentialAuthority.csproj" Aliases="AuthorityAlias" />
   </ItemGroup>
 
 </Project>

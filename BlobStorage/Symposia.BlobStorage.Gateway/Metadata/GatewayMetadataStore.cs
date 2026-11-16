@@ -12,9 +12,11 @@ namespace Symposia.BlobStorage.Gateway.Metadata;
 public sealed partial class GatewayMetadataStore
 {
     private readonly string _connectionString;
+    private readonly int _minCopies;
 
     public GatewayMetadataStore(IOptions<GatewayOptions> options)
     {
+        _minCopies = options.Value.MinCopiesPerObject;
         var dbPath = Path.GetFullPath(options.Value.MetadataDbPath);
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         _connectionString = new SqliteConnectionStringBuilder { DataSource = dbPath }.ToString();
@@ -110,8 +112,10 @@ public sealed partial class GatewayMetadataStore
         }
 
         // (replica_count, bucket, key) lets the under-replication sweep range-scan and page in key order.
-        // The older idx_objects_replica_count is left in place for one release so N-1 gateways sharing
-        // this database keep their plan (issue #152); drop it once no N-1 hosts remain.
+        // The older idx_objects_replica_count is left in place for one release so an N-1 binary restarted on
+        // the same host against this database keeps its plan (issue #152); drop it once no N-1 hosts remain.
+        // Two releases never write one metadata database concurrently: stop the old gateway before starting
+        // the new one (from #16 on, an older binary doesn't know the tables soft-deleted data relies on).
         // Multipart uploads (#5): parts are ordinary blobs tracked here, never rows in objects, so they
         // can't leak into GET/LIST; the upload row outlives completion for idempotent Complete retries.
         Execute(conn, """
@@ -154,7 +158,19 @@ public sealed partial class GatewayMetadataStore
             );
             CREATE INDEX IF NOT EXISTS idx_multipart_parts_cid ON multipart_parts (cid);
             """);
+
+        InitializeTenancy(conn);
+        InitializeReplication(conn, _minCopies);
+        InitializeRedundancy(conn);
+        InitializeGc(conn);
+
+        // Schema generation, so a later release can refuse to run an older binary against a newer database
+        // (review: Frank #3). 2 = soft delete, versions, shards (#7/#8/#16); 1 = everything before.
+        Execute(conn, $"PRAGMA user_version = {SchemaGeneration}");
     }
+
+    /// <summary>The metadata schema generation this build writes (PRAGMA user_version).</summary>
+    public const int SchemaGeneration = 2;
 
     public bool BucketExists(string name)
     {
@@ -197,29 +213,50 @@ public sealed partial class GatewayMetadataStore
     public ObjectRecord? GetObject(string bucket, string key)
     {
         using var conn = Open();
-        using var cmd = Query(conn,
-            "SELECT cid, size_bytes, content_type, last_modified, node_ids, etag_override FROM objects WHERE bucket = $b AND key = $k",
-            ("$b", bucket), ("$k", key));
+        using var cmd = Query(conn, $"SELECT {ObjectColumns} FROM objects WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key));
         using var r = cmd.ExecuteReader();
-        if (!r.Read()) return null;
-        return new ObjectRecord(
-            bucket, key,
-            Cid: r.GetString(0),
-            SizeBytes: r.GetInt64(1),
-            ContentType: r.GetString(2),
-            LastModified: DateTimeOffset.Parse(r.GetString(3)),
-            NodeIds: SplitNodeIds(r.GetString(4)),
-            EtagOverride: r.IsDBNull(5) ? null : r.GetString(5));
+        return r.Read() ? ReadObject(r) : null;
     }
 
+    /// <summary>The columns <see cref="ReadObject"/> reads, in order; every query returning whole objects selects these.</summary>
+    internal const string ObjectColumns =
+        "bucket, key, cid, size_bytes, content_type, last_modified, node_ids, etag_override, replication_state, target_copies, regions, " +
+        "placement_gaps, merkle_root, scheme, merkle_cid";
+
+    internal static ObjectRecord ReadObject(SqliteDataReader r) => new(
+        r.GetString(0), r.GetString(1),
+        Cid: r.GetString(2),
+        SizeBytes: r.GetInt64(3),
+        ContentType: r.GetString(4),
+        LastModified: DateTimeOffset.Parse(r.GetString(5)),
+        NodeIds: SplitNodeIds(r.GetString(6)),
+        EtagOverride: r.IsDBNull(7) ? null : r.GetString(7))
+    {
+        Replication = r.GetString(8) == "quorum" ? ReplicationState.Quorum : ReplicationState.Full,
+        TargetCopies = r.GetInt32(9),
+        Regions = SplitList(r.IsDBNull(10) ? null : r.GetString(10)),
+        PlacementGaps = ReadGaps(r.IsDBNull(11) ? null : r.GetString(11)),
+        // A root counts only for the CID it was computed over: an N-1 gateway overwriting the row keeps the
+        // old root, which must not be held against the new bytes (review: Frank #2).
+        MerkleRoot = !r.IsDBNull(12) && !r.IsDBNull(14) && r.GetString(14) == r.GetString(2) ? r.GetString(12) : null,
+        // Erasure-coded rows never list replicas; one that does was overwritten by an N-1 gateway as full copies.
+        Scheme = r.GetString(13) != "replica" && !r.IsDBNull(6) && r.GetString(6).Length > 0 ? "replica" : r.GetString(13),
+    };
+
     /// <summary>Inserts or replaces an object; true when it replaced one (read inside the write's transaction, #204).</summary>
-    public bool PutObject(ObjectRecord record)
+    public bool PutObject(ObjectRecord record) => CommitObject(record).Replaced;
+
+    /// <summary>
+    /// Commits an object version under last-writer-wins (#7 FR11): the outcome says whether a row existed,
+    /// whether this write became current, and the commit timestamp it was given.
+    /// </summary>
+    public CommitOutcome CommitObject(ObjectRecord record)
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
-        var replaced = UpsertObject(conn, tx, record);
+        var outcome = UpsertObject(conn, tx, record);
         tx.Commit();
-        return replaced;
+        return outcome;
     }
 
     /// <summary>
@@ -228,24 +265,83 @@ public sealed partial class GatewayMetadataStore
     /// deletion queued before this write must not run), and queues the overwritten blob for GC if
     /// nothing references it any more.
     /// </summary>
-    private static bool UpsertObject(SqliteConnection conn, SqliteTransaction tx, ObjectRecord record)
+    private static CommitOutcome UpsertObject(SqliteConnection conn, SqliteTransaction tx, ObjectRecord record)
     {
         (string Cid, string[] NodeIds)? previous = null;
         bool existed;
-        using (var old = Query(conn, "SELECT cid, node_ids FROM objects WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key)))
+        long previousSize = 0;
+        var previousScheme = "replica";
+        DateTimeOffset previousCommit = default;
+        string previousEtag = "";
+        using (var old = Query(conn, "SELECT cid, node_ids, size_bytes, last_modified, COALESCE(etag_override, cid), scheme FROM objects WHERE bucket = $b AND key = $k",
+                   ("$b", record.Bucket), ("$k", record.Key)))
         {
             old.Transaction = tx;
             using var r = old.ExecuteReader();
             existed = r.Read();
+            if (existed)
+            {
+                previousSize = r.GetInt64(2);
+                previousCommit = DateTimeOffset.Parse(r.GetString(3));
+                previousEtag = r.GetString(4);
+                previousScheme = r.GetString(5);
+            }
+
             if (existed && r.GetString(0) != record.Cid)
             {
                 previous = (r.GetString(0), SplitNodeIds(r.GetString(1)));
             }
         }
 
+        // Last writer wins by commit timestamp (#7 FR11). Commits are serialized by this IMMEDIATE
+        // transaction, and the timestamp is kept monotonic per key (a slower clock can't move it back),
+        // so a later commit normally wins outright. Two commits in the same millisecond are ordered by the
+        // greater ETag instead, which every reader of this index sees the same way.
+        var committedAt = TruncateToMilliseconds(record.LastModified);
+        if (existed)
+        {
+            var floor = TruncateToMilliseconds(previousCommit);
+            if (committedAt < floor)
+            {
+                // This commit is serialized after the current one, so it is the later write whatever its
+                // gateway's clock says: it wins, one millisecond on (review: Frank #1). Only genuinely equal
+                // timestamps fall to the ETag tiebreak.
+                committedAt = floor.AddMilliseconds(1);
+            }
+            else if (committedAt == floor && string.CompareOrdinal(record.ETag, previousEtag) < 0)
+            {
+                // Lost the tiebreak: the existing version stays current, and this write's blob is garbage.
+                CollectIfUnreferenced(conn, tx, record.Cid, record.NodeIds);
+                return new CommitOutcome(existed, Applied: false, previousCommit);
+            }
+        }
+
+        // Versioned bucket (#16 FR3): the overwritten version is kept as noncurrent, still billed, not collected.
+        var archived = false;
+        if (existed && previous is not null)
+        {
+            using var versioning = Query(conn, "SELECT versioning FROM bucket_lifecycle WHERE bucket = $b", ("$b", record.Bucket));
+            versioning.Transaction = tx;
+            if (versioning.ExecuteScalar() is long v && v != 0)
+            {
+                ArchiveVersion(conn, tx, record.Bucket, record.Key, "noncurrent", softDeleted: false);
+                archived = true;
+            }
+        }
+
+        if (existed && previousScheme != "replica" && previous is not null && !archived)
+        {
+            CollectShards(conn, tx, record.Bucket, record.Key, previous.Value.Cid); // the new version brings its own shards
+        }
+
+        var target = record.TargetCopies > 0 ? record.TargetCopies : (int?)null;
         Run(conn, tx, """
-            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, etag_override)
-            VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc, $eo)
+            INSERT INTO objects (bucket, key, cid, size_bytes, content_type, last_modified, node_ids, replica_count, etag_override,
+                                 target_copies, replication_state, regions, placement_gaps, merkle_root, scheme, merkle_cid)
+            VALUES ($b, $k, $cid, $sz, $ct, $lm, $ni, $rc, $eo,
+                    COALESCE($tc, (SELECT target_copies FROM objects WHERE bucket = $b AND key = $k),
+                             CAST((SELECT value FROM settings WHERE name = 'copy_floor') AS INTEGER), 1),
+                    'full', $rg, $pg, $mr, $sc, $cid)
             ON CONFLICT(bucket, key) DO UPDATE SET
                 cid = excluded.cid,
                 size_bytes = excluded.size_bytes,
@@ -253,32 +349,61 @@ public sealed partial class GatewayMetadataStore
                 last_modified = excluded.last_modified,
                 node_ids = excluded.node_ids,
                 replica_count = excluded.replica_count,
-                etag_override = excluded.etag_override;
+                etag_override = excluded.etag_override,
+                target_copies = excluded.target_copies,
+                regions = excluded.regions,
+                placement_gaps = excluded.placement_gaps,
+                merkle_root = excluded.merkle_root,
+                scheme = excluded.scheme,
+                merkle_cid = excluded.merkle_cid;
             """,
             ("$b", record.Bucket), ("$k", record.Key), ("$cid", record.Cid),
             ("$sz", record.SizeBytes), ("$ct", record.ContentType),
-            ("$lm", record.LastModified.ToString("O")),
+            ("$lm", committedAt.ToString("O")),
             ("$ni", string.Join(',', record.NodeIds)),
             ("$rc", record.NodeIds.Count),
-            ("$eo", (object?)record.EtagOverride ?? DBNull.Value));
+            ("$eo", (object?)record.EtagOverride ?? DBNull.Value),
+            ("$tc", target),
+            ("$rg", record.Regions.Count == 0 ? null : string.Join(',', record.Regions)),
+            ("$pg", GapsJson(record.PlacementGaps)), ("$mr", record.MerkleRoot), ("$sc", record.Scheme));
+        RefreshReplicationState(conn, tx, "WHERE bucket = $b AND key = $k", ("$b", record.Bucket), ("$k", record.Key));
         CancelPendingDeletion(conn, tx, record.Cid);
-        if (previous is { } p)
+        AdjustUsage(conn, tx, record.Bucket, archived ? record.SizeBytes : record.SizeBytes - previousSize);
+        if (previous is { } p && !archived)
         {
             CollectIfUnreferenced(conn, tx, p.Cid, p.NodeIds);
         }
 
-        return existed;
+        return new CommitOutcome(existed, Applied: true, committedAt);
     }
 
+    private static DateTimeOffset TruncateToMilliseconds(DateTimeOffset t) =>
+        new(t.UtcTicks - t.UtcTicks % TimeSpan.TicksPerMillisecond, TimeSpan.Zero);
+
+    /// <summary>
+    /// Whether anything references a blob: an object (as its full-copy CID), a multipart part (#5), or a shard
+    /// of an erasure-coded object (#8). Each arm is index-backed (idx_objects_cid, idx_multipart_parts_cid, idx_object_shards_cid).
+    /// </summary>
+    private const string ReferencedSql =
+        "SELECT 1 FROM objects WHERE cid = $cid AND scheme = 'replica' UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid " +
+        "UNION ALL SELECT 1 FROM object_shards WHERE shard_cid = $cid " +
+        // A soft-deleted or noncurrent version keeps its bytes until GC queues its purge (#16 FR2).
+        "UNION ALL SELECT 1 FROM object_versions WHERE cid = $cid AND physically_deleted_at IS NULL AND purge_queued_at IS NULL LIMIT 1";
+
     /// <summary>A blob is referenced again: drop any queued deletion of it (GC/dedup race, #5 review).</summary>
-    internal static void CancelPendingDeletion(SqliteConnection conn, SqliteTransaction tx, string cid) =>
+    internal static void CancelPendingDeletion(SqliteConnection conn, SqliteTransaction tx, string cid)
+    {
         Run(conn, tx, "DELETE FROM gc_queue WHERE cid = $cid", ("$cid", cid));
+        // Versions whose purge waited on these bytes are done: the bytes now belong to a live object, which
+        // is billed in its own right (review: Lenny #3, else they'd stay pending and billed forever).
+        CloseVersionsWaitingOn(conn, tx, cid);
+    }
 
     /// <summary>Queues a blob's copies for deletion if no object or multipart part references it (same transaction).</summary>
     internal static void CollectIfUnreferenced(SqliteConnection conn, SqliteTransaction tx, string cid, IEnumerable<string> nodeIds)
     {
         using (var check = Query(conn,
-                   "SELECT 1 FROM objects WHERE cid = $cid UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid LIMIT 1", ("$cid", cid)))
+                   ReferencedSql, ("$cid", cid)))
         {
             check.Transaction = tx;
             if (check.ExecuteScalar() is not null)
@@ -336,7 +461,13 @@ public sealed partial class GatewayMetadataStore
             }
         }
 
+        AdjustUsage(conn, tx, bucket, -record.SizeBytes);
         CollectIfUnreferenced(conn, tx, record.Cid, record.NodeIds);
+        if (record.IsErasureCoded)
+        {
+            CollectShards(conn, tx, bucket, key, record.Cid);
+        }
+
         tx.Commit();
         return record;
     }
@@ -345,9 +476,23 @@ public sealed partial class GatewayMetadataStore
     public bool DeleteObject(string bucket, string key)
     {
         using var conn = Open();
-        return Execute(Query(conn,
-            "DELETE FROM objects WHERE bucket = $b AND key = $k",
-            ("$b", bucket), ("$k", key))) > 0;
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        long? size;
+        using (var read = Query(conn, "SELECT size_bytes FROM objects WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key)))
+        {
+            read.Transaction = tx;
+            size = read.ExecuteScalar() as long?;
+        }
+
+        if (size is null)
+        {
+            return false;
+        }
+
+        Run(conn, tx, "DELETE FROM objects WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key));
+        AdjustUsage(conn, tx, bucket, -size.Value);
+        tx.Commit();
+        return true;
     }
 
     // ── CID reference counting ────────────────────────────────────────────────
@@ -360,25 +505,16 @@ public sealed partial class GatewayMetadataStore
     {
         using var conn = Open();
         // A part of an in-progress multipart upload is referenced too (#5), so GC must not delete it.
-        return Query(conn,
-            "SELECT 1 FROM objects WHERE cid = $cid UNION ALL SELECT 1 FROM multipart_parts WHERE cid = $cid LIMIT 1",
-            ("$cid", cid)).ExecuteScalar() is not null;
+        return Query(conn, ReferencedSql, ("$cid", cid)).ExecuteScalar() is not null;
     }
 
     /// <summary>Returns the first object record that matches the given CID, or null if none exists.</summary>
     public ObjectRecord? GetObjectByCid(string cid)
     {
         using var conn = Open();
-        using var cmd = Query(conn,
-            "SELECT bucket, key, size_bytes, content_type, last_modified, node_ids FROM objects WHERE cid = $cid LIMIT 1",
-            ("$cid", cid));
+        using var cmd = Query(conn, $"SELECT {ObjectColumns} FROM objects WHERE cid = $cid LIMIT 1", ("$cid", cid));
         using var r = cmd.ExecuteReader();
-        if (!r.Read()) return null;
-        return new ObjectRecord(
-            r.GetString(0), r.GetString(1), cid,
-            r.GetInt64(2), r.GetString(3),
-            DateTimeOffset.Parse(r.GetString(4)),
-            SplitNodeIds(r.GetString(5)));
+        return r.Read() ? ReadObject(r) : null;
     }
 
     /// <summary>
@@ -391,7 +527,7 @@ public sealed partial class GatewayMetadataStore
     {
         using var conn = Open();
         return Execute(Query(conn,
-            "UPDATE objects SET node_ids = $ni, replica_count = $rc WHERE bucket = $b AND key = $k AND cid = $cid",
+            "UPDATE objects SET node_ids = $ni, replica_count = $rc, " + StateFromCount + " WHERE bucket = $b AND key = $k AND cid = $cid",
             ("$ni", string.Join(',', nodeIds)), ("$rc", nodeIds.Count), ("$b", bucket), ("$k", key), ("$cid", cid))) > 0;
     }
 
@@ -479,7 +615,7 @@ public sealed partial class GatewayMetadataStore
                 continue;
             }
 
-            using var update = Query(conn, "UPDATE objects SET node_ids = $ni, replica_count = $rc WHERE bucket = $b AND key = $k",
+            using var update = Query(conn, "UPDATE objects SET node_ids = $ni, replica_count = $rc, " + StateFromCount + " WHERE bucket = $b AND key = $k",
                 ("$ni", string.Join(',', next)), ("$rc", next.Count), ("$b", bucket), ("$k", key));
             update.Transaction = tx;
             changed += update.ExecuteNonQuery();
@@ -487,6 +623,9 @@ public sealed partial class GatewayMetadataStore
 
         return changed;
     }
+
+    /// <summary>Sets replication_state from the new replica count ($rc) in an UPDATE of node_ids (#7).</summary>
+    private const string StateFromCount = "replication_state = CASE WHEN $rc >= target_copies THEN 'full' ELSE 'quorum' END";
 
     /// <summary>
     /// Pages through all objects in the metadata store.
@@ -497,12 +636,12 @@ public sealed partial class GatewayMetadataStore
         using var conn = Open();
         using var cmd = after is null
             ? Query(conn,
-                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects ORDER BY bucket, key LIMIT $limit",
+                $"SELECT {ObjectColumns} FROM objects ORDER BY bucket, key LIMIT $limit",
                 ("$limit", limit))
             // Row-value comparison so the cursor seeks via idx_objects_bucket_key; the old
             // (bucket || '/' || key) expression forced a full scan per page (issue #135).
             : Query(conn,
-                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE (bucket, key) > ($ab, $ak) ORDER BY bucket, key LIMIT $limit",
+                $"SELECT {ObjectColumns} FROM objects WHERE (bucket, key) > ($ab, $ak) ORDER BY bucket, key LIMIT $limit",
                 ("$ab", after.Value.Bucket), ("$ak", after.Value.Key), ("$limit", limit));
 
         return ReadRecords(cmd);
@@ -519,10 +658,10 @@ public sealed partial class GatewayMetadataStore
         using var conn = Open();
         using var cmd = after is null
             ? Query(conn,
-                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE replica_count BETWEEN 1 AND $max ORDER BY replica_count, bucket, key LIMIT $limit",
+                $"SELECT {ObjectColumns} FROM objects WHERE replica_count BETWEEN 1 AND $max ORDER BY replica_count, bucket, key LIMIT $limit",
                 ("$max", minCopies - 1), ("$limit", limit))
             : Query(conn,
-                "SELECT bucket, key, cid, size_bytes, content_type, last_modified, node_ids FROM objects WHERE replica_count BETWEEN 1 AND $max AND (replica_count, bucket, key) > ($c, $b, $k) ORDER BY replica_count, bucket, key LIMIT $limit",
+                $"SELECT {ObjectColumns} FROM objects WHERE replica_count BETWEEN 1 AND $max AND (replica_count, bucket, key) > ($c, $b, $k) ORDER BY replica_count, bucket, key LIMIT $limit",
                 ("$max", minCopies - 1), ("$c", after.Value.Count), ("$b", after.Value.Bucket), ("$k", after.Value.Key), ("$limit", limit));
         return ReadRecords(cmd);
     }
@@ -541,23 +680,46 @@ public sealed partial class GatewayMetadataStore
         var results = new List<ObjectRecord>();
         while (r.Read())
         {
-            results.Add(new ObjectRecord(
-                r.GetString(0), r.GetString(1), r.GetString(2),
-                r.GetInt64(3), r.GetString(4),
-                DateTimeOffset.Parse(r.GetString(5)),
-                SplitNodeIds(r.GetString(6))));
+            results.Add(ReadObject(r));
         }
         return results;
     }
 
     // ── GC queue ──────────────────────────────────────────────────────────────
 
-    public void EnqueueNodeDeletion(string cid, string nodeUrl)
+    public void EnqueueNodeDeletion(string cid, string nodeUrl, string category = "BlobDelete", int priority = PriorityMedium)
     {
         using var conn = Open();
         Execute(Query(conn,
-            "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at) VALUES ($cid, $url, $t)",
-            ("$cid", cid), ("$url", nodeUrl), ("$t", Now())));
+            "INSERT OR IGNORE INTO gc_queue (cid, node_url, queued_at, category, priority) VALUES ($cid, $url, $t, $cat, $p)",
+            ("$cid", cid), ("$url", nodeUrl), ("$t", Now()), ("$cat", category), ("$p", priority)));
+    }
+
+    public sealed record GcEntry(long Id, string Cid, string NodeUrl, int Attempts, string Category, int Priority);
+
+    /// <summary>
+    /// Due deletions by priority (#16 FR8.2: high, then medium, then low), oldest attempts first within a tier.
+    /// <paramref name="reserveLow"/> entries of every batch are kept for the low tier, so a sustained high
+    /// backlog defers low-priority work without starving it outright (FR8.3).
+    /// </summary>
+    public IReadOnlyList<GcEntry> DueDeletions(int limit, TimeSpan minAge, int reserveLow)
+    {
+        using var conn = Open();
+        var cutoff = (DateTimeOffset.UtcNow - minAge).ToString("O");
+        IReadOnlyList<GcEntry> Read(string where, int take)
+        {
+            using var r = Query(conn, $"SELECT id, cid, node_url, attempts, category, priority FROM gc_queue WHERE queued_at <= $cut AND {where} ORDER BY priority, attempts, id LIMIT $l",
+                ("$cut", cutoff), ("$l", take)).ExecuteReader();
+            var rows = new List<GcEntry>();
+            while (r.Read()) rows.Add(new GcEntry(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetInt32(3), r.GetString(4), r.GetInt32(5)));
+            return rows;
+        }
+
+        var low = Read($"priority = {PriorityLow}", reserveLow);
+        var rest = Read($"priority < {PriorityLow}", limit - low.Count);
+        return rest.Count + low.Count < limit
+            ? [.. rest, .. Read($"priority = {PriorityLow}", limit - rest.Count)]
+            : [.. rest, .. low];
     }
 
     /// <summary>
@@ -576,6 +738,13 @@ public sealed partial class GatewayMetadataStore
         while (r.Read())
             results.Add((r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetInt32(3)));
         return results;
+    }
+
+    /// <summary>Whether a GC entry is still queued (not cancelled by a re-reference since it was read).</summary>
+    public bool IsQueued(long id)
+    {
+        using var conn = Open();
+        return Query(conn, "SELECT 1 FROM gc_queue WHERE id = $id", ("$id", id)).ExecuteScalar() is not null;
     }
 
     public void RemoveFromGcQueue(long id)
@@ -625,7 +794,7 @@ public sealed partial class GatewayMetadataStore
         using var cmd = conn.CreateCommand();
 
         var sql = new System.Text.StringBuilder(
-            "SELECT key, cid, size_bytes, content_type, last_modified, node_ids, etag_override FROM objects WHERE bucket = $b");
+            $"SELECT {ObjectColumns} FROM objects WHERE bucket = $b");
 
         cmd.Parameters.AddWithValue("$b", bucket);
 
@@ -656,15 +825,7 @@ public sealed partial class GatewayMetadataStore
         var results = new List<ObjectRecord>();
         while (r.Read())
         {
-            results.Add(new ObjectRecord(
-                bucket,
-                Key: r.GetString(0),
-                Cid: r.GetString(1),
-                SizeBytes: r.GetInt64(2),
-                ContentType: r.GetString(3),
-                LastModified: DateTimeOffset.Parse(r.GetString(4)),
-                NodeIds: SplitNodeIds(r.GetString(5)),
-                EtagOverride: r.IsDBNull(6) ? null : r.GetString(6)));
+            results.Add(ReadObject(r));
         }
 
         var truncated = results.Count > maxKeys;
@@ -704,3 +865,9 @@ public sealed partial class GatewayMetadataStore
         return conn;
     }
 }
+
+/// <summary>What committing an object version did (#7 FR11).</summary>
+/// <param name="Replaced">A row already existed at the key.</param>
+/// <param name="Applied">This version became current; false when it lost the same-millisecond tiebreak.</param>
+/// <param name="CommittedAt">The version's commit timestamp (the current version's, when not applied).</param>
+public sealed record CommitOutcome(bool Replaced, bool Applied, DateTimeOffset CommittedAt);

@@ -96,7 +96,10 @@ public sealed class OperationHistoryTests(GatewayFixture f) : IClassFixture<Gate
     [Fact]
     public async Task UnknownBucketsAndKeys_AreEmpty_NotErrors()
     {
-        var r = await _api.GetAsync("/v1/buckets/no-such-bucket-here/objects/x?history");
+        // An unowned bucket is refused like any other tenant's (#3 FR1.3), so existence still can't be probed.
+        Assert.Equal(HttpStatusCode.Forbidden, (await _api.GetAsync("/v1/buckets/no-such-bucket-here/objects/x?history")).StatusCode);
+        (await _api.PutAsync("/v1/buckets/history-known-bucket", null)).EnsureSuccessStatusCode();
+        var r = await _api.GetAsync("/v1/buckets/history-known-bucket/objects/x?history");
         Assert.Equal(HttpStatusCode.OK, r.StatusCode);
         Assert.Empty(JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.GetProperty("entries").EnumerateArray());
     }

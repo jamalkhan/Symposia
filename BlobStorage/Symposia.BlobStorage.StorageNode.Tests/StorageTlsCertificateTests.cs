@@ -16,7 +16,7 @@ public sealed class StorageTlsCertificateTests : IDisposable
         var first = StorageTlsCertificate.LoadOrCreate(PfxPath, "0xabc");
         var again = StorageTlsCertificate.LoadOrCreate(PfxPath, "0xabc");
 
-        Assert.Equal(Symposia.Network.Node.StorageTlsProof.Fingerprint(first.RawData), Symposia.Network.Node.StorageTlsProof.Fingerprint(again.RawData));
+        Assert.Equal(Symposia.Security.TlsPinning.TlsPin.Fingerprint(first.RawData), Symposia.Security.TlsPinning.TlsPin.Fingerprint(again.RawData));
         Assert.True(first.HasPrivateKey);
         Assert.Empty(Directory.GetFiles(_dir, "*.tmp", SearchOption.AllDirectories).Concat(Directory.GetFiles(_dir, ".*tmp")));
         if (!OperatingSystem.IsWindows())
@@ -36,7 +36,7 @@ public sealed class StorageTlsCertificateTests : IDisposable
 
         var renewed = StorageTlsCertificate.LoadOrCreate(PfxPath, "0xabc");
 
-        Assert.NotEqual(Symposia.Network.Node.StorageTlsProof.Fingerprint(old.RawData), Symposia.Network.Node.StorageTlsProof.Fingerprint(renewed.RawData));
+        Assert.NotEqual(Symposia.Security.TlsPinning.TlsPin.Fingerprint(old.RawData), Symposia.Security.TlsPinning.TlsPin.Fingerprint(renewed.RawData));
         Assert.True(renewed.NotAfter > DateTime.Now.AddDays(300));
     }
 

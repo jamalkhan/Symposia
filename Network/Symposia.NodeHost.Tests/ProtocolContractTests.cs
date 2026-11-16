@@ -123,6 +123,11 @@ public sealed class ProtocolContractTests
 
     // ── Golden fixtures still parse ───────────────────────────────────────────
 
+    private static readonly JsonSerializerOptions AuthorityJson = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
     public static TheoryData<string> Fixtures()
     {
         var data = new TheoryData<string>();
@@ -153,6 +158,25 @@ public sealed class ProtocolContractTests
                 break;
             case "protocol-schedule":
                 Assert.NotNull(JsonSerializer.Deserialize<ProtocolSchedule>(text, JsonSerializerOptions.Web)!.Features);
+                break;
+            case "authority-snapshot": // Credential Authority → gateway (BlobStorage #3, #245)
+                Assert.NotEmpty(JsonSerializer.Deserialize<Symposia.BlobStorage.Domain.Credentials.AuthoritySnapshot>(text, AuthorityJson)!.Credentials);
+                break;
+            case "authority-delta":
+                var delta = JsonSerializer.Deserialize<Symposia.BlobStorage.Domain.Credentials.AuthorityDelta>(text, AuthorityJson)!;
+                Assert.True(delta.Version > delta.FromVersion, $"{fixture}: a delta moves forward");
+                break;
+            case "storage-tls": // gateway → storage node pin and proof (#142, #252): byte-exact, not just parseable
+                var tls = JsonDocument.Parse(text).RootElement;
+                var der = Convert.FromBase64String(tls.GetProperty("certificateDer").GetString()!);
+                var fingerprint = tls.GetProperty("fingerprint").GetString()!;
+                var (chain, registry, node, notAfter) = (tls.GetProperty("chainId").GetUInt64(), tls.GetProperty("registryAddress").GetString()!,
+                    tls.GetProperty("node").GetString()!, tls.GetProperty("notAfterUnixSeconds").GetInt64());
+                var at = DateTimeOffset.FromUnixTimeSeconds(tls.GetProperty("notBeforeUnixSeconds").GetInt64() + 3600); // fixed clock: never rots
+                Assert.Equal(fingerprint, Symposia.Security.TlsPinning.TlsPin.Fingerprint(der));
+                Assert.Equal(tls.GetProperty("digest").GetString(),
+                    Convert.ToHexStringLower(StorageTlsProof.Digest(chain, registry, node, Convert.FromHexString(fingerprint), notAfter)));
+                Assert.Null(StorageTlsProof.Validate(chain, registry, node, fingerprint, notAfter, tls.GetProperty("proof").GetString(), at));
                 break;
             default:
                 Assert.Fail($"{fixture}: no deserialization test for fixture folder '{kind}'. Add one here.");

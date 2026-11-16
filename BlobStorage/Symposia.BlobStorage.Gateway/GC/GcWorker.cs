@@ -6,13 +6,12 @@ using Symposia.BlobStorage.Protocol;
 namespace Symposia.BlobStorage.Gateway.GC;
 
 /// <summary>
-/// Background service that drains the gc_queue, retrying blob deletions on storage nodes that
-/// were unreachable when DeleteObject was originally called.
-///
-/// Safety invariant: a blob is never physically deleted from a node if any other object in the
-/// metadata still references its CID (content-addressed dedup), checked at retry time.
-///
-/// See Requirements/BlobStorage/garbage-collection.md#categories-of-garbage (soft-deleted blobs).
+/// Executes GC's physical deletions (#16): drains gc_queue by priority (high: replicas on slashed or terminated
+/// nodes; medium: soft-delete purges and plain deletes; low: stale replicas and orphans, FR8.2), with a share of
+/// every batch reserved for the low tier so it is deferred under backlog but never starved (FR8.3). Every entry
+/// passes <see cref="SafetyInvariantGate"/> first (FR7), and deletions to each node are rate-capped so GC
+/// never competes with client I/O (FR8.1). Each confirmed replica deletion is recorded (FR2.3); when a blob's
+/// last replica goes, its versions are marked physically deleted and billing stops then (FR9).
 /// </summary>
 public sealed class GcWorker : BackgroundService
 {
@@ -22,17 +21,24 @@ public sealed class GcWorker : BackgroundService
     private readonly INodeRegistry _nodes;
     private readonly IOptions<GatewayOptions> _options;
     private readonly ILogger<GcWorker> _logger;
+    private readonly SafetyInvariantGate _gate;
+    private readonly Repair.RepairQueue? _repairs;
+    private readonly Dictionary<string, (long Second, int Count)> _rate = new(StringComparer.OrdinalIgnoreCase);
 
     public GcWorker(
         GatewayMetadataStore store,
         INodeRegistry nodes,
         IOptions<GatewayOptions> options,
-        ILogger<GcWorker> logger)
+        ILogger<GcWorker> logger,
+        SafetyInvariantGate gate,
+        Repair.RepairQueue? repairs = null)
     {
+        _repairs = repairs;
         _store = store;
         _nodes = nodes;
         _options = options;
         _logger = logger;
+        _gate = gate;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -57,51 +63,99 @@ public sealed class GcWorker : BackgroundService
         }
     }
 
-    private async Task DrainBatchAsync(CancellationToken ct)
+    /// <summary>One batch; internal so tests can drive GC deterministically. Returns how many replicas were deleted.</summary>
+    internal async Task<int> DrainBatchAsync(CancellationToken ct)
     {
-        var pending = _store.GetPendingDeletions(BatchSize, TimeSpan.FromSeconds(_options.Value.GcMinAgeSeconds));
-        if (pending.Count == 0) return;
+        var o = _options.Value;
+        var pending = _store.DueDeletions(BatchSize, TimeSpan.FromSeconds(o.GcMinAgeSeconds), o.Gc.LowPriorityReserve);
+        if (pending.Count == 0) return 0;
 
         _logger.LogInformation("GcWorker processing {Count} pending node deletions.", pending.Count);
-
-        foreach (var (id, cid, nodeUrl, attempts) in pending)
+        var deleted = 0;
+        foreach (var entry in pending)
         {
             ct.ThrowIfCancellationRequested();
 
-            // Skip deletion if another object still references this CID (dedup safety).
-            if (_store.IsCidReferenced(cid))
+            switch (_gate.Check(entry.Cid, entry.NodeUrl, entry.Category))
             {
-                _logger.LogDebug("CID {Cid} is still referenced; removing GC entry {Id}.", cid, id);
-                _store.RemoveFromGcQueue(id);
-                continue;
+                case GcVerdict.Refused:
+                    _store.RemoveFromGcQueue(entry.Id);
+                    _store.ConfirmReplicaDeleted(entry.Cid); // nothing more will go for this entry
+                    continue;
+                case GcVerdict.Deferred:
+                    _store.IncrementGcAttempt(entry.Id);
+                    continue;
             }
 
             var node = _nodes.All.FirstOrDefault(n =>
-                n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
+                n.Id.Equals(entry.NodeUrl, StringComparison.OrdinalIgnoreCase));
 
             if (node is null || !node.IsReachable)
             {
                 // Node unknown or offline — leave in queue for later.
-                _store.IncrementGcAttempt(id);
+                _store.IncrementGcAttempt(entry.Id);
+                continue;
+            }
+
+            if (!TakeRate(node.Id, o.Gc.DeletesPerSecondPerNode))
+            {
+                continue; // this node's GC budget for the second is spent; the entry waits for the next batch
+            }
+
+            // Re-checked at the last moment: the entry may have been cancelled, or the bytes re-referenced by
+            // a dedup PUT, since the batch was read (review: Lenny #5).
+            if (!_store.IsQueued(entry.Id) || _gate.Check(entry.Cid, entry.NodeUrl, entry.Category) != GcVerdict.Clear)
+            {
                 continue;
             }
 
             try
             {
                 await node.Client.DeleteBlobAsync(
-                    new DeleteBlobRequest { Cid = cid },
+                    new DeleteBlobRequest { Cid = entry.Cid },
                     cancellationToken: ct);
 
-                _logger.LogDebug("GC: deleted blob {Cid} from node {Url}.", cid, nodeUrl);
-                _store.RemoveFromGcQueue(id);
+                // A PUT of the same bytes that committed during the RPC itself now points at a deleted copy:
+                // repair it at once rather than waiting for the next scan.
+                if (_store.GetObjectByCid(entry.Cid) is { } relived && relived.NodeIds.Contains(entry.NodeUrl, StringComparer.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning("GC: {Cid} was re-referenced while deleting it from {Url}; queuing repair.", entry.Cid, entry.NodeUrl);
+                    _store.RemoveReplica(relived.Bucket, relived.Key, relived.Cid, entry.NodeUrl);
+                    _repairs?.Enqueue(new Repair.RepairTask(entry.Cid, entry.NodeUrl, Repair.RepairReason.MissingReplica) { Priority = Repair.RepairPriority.P0 });
+                }
+
+                _logger.LogDebug("GC: deleted blob {Cid} from node {Url} ({Category}).", entry.Cid, entry.NodeUrl, entry.Category);
+                _store.RemoveFromGcQueue(entry.Id);
+                _store.ConfirmReplicaDeleted(entry.Cid);
+                deleted++;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(
                     "GC: attempt {Attempt} to delete {Cid} from {Url} failed: {Message}",
-                    attempts + 1, cid, nodeUrl, ex.Message);
-                _store.IncrementGcAttempt(id);
+                    entry.Attempts + 1, entry.Cid, entry.NodeUrl, ex.Message);
+                _store.IncrementGcAttempt(entry.Id);
             }
         }
+
+        return deleted;
+    }
+
+    private bool TakeRate(string nodeId, int perSecond)
+    {
+        var second = Environment.TickCount64 / 1000;
+        var (at, count) = _rate.GetValueOrDefault(nodeId);
+        if (at != second)
+        {
+            (at, count) = (second, 0);
+        }
+
+        if (count >= Math.Max(1, perSecond))
+        {
+            return false;
+        }
+
+        _rate[nodeId] = (at, count + 1);
+        return true;
     }
 }

@@ -106,6 +106,7 @@ internal static class ObjectEndpoints
         {
             ServeOutcome.NotFound => S3Xml.NoSuchKey(key),
             ServeOutcome.NoReplica => S3Xml.ServiceUnavailable(),
+            ServeOutcome.Lost => S3Xml.DataLost(),
             _ => Results.Empty,
         };
     }

@@ -20,4 +20,24 @@ public sealed record ObjectRecord(
     /// ETag (<c>md5-of-part-etags-N</c>) is stored separately so the CID stays a true content hash (#5).
     /// </summary>
     public string ETag => EtagOverride ?? Cid;
+
+    /// <summary>Whether every target copy has confirmed, or only the write quorum so far (#7 FR5).</summary>
+    public ReplicationState Replication { get; init; } = ReplicationState.Full;
+
+    /// <summary>Copies repair maintains for this object (#7/#8: from its region assignment at write time); 0 = the global floor.</summary>
+    public int TargetCopies { get; init; }
+
+    /// <summary>The region assignment this object was placed under (#7 FR6 metadata; empty = global).</summary>
+    public IReadOnlyList<string> Regions { get; init; } = [];
+
+    /// <summary>Soft placement rules bent when this object was placed (#8 FR2.3).</summary>
+    public IReadOnlyList<PlacementGapRecord> PlacementGaps { get; init; } = [];
+
+    /// <summary>Hex Merkle root over 64 KiB leaves, for range challenges (#8 FR6.4); null when the nodes didn't report one.</summary>
+    public string? MerkleRoot { get; init; }
+
+    /// <summary><c>replica</c> (full copies in <see cref="NodeIds"/>) or an erasure scheme like <c>rs:4+2</c> (shards in object_shards, #8 FR5).</summary>
+    public string Scheme { get; init; } = "replica";
+
+    public bool IsErasureCoded => Scheme != "replica";
 }

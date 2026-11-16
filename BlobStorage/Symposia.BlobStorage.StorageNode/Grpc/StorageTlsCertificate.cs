@@ -1,3 +1,4 @@
+using Symposia.Security.TlsPinning;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Options;
@@ -46,7 +47,7 @@ public static class StorageTlsCertificate
         using var created = request.CreateSelfSigned(at.AddMinutes(-5), at + Validity);
         var pfx = created.Export(X509ContentType.Pfx);
         WriteOwnerOnly(path, pfx);
-        logger?.LogInformation("Created storage TLS certificate {Fingerprint} at {Path}.", StorageTlsProof.Fingerprint(created.RawData), path);
+        logger?.LogInformation("Created storage TLS certificate {Fingerprint} at {Path}.", TlsPin.Fingerprint(created.RawData), path);
         return X509CertificateLoader.LoadPkcs12(pfx, password: null);
     }
 
@@ -112,7 +113,7 @@ public sealed class StorageTlsCertificateProvider(
     {
         identity.EnsureLoadedOrGenerated();
         var certificate = StorageTlsCertificate.LoadOrCreate(Path, identity.NodeId, logger, now);
-        var fingerprint = StorageTlsProof.Fingerprint(certificate.RawData);
+        var fingerprint = TlsPin.Fingerprint(certificate.RawData);
         var notAfter = new DateTimeOffset(certificate.NotAfter.ToUniversalTime(), TimeSpan.Zero).ToUnixTimeSeconds();
         var previous = Interlocked.Exchange(ref _current,
             new StorageTlsSnapshot(certificate, fingerprint, notAfter, identity.SignStorageTls(Convert.FromHexString(fingerprint), notAfter)));

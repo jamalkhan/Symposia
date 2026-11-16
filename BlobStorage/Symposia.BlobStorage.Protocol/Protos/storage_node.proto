@@ -44,6 +44,9 @@ message WriteBlobHeader {
 message WriteBlobResponse {
   string cid = 1;
   int64 size_bytes = 2;
+  // #8 FR6.4: root of the blob's Merkle tree over 64 KiB leaves, for range challenge-response.
+  // Empty from nodes that predate it; the gateway then falls back to whole-blob challenges.
+  bytes merkle_root = 3;
 }
 
 message ReadBlobRequest {
@@ -77,16 +80,35 @@ message ProbeResponse {
   bool read_only = 6;
   int64 volume_free_bytes = 7;
   int64 reserve_bytes = 8;
+  // The region this node serves (#7 region-aware quorum); empty = not configured.
+  string region = 9;
+  // #8 FR2.1 fault-domain inputs, self-reported. The gateway prefers the address it actually connects
+  // to over public_ip; asn and facility_id stay best-effort until region verification exists.
+  string public_ip = 10;
+  int64 asn = 11;
+  string facility_id = 12;
+  // #8 FR3.3: measured (or operator-declared) upload capacity, for the replication bandwidth budget; 0 = unknown.
+  int64 upload_bytes_per_second = 13;
+  // #8 FR6.3: blobs the node's own randomized self-check found corrupt or missing since it started.
+  int64 integrity_failures = 14;
 }
 
 message IntegrityChallengeRequest {
   string cid = 1;
   int64 offset = 2;
   int64 length = 3; // 0 = hash to end of blob
+  // #8 FR6.4: prove possession of one leaf with a Merkle inclusion proof instead of hashing a range.
+  bool merkle_proof = 4;
+  int64 leaf_index = 5;
 }
 
 message IntegrityChallengeResponse {
   string sha256_hex = 1;
+  // Set when merkle_proof was asked and the node supports it (older nodes leave these empty).
+  bool proof_supported = 2;
+  bytes leaf_data = 3;
+  repeated bytes siblings = 4; // bottom-up sibling hashes; an empty entry means "no sibling, carried up"
+  int64 leaf_count = 5;
 }
 
 message ListBlobsRequest {

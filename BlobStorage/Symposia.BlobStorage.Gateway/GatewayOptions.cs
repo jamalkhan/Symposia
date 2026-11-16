@@ -22,6 +22,14 @@ public sealed class GatewayOptions
     /// </summary>
     public int MinCopiesPerObject { get; set; } = 1;
 
+    /// <summary>
+    /// How far a storage node's clock may run ahead before its fresh TLS certificate counts as not yet valid (#252).
+    /// Expiry has no tolerance: it is the replay boundary the node's proof signs.
+    /// </summary>
+    public int StorageTlsClockSkewSeconds { get; set; } = 300;
+
+    public TimeSpan StorageTlsClockSkew => TimeSpan.FromSeconds(Math.Max(0, StorageTlsClockSkewSeconds));
+
     /// <summary>gRPC endpoint URLs of storage nodes (e.g. "http://localhost:5180").</summary>
     public string[] Nodes { get; set; } = [];
 
@@ -53,6 +61,13 @@ public sealed class GatewayOptions
     public int MultipartUploadTtlDays { get; set; } = 7;
 
     public TimeSpan MultipartUploadTtl => TimeSpan.FromDays(MultipartUploadTtlDays);
+
+    /// <summary>
+    /// A bucket's multipart TTL (#16 FR1.1): its lifecycle's hours if set, else the gateway default, clamped to
+    /// 1 hour – 30 days.
+    /// </summary>
+    public TimeSpan MultipartTtlFor(int? bucketHours) =>
+        TimeSpan.FromHours(Math.Clamp(bucketHours ?? MultipartUploadTtlDays * 24, 1, 30 * 24));
 
     /// <summary>
     /// How long a Complete may hold an upload in Completing before the lease is released (a gateway that
@@ -115,6 +130,100 @@ public sealed class GatewayOptions
 
     /// <summary>Per-epoch factor reports for Blob Gateway rewards (#221); LocalDev only for now.</summary>
     public Rewards.ServiceMetricsOptions ServiceMetrics { get; set; } = new();
+
+    /// <summary>
+    /// Operator bearer token for <c>GET /metrics</c> (#1 FR-26). Not a tenant credential. Empty = every
+    /// scrape is refused with 401.
+    /// </summary>
+    public string MetricsBearerToken { get; set; } = "";
+
+    /// <summary>
+    /// How long <c>/ready</c> reports draining before the server stops accepting connections (#1 FR-28),
+    /// so the load balancer takes this instance out of rotation first. In-flight requests then get
+    /// <see cref="ShutdownTimeoutSeconds"/> to finish.
+    /// </summary>
+    public int DrainNoticeSeconds { get; set; }
+
+    /// <summary>How long in-flight requests may run after shutdown starts before the host stops (#1 FR-28).</summary>
+    public int ShutdownTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Per-tenant storage quotas in bytes (#1 FR-2): a write that would take the tenant past its quota is
+    /// refused with 507 before any node is contacted. Tenants not listed are unlimited.
+    /// </summary>
+    public Dictionary<string, long> TenantQuotaBytes { get; set; } = [];
+
+    /// <summary>Copy counts, write quorum and placement (#7, #8).</summary>
+    public RedundancyOptions Redundancy { get; set; } = new();
+
+    /// <summary>The Credential Authority this gateway caches credentials from (#3); empty Url = configured credentials only.</summary>
+    public CredentialAuthorityOptions CredentialAuthority { get; set; } = new();
+
+    /// <summary>Garbage collection (#16).</summary>
+    public GcOptions Gc { get; set; } = new();
+}
+
+public enum RedundancyMode
+{
+    /// <summary>
+    /// Small clusters (single-node dev, a network not yet spanning regions): every writable node is a
+    /// target, <see cref="GatewayOptions.WriteQuorumCount"/> acks are a quorum, regions aren't enforced.
+    /// </summary>
+    Bootstrap,
+
+    /// <summary>The full region tables of #7/#8: 4/5/6/7/2N copies, region-aware quorum, fault domains.</summary>
+    Network,
+}
+
+public sealed class RedundancyOptions
+{
+    public RedundancyMode Mode { get; set; } = RedundancyMode.Bootstrap;
+
+    /// <summary>
+    /// Longest wait for a write's quorum once its body has been sent (#7 FR4); past it the write fails with
+    /// 503 and its copies are discarded. Measured from the end of the body, so a slow upload isn't cut short.
+    /// </summary>
+    public int WriteQuorumTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Per-tenant overrides of <see cref="WriteQuorumTimeoutSeconds"/> for enterprise large-blob or
+    /// slow-network needs (#7 FR12). Operators set these on request; see docs/blob-storage-operations.md.
+    /// </summary>
+    public Dictionary<string, int> TenantWriteQuorumTimeoutSeconds { get; set; } = [];
+
+    /// <summary>How long the copies past quorum may take to land before repair takes over (#7 FR5).</summary>
+    public int RemainderTimeoutSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Region of storage nodes (by URL or node ID) that don't report one in their probe. A probed region
+    /// wins; nodes with neither count as "no region" (overflow only). A list, not a map: URLs contain
+    /// the configuration key separator.
+    /// </summary>
+    public NodeRegion[] NodeRegions { get; set; } = [];
+
+    /// <summary>
+    /// Share of a node's upload capacity background replication may use (#8 FR3.3, default 25 %).
+    /// A governance parameter; set here until governance wiring exists.
+    /// </summary>
+    public int BandwidthBudgetPercent { get; set; } = 25;
+
+    /// <summary>The share for nodes in penalty stage 3 or 4, whose data is being evacuated (#8 FR3.3).</summary>
+    public int RecoveryBandwidthBudgetPercent { get; set; } = 50;
+
+    /// <summary>Upload capacity assumed for nodes that report none (bytes/s).</summary>
+    public long DefaultNodeUploadBytesPerSecond { get; set; } = 100L * 1024 * 1024;
+
+    /// <summary>Most copies P3 opportunistic redundancy may add up to (#8 FR8.1, governance parameter); 0 = never beyond target.</summary>
+    public int MaxReplicationFactor { get; set; } = 8;
+
+    /// <summary>How often a random replica gets a Merkle range challenge, on average (#8 FR6.4); 0 = off.</summary>
+    public int ChallengeIntervalSeconds { get; set; } = 60;
+
+    /// <summary>How long a challenged node has to answer before it counts as failed.</summary>
+    public int ChallengeTimeoutSeconds { get; set; } = 10;
+
+    public TimeSpan WriteQuorumTimeout(string tenantId) => TimeSpan.FromSeconds(Math.Max(1,
+        TenantWriteQuorumTimeoutSeconds.TryGetValue(tenantId, out var seconds) ? seconds : WriteQuorumTimeoutSeconds));
 }
 
 public enum NodeSourceKind
@@ -134,4 +243,80 @@ public sealed class HistoryOptions
     public int QueueCapacity { get; set; } = 10_000;
 
     public int SweepIntervalSeconds { get; set; } = 300;
+}
+
+public sealed class NodeRegion
+{
+    /// <summary>The node's URL or registry ID.</summary>
+    public string Node { get; set; } = "";
+
+    public string Region { get; set; } = "";
+}
+
+public sealed class GcOptions
+{
+    /// <summary>How long a deleted object stays recoverable before its bytes are purged (#16 FR2.1); buckets may set up to 365.</summary>
+    public int RecoveryDays { get; set; } = 30;
+
+    /// <summary>How long an unreferenced blob found on a node waits before it can be deleted (#16 FR5.2).</summary>
+    public int OrphanGraceHours { get; set; } = 48;
+
+    /// <summary>Most deletions GC sends a node per second, so it never competes with client I/O (#16 FR8.1).</summary>
+    public int DeletesPerSecondPerNode { get; set; } = 20;
+
+    /// <summary>How often the GC evaluators look for newly eligible garbage (seconds).</summary>
+    public int EvaluateIntervalSeconds { get; set; } = 300;
+
+    /// <summary>Deletions per GC batch kept for the low tier (#16 FR8.3 starvation guard).</summary>
+    public int LowPriorityReserve { get; set; } = 5;
+}
+
+public sealed class CredentialAuthorityOptions
+{
+    /// <summary>How far the Authority's clock may run ahead before its fresh certificate counts as not yet valid (#252).</summary>
+    public int ClockSkewSeconds { get; set; } = 300;
+
+    public TimeSpan ClockSkew => TimeSpan.FromSeconds(Math.Max(0, ClockSkewSeconds));
+
+    /// <summary>Base URL of the Credential Authority (HTTP/2 for Watch).</summary>
+    public string Url { get; set; } = "";
+
+    /// <summary>The service token the Authority accepts from gateways.</summary>
+    public string ServiceToken { get; set; } = "";
+
+    /// <summary>
+    /// Fallback poll interval (#3 FR5.18): bounds propagation even with the Watch stream down. Pulls deltas since
+    /// #245. Keep it at most half the 60 s revocation SLA.
+    /// </summary>
+    public int PollSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// The full-snapshot reconcile interval (#245 FR4c), jittered ±20 %. Polls and Watch pushes pull deltas;
+    /// this pulls everything, healing anything a delta could have missed.
+    /// </summary>
+    public double ReconcileMinutes { get; set; } = 10;
+
+    // Mutual TLS with the Authority (#245 FR6). Empty = no client certificate (the Authority's Off/Permissive modes).
+
+    /// <summary>This gateway's client certificate: PFX, or PEM (key in the file or <see cref="ClientKeyPath"/>).</summary>
+    public string ClientCertificatePath { get; set; } = "";
+
+    public string ClientKeyPath { get; set; } = "";
+
+    public string ClientCertificatePassword { get; set; } = "";
+
+    /// <summary>
+    /// Pinned SHA-256 fingerprints of the Authority's server certificate (several, so it can rotate with overlap).
+    /// Pinning replaces CA validation, like storage-node TLS (#142).
+    /// </summary>
+    public string[] ServerFingerprints { get; set; } = [];
+
+    /// <summary>Alternatively, a CA (PEM) the Authority's certificate must chain to, with normal name checks.</summary>
+    public string ServerCaPath { get; set; } = "";
+
+    /// <summary>This gateway's ID in audit events; empty = the machine name.</summary>
+    public string GatewayId { get; set; } = "";
+
+    /// <summary>Most use events kept locally while the Authority is unreachable before the oldest are dropped (with an error).</summary>
+    public int AuditSpoolLimit { get; set; } = 1_000_000;
 }

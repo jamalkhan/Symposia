@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <!-- Shared contract bindings (#167). -->
+    <ProjectReference Include="..\..\Security\Symposia.Security.TlsPinning\Symposia.Security.TlsPinning.csproj" />
     <ProjectReference Include="..\..\Blockchain\Symposia.Blockchain.Contracts\Symposia.Blockchain.Contracts.csproj" />
   </ItemGroup>
 

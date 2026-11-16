@@ -87,7 +87,48 @@
               }
             }
           }
-        ]
+        ],
+        "properties": {
+          "replication": {
+            "type": "string",
+            "enum": [
+              "quorum",
+              "full"
+            ],
+            "description": "quorum until every target copy has confirmed (#7)."
+          },
+          "targetCopies": {
+            "type": "integer"
+          },
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "placementGaps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "shards": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "object"
+            }
+          },
+          "pendingReplicas": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
       },
       "HistoryEntry": {
         "type": "object",
@@ -391,6 +432,374 @@
         "responses": {
           "204": {
             "description": "Deleted or absent."
+          }
+        }
+      },
+      "post": {
+        "summary": "?restore: bring back a deleted object within its recovery window. ?retention: set { lockedUntil, legalHold } (#16).",
+        "responses": {
+          "200": {
+            "description": "The object, or its retention"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket, NoSuchKey or NoSuchVersion"
+          }
+        }
+      }
+    },
+    "/v1/buckets/{bucket}/regions": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "prefix",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Set or read a folder rule instead of the bucket's (#8)."
+        }
+      ],
+      "get": {
+        "summary": "The bucket's region assignment (#7): where its new objects are placed. Empty = global.",
+        "responses": {
+          "200": {
+            "description": "{ regions: string[] }"
+          },
+          "404": {
+            "description": "NoSuchBucket (also for another tenant's bucket)"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set the bucket's region assignment. Applies to writes from now on; network redundancy mode only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "regions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ regions: string[] }"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          },
+          "409": {
+            "description": "RegionsNotEnforced (bootstrap mode)"
+          }
+        }
+      }
+    },
+    "/v1/buckets/{bucket}/scheme": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Choose how new objects are stored (#8): \"replica\" (full copies, default) or \"rs:k+m\" Reed-Solomon shards.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scheme": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ scheme }"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          }
+        }
+      }
+    },
+    "/v1/buckets/{bucket}/lifecycle": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "The bucket's lifecycle and retention rules (#16).",
+        "responses": {
+          "200": {
+            "description": "BucketLifecycle"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set versioning, version limits, minimum retention, recovery window (1\u2013365 days) and multipart TTL (1\u2013720 hours).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "versioning": {
+                    "type": "boolean"
+                  },
+                  "maxVersions": {
+                    "type": "integer"
+                  },
+                  "maxVersionAgeDays": {
+                    "type": "integer"
+                  },
+                  "minRetentionDays": {
+                    "type": "integer"
+                  },
+                  "recoveryDays": {
+                    "type": "integer"
+                  },
+                  "multipartTtlHours": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "BucketLifecycle"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          }
+        }
+      }
+    },
+    "/v1/gc": {
+      "get": {
+        "summary": "Objects pending physical deletion per bucket, with estimated purge time, and placement warnings, for the caller's tenant (#16).",
+        "responses": {
+          "200": {
+            "description": "{ pendingDeletion, placementWarnings }"
+          }
+        }
+      }
+    },
+    "/v1/credentials": {
+      "get": {
+        "summary": "The tenant's credentials (#3). Secrets are never returned after issuance.",
+        "responses": {
+          "200": {
+            "description": "credential[]"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      },
+      "post": {
+        "summary": "Issue a credential: { identity, accessLevel: Read|ReadWrite, bucket?, prefix?, key?, expiresAt?, regionLock?, canManage? }. Never broader than the caller's. The secret is in this response only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ credential, accessKeyId, secretAccessKey }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/credentials/{id}/revoke": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Revoke; every gateway refuses it within 60 s.",
+        "responses": {
+          "200": {
+            "description": "{ revoked }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/credentials/{id}/rotate": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Issue a replacement with the same configuration and revoke this one, now or after { graceSeconds }.",
+        "responses": {
+          "200": {
+            "description": "{ credential, accessKeyId, secretAccessKey }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/policies/{bucket}": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "key",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Set an object ACL instead of the bucket policy."
+        }
+      ],
+      "put": {
+        "summary": "Replace the bucket policy (or object ACL): [{ effect: Allow|Deny, kind: Credential|Tenant|AccessLevel|Identity, principal }]. Explicit deny wins.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Set"
+          },
+          "403": {
+            "description": "Needs a manager credential"
+          }
+        }
+      }
+    },
+    "/v1/audit": {
+      "get": {
+        "summary": "The tenant's hash-chained credential audit trail, optionally for one credentialId, paged by after/limit.",
+        "responses": {
+          "200": {
+            "description": "AuditEvent[]"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/audit/verify": {
+      "get": {
+        "summary": "Recompute the tenant's audit hash chain.",
+        "responses": {
+          "200": {
+            "description": "{ intact }"
+          },
+          "403": {
+            "description": "Not allowed for this credential"
+          },
+          "501": {
+            "description": "No Credential Authority configured"
           }
         }
       }

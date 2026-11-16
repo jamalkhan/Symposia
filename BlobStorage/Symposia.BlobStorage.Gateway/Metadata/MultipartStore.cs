@@ -139,6 +139,16 @@ public sealed partial class GatewayMetadataStore
     }
 
     /// <summary>Parts in part-number order after <paramref name="afterPartNumber"/> (primary key order).</summary>
+    /// <summary>Adds a copy that confirmed after quorum to a part's replicas, if the part still holds <paramref name="cid"/>.</summary>
+    public void AddPartReplica(string uploadId, int partNumber, string cid, string nodeId)
+    {
+        using var conn = Open();
+        Execute(Query(conn, """
+            UPDATE multipart_parts SET node_ids = node_ids || ',' || $node
+            WHERE upload_id = $u AND part_number = $p AND cid = $cid AND instr(',' || node_ids || ',', ',' || $node || ',') = 0
+            """, ("$node", nodeId), ("$u", uploadId), ("$p", partNumber), ("$cid", cid)));
+    }
+
     public IReadOnlyList<MultipartPart> ListParts(string uploadId, int afterPartNumber = 0, int limit = 10_000)
     {
         using var conn = Open();
@@ -204,7 +214,7 @@ public sealed partial class GatewayMetadataStore
             }
         }
 
-        replaced = UpsertObject(conn, tx, record with { EtagOverride = finalEtag });
+        replaced = UpsertObject(conn, tx, record with { EtagOverride = finalEtag }).Replaced;
         Run(conn, tx, """
             UPDATE multipart_uploads SET status = 'Completed', completing_since = NULL, completed_at = $at, final_cid = $cid,
                 final_etag = $etag, committed_parts_json = $parts WHERE upload_id = $id AND status = 'Completing'
@@ -277,7 +287,11 @@ public sealed partial class GatewayMetadataStore
     /// pin blobs forever) and purges finished upload rows older than <paramref name="retention"/>.
     /// Indexed by idx_multipart_uploads_status_expiry.
     /// </summary>
-    public (int Released, int Expired, int Purged) ReapUploads(DateTimeOffset now, TimeSpan completingLease, TimeSpan retention)
+    public (int Released, int Expired, int Purged) ReapUploads(DateTimeOffset now, TimeSpan completingLease, TimeSpan retention) =>
+        ReapUploads(now, completingLease, retention, null);
+
+    /// <summary>As above; each expired upload is also recorded as <c>blob.multipart_aborted</c> (#16 FR1.2), in the same transaction.</summary>
+    public (int Released, int Expired, int Purged) ReapUploads(DateTimeOffset now, TimeSpan completingLease, TimeSpan retention, bool? emitEvents)
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
@@ -303,6 +317,15 @@ public sealed partial class GatewayMetadataStore
 
         foreach (var id in expired)
         {
+            if (emitEvents == true)
+            {
+                // Only GC-driven aborts emit this event; a tenant's own abort has its own (#16 AC2).
+                Run(conn, tx, """
+                    INSERT INTO blob_events (type, bucket, key, at)
+                    SELECT 'blob.multipart_aborted', bucket, key, $now FROM multipart_uploads WHERE upload_id = $id
+                    """, ("$now", now.ToString("O")), ("$id", id));
+            }
+
             AbortInTransaction(conn, tx, id, now - completingLease);
         }
 

@@ -1,4 +1,5 @@
 using Symposia.Network.Node;
+using Symposia.Security.TlsPinning;
 using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
 
@@ -12,12 +13,16 @@ public sealed class NodeConnection : IDisposable
 {
     private readonly GrpcChannel _channel;
 
-    public NodeConnection(string url, string? expectedNodeId = null, IStorageRpcSigner? signer = null, string? tlsFingerprint = null)
+    public NodeConnection(string url, string? expectedNodeId = null, IStorageRpcSigner? signer = null, string? tlsFingerprint = null,
+        ITlsRefusalSink? refusals = null, TimeSpan? clockSkew = null)
     {
         TlsFingerprint = tlsFingerprint;
         Url = url;
         ExpectedNodeId = expectedNodeId;
         Id = expectedNodeId ?? url;
+        // Normalised once: the registry vouches for 64 hex digits (StorageTlsProof.Validate), but a malformed pin
+        // must refuse the handshake, not throw here. An empty pin set matches nothing.
+        string[] pins = TlsPin.TryNormalize(tlsFingerprint, out var pin) ? [pin] : [];
         // Allow unencrypted HTTP/2 (h2c) for node communication in dev.
         // Production: set TLS on the channel or terminate TLS at a sidecar.
         // A short connect timeout keeps a powered-off node from stalling writes and probes.
@@ -27,14 +32,12 @@ public sealed class NodeConnection : IDisposable
             {
                 ConnectTimeout = TimeSpan.FromSeconds(5),
                 EnableMultipleHttp2Connections = true,
-                // TLS (#142): trust exactly the certificate whose fingerprint the node's key vouched for.
-                // Pinning replaces CA validation, so chain/name errors are expected and ignored.
+                // TLS (#142): trust exactly the certificate whose fingerprint the node's key vouched for, inside its
+                // validity (NotBefore with clock skew) and allowed for server auth (#252). Pinning replaces CA
+                // validation, so chain/name errors are expected and ignored.
                 SslOptions = tlsFingerprint is null ? new() : new System.Net.Security.SslClientAuthenticationOptions
                 {
-                    RemoteCertificateValidationCallback = (_, certificate, _, _) => StorageTlsProof.PinMatches(
-                        certificate?.GetRawCertData(),
-                        certificate is System.Security.Cryptography.X509Certificates.X509Certificate2 c2 ? new DateTimeOffset(c2.NotAfter.ToUniversalTime(), TimeSpan.Zero) : null,
-                        tlsFingerprint, DateTimeOffset.UtcNow),
+                    RemoteCertificateValidationCallback = (_, certificate, _, _) => Verify(certificate, pins, refusals, clockSkew),
                 },
             },
         });
@@ -42,6 +45,35 @@ public sealed class NodeConnection : IDisposable
         Client = signer is not null && expectedNodeId is not null
             ? new Protocol.StorageNode.StorageNodeClient(_channel.Intercept(new StorageRpcSigningInterceptor(signer, expectedNodeId)))
             : new Protocol.StorageNode.StorageNodeClient(_channel);
+    }
+
+    private bool Verify(System.Security.Cryptography.X509Certificates.X509Certificate? certificate, string[] pins, ITlsRefusalSink? refusals, TimeSpan? clockSkew)
+    {
+        try
+        {
+            var result = TlsPin.Check(certificate, pins, DateTimeOffset.UtcNow, TlsPin.ServerAuth, clockSkew);
+            LastTlsRefusal = result == TlsPinResult.Ok ? null : "tls: " + result.ToTag();
+            if (result == TlsPinResult.Ok)
+            {
+                return true;
+            }
+
+            try
+            {
+                refusals?.Refused(Id, Url, result, certificate is null ? null : TlsPin.Fingerprint(certificate));
+            }
+            catch (Exception)
+            {
+                // A logging or metrics fault must not change the outcome or lose the reason (review: Lenny #7).
+            }
+
+            return false;
+        }
+        catch (Exception)
+        {
+            LastTlsRefusal = "tls: unreadable certificate";
+            return false; // never throw from the handshake callback
+        }
     }
 
     // For integration tests: inject a pre-built client backed by an in-process TestServer.
@@ -73,6 +105,12 @@ public sealed class NodeConnection : IDisposable
     /// NodeId differs marks the node unhealthy, so an endpoint can't pose as another node.
     /// </summary>
     public string? ExpectedNodeId { get; }
+
+    /// <summary>
+    /// Why this node's last TLS handshake was refused (<c>tls: &lt;reason&gt;</c>), or null after an accepted one. Kept
+    /// apart from <see cref="LastProbeError"/>, which the failed call overwrites with the transport's generic error.
+    /// </summary>
+    public string? LastTlsRefusal { get; private set; }
 
     /// <summary>Why the last probe failed (e.g. "Unauthenticated: caller is not registered"), or null after a success.</summary>
     public string? LastProbeError { get; set; }
@@ -106,6 +144,69 @@ public sealed class NodeConnection : IDisposable
 
     /// <summary>Time of the last successful probe.</summary>
     public DateTimeOffset LastProbeTime { get; set; } = DateTimeOffset.MinValue;
+
+    /// <summary>Time of the last probe attempt, successful or not (#1: the health cache counts as loaded once every node has one).</summary>
+    public DateTimeOffset LastProbeAttemptAt { get; set; } = DateTimeOffset.MinValue;
+
+    // The health cache's other inputs (#1 FR-21): P2P gossip and the on-chain registry each epoch. Their
+    // producers land separately; these are where they write, and null means "no data from that source yet".
+
+    /// <summary>Region from gateway configuration, used when the node's probe reports none (#7).</summary>
+    public string? ConfiguredRegion { get; set; }
+
+    /// <summary>The node's region: its own report, else configuration, else empty (no region).</summary>
+    public string Region => LastProbe?.Region is { Length: > 0 } reported ? reported : ConfiguredRegion ?? "";
+
+    // ── Fault domains (#8 FR2) ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The IP this gateway actually connects to (the URL's host, resolved by the registry's probe). Preferred
+    /// over the node's self-report for the hard same-IP rule: a node can't misstate where it's reached.
+    /// </summary>
+    public System.Net.IPAddress? ObservedIp { get; set; }
+
+    /// <summary>The address the same-IP rule compares: observed, else self-reported, else none.</summary>
+    public string PublicIp => ObservedIp?.ToString()
+        ?? (System.Net.IPAddress.TryParse(LastProbe?.PublicIp, out var reported) ? reported.ToString() : "");
+
+    /// <summary>The /24 (IPv4) or /48 (IPv6) the node's address is in; empty when unknown.</summary>
+    public string Subnet => System.Net.IPAddress.TryParse(PublicIp, out var ip)
+        ? ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            ? string.Join('.', ip.GetAddressBytes().Take(3)) + ".0/24"
+            : Convert.ToHexString(ip.GetAddressBytes()[..6]) + "::/48"
+        : "";
+
+    /// <summary>Self-reported ASN (0 = unknown): best effort until region verification attests it.</summary>
+    public long Asn => LastProbe?.Asn ?? 0;
+
+    /// <summary>Self-reported facility (empty = unknown).</summary>
+    public string Facility => LastProbe?.FacilityId ?? "";
+
+    // ── Penalties and integrity (#8 FR3, FR6) ─────────────────────────────────
+
+    /// <summary>Current penalty stage 0–4, from the penalty-stage system (#8 FR3).</summary>
+    public int PenaltyStage { get; set; }
+
+    /// <summary>
+    /// The node has answered a Merkle challenge with a valid proof, so it supports them: from then on an answer
+    /// without a proof is a failure, never a fallback to the (public) CID (review: Carl #1).
+    /// </summary>
+    public bool ProofCapable { get; set; }
+
+    /// <summary>Challenges this node failed since the gateway started (#8 FR6.4); feeds its penalty assessment.</summary>
+    public int ChallengeFailures { get; set; }
+
+    /// <summary>Upload capacity the node reports, for the replication bandwidth budget; 0 = unknown.</summary>
+    public long UploadBytesPerSecond => LastProbe?.UploadBytesPerSecond ?? 0;
+
+    /// <summary>When gossip last reported this node alive.</summary>
+    public DateTimeOffset? GossipLastSeen { get; set; }
+
+    /// <summary>Performance tier from the on-chain registry for the current epoch.</summary>
+    public int? RegistryTier { get; set; }
+
+    /// <summary>Stake from the on-chain registry for the current epoch, in the token's smallest unit.</summary>
+    public System.Numerics.BigInteger? RegistryStake { get; set; }
 
     /// <summary>A node is considered healthy if it responded to a probe in the last 90 seconds.</summary>
     public bool IsHealthy =>

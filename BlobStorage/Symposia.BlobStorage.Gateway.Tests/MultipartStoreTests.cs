@@ -76,7 +76,9 @@ public sealed class MultipartStoreTests : IDisposable
         Assert.Equal(CompleteOutcome.PreconditionFailed, _store.CompleteUpload("up1", Obj("k", "final", "0xA"), "e-1", "[]", ifNoneMatch: true));
         Assert.Equal("existing", _store.GetObject("b", "k")!.Cid);
 
-        Assert.Equal(CompleteOutcome.Committed, _store.CompleteUpload("up1", Obj("k", "final", "0xA"), "e-1", "[]", ifNoneMatch: false));
+        // A later commit: in the same millisecond, #7's last-writer-wins tiebreak (greater ETag) would keep "existing".
+        Assert.Equal(CompleteOutcome.Committed, _store.CompleteUpload("up1", Obj("k", "final", "0xA") with { LastModified = DateTimeOffset.UtcNow.AddSeconds(1) },
+            "e-1", "[]", ifNoneMatch: false));
         Assert.Equal("e-1", _store.GetObject("b", "k")!.ETag);
         Assert.Empty(_store.ListParts("up1"));
         // The overwritten object's blob and the consumed part are both unreferenced now.

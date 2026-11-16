@@ -79,6 +79,14 @@ public static class StorageNodeApp
         builder.Services.AddSingleton<StorageCapacityMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<StorageCapacityMonitor>());
 
+        // Health, readiness, metrics and drain (#1).
+        builder.Services.AddSingleton<Health.NodeMetrics>();
+        builder.Services.AddSingleton<Health.NodeShutdownState>();
+        builder.Services.AddSingleton<Health.StorageWritableMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<Health.StorageWritableMonitor>());
+        builder.Services.Configure<HostOptions>(host =>
+            host.ShutdownTimeout = TimeSpan.FromSeconds(Math.Max(1, nodeOptions.ShutdownTimeoutSeconds)));
+
         // Node identity, on-chain registration, peer discovery, and handshake (issue #129),
         // configured from this node's own "StorageNode" section.
         builder.Services.AddNodeNetwork(builder.Configuration.GetSection("StorageNode"));
@@ -108,6 +116,16 @@ public static class StorageNodeApp
 
         app.Services.GetRequiredService<LocalBlobStore>().EnsureRootExists();
         app.Services.GetRequiredService<ManifestStore>().Initialize();
+        app.Services.GetRequiredService<Health.StorageWritableMonitor>().Check();
+        app.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.Register(() =>
+        {
+            // Drain (#1 FR-28): /ready goes 503 for the notice period before listeners close.
+            app.Services.GetRequiredService<Health.NodeShutdownState>().BeginDrain();
+            if (nodeOptions.DrainNoticeSeconds > 0)
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(nodeOptions.DrainNoticeSeconds));
+            }
+        });
         app.UseNodeNetwork();
 
         // Both gRPC listeners share the service and its caller-auth interceptor (#140).
@@ -141,6 +159,8 @@ public static class StorageNodeApp
             features.Add(ProtocolFeatures.StorageRpcAuthV1);
         }
 
+        features.Add(ProtocolFeatures.StorageIntegrityMerkleV1);
+
         app.MapGet(NodeServices.Path, (NodeIdentity identity, Microsoft.Extensions.Options.IOptions<NodeNetworkOptions> network) =>
         {
             var advertised = network.Value.AdvertisedEndpoint;
@@ -152,13 +172,7 @@ public static class StorageNodeApp
                 ProtocolFeatures.ProtocolVersion, features));
         });
 
-        app.MapGet("/healthz/live", () => Results.Ok(new { status = "live" }));
-
-        app.MapGet("/healthz/ready", (LocalBlobStore blobStore, ManifestStore manifestStore) =>
-        {
-            var ready = blobStore.IsRootAccessible() && manifestStore.IsAccessible();
-            return ready ? Results.Ok(new { status = "ready" }) : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-        });
+        Health.NodeHealthEndpoints.Map(app);
 
         return app;
     }

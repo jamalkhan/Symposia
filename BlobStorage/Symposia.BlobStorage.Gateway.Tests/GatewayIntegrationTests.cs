@@ -446,16 +446,23 @@ public sealed class GatewayFixture : IAsyncLifetime
 
     public AmazonS3Client BuildS3Client(
         string accessKey = "AKIAIOSFODNN7EXAMPLE",
-        string secretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+        string secretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") =>
+        S3ClientFor(_gatewayFactory!.Server, accessKey, secretKey);
+
+    /// <summary>An S3 client talking to <paramref name="server"/> in memory.</summary>
+    internal static AmazonS3Client S3ClientFor(TestServer server,
+        string accessKey = "AKIAIOSFODNN7EXAMPLE",
+        string secretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        int? maxErrorRetry = null)
     {
         // AWSSDK v4 builds URIs with DangerousDisablePathAndQueryCanonicalization, which
         // ASP.NET Core's TestHost.ClientHandler cannot parse. Wrap with a normalizing handler
         // that reconstructs a standard Uri before forwarding to the in-memory test server.
-        var testHandler = _gatewayFactory!.Server.CreateHandler();
+        var testHandler = server.CreateHandler();
         var normalizingHandler = new UriNormalizingHandler(testHandler);
         var httpClient = new HttpClient(normalizingHandler, disposeHandler: true)
         {
-            BaseAddress = _gatewayFactory.Server.BaseAddress,
+            BaseAddress = server.BaseAddress,
         };
 
         return new AmazonS3Client(
@@ -467,6 +474,7 @@ public sealed class GatewayFixture : IAsyncLifetime
                 HttpClientFactory = new FixedHttpClientFactory(httpClient),
                 DisableLogging = true,
                 Timeout = TimeSpan.FromSeconds(30),
+                MaxErrorRetry = maxErrorRetry ?? 4,
             });
     }
 
@@ -517,6 +525,8 @@ internal sealed class NodeFactory
     private readonly string _dataDir =
         Path.Combine(Path.GetTempPath(), $"symposia-gw-node-{Guid.NewGuid():N}");
 
+    public string DataDir => _dataDir;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureAppConfiguration((_, cfg) =>
@@ -547,23 +557,42 @@ internal sealed class GatewayFactory
 {
     private readonly string _dataDir =
         Path.Combine(Path.GetTempPath(), $"symposia-gw-meta-{Guid.NewGuid():N}");
-    private readonly HttpClient _nodeHttpClient;
+    private readonly HttpClient? _nodeHttpClient;
+    private readonly IReadOnlyDictionary<string, string?>? _extra;
+    private readonly Func<IServiceProvider, INodeRegistry>? _registry;
+    private readonly Action<IServiceCollection>? _services;
 
     public GatewayFactory(HttpClient nodeHttpClient) => _nodeHttpClient = nodeHttpClient;
 
+    /// <summary>A gateway over <paramref name="registry"/>'s nodes, with extra configuration and service overrides.</summary>
+    public GatewayFactory(Func<IServiceProvider, INodeRegistry> registry, IReadOnlyDictionary<string, string?>? extra = null,
+        Action<IServiceCollection>? services = null)
+    {
+        _registry = registry;
+        _extra = extra;
+        _services = services;
+    }
+
+    public string DataDir => _dataDir;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.ConfigureAppConfiguration((_, cfg) =>
-            cfg.AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Gateway:MetadataDbPath"] = Path.Combine(_dataDir, "gateway-metadata.db"),
-                ["Gateway:WriteQuorumCount"] = "1",
-                ["Gateway:Region"] = "us-east-1",
-                // Credentials the S3 client will sign with.
-                ["Gateway:Credentials:0:AccessKeyId"] = "AKIAIOSFODNN7EXAMPLE",
-                ["Gateway:Credentials:0:SecretAccessKey"] = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-                ["Gateway:Credentials:0:TenantId"] = "test-tenant",
-            }));
+        var settings = new Dictionary<string, string?>
+        {
+            ["Gateway:MetadataDbPath"] = Path.Combine(_dataDir, "gateway-metadata.db"),
+            ["Gateway:WriteQuorumCount"] = "1",
+            ["Gateway:Region"] = "us-east-1",
+            // Credentials the S3 client will sign with.
+            ["Gateway:Credentials:0:AccessKeyId"] = "AKIAIOSFODNN7EXAMPLE",
+            ["Gateway:Credentials:0:SecretAccessKey"] = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            ["Gateway:Credentials:0:TenantId"] = "test-tenant",
+        };
+        foreach (var (key, value) in _extra ?? new Dictionary<string, string?>())
+        {
+            settings[key] = value; // a test's settings win over the defaults
+        }
+
+        builder.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(settings));
 
         builder.ConfigureTestServices(services =>
         {
@@ -572,8 +601,17 @@ internal sealed class GatewayFactory
             // QuorumWriter and read paths use our in-process TestNodeRegistry.
             services.RemoveAll<INodeRegistry>();
 
-            var fakeNode = new NodeConnection("http://in-process-node", _nodeHttpClient);
-            services.AddSingleton<INodeRegistry>(new TestNodeRegistry(fakeNode));
+            if (_registry is not null)
+            {
+                services.AddSingleton(_registry);
+            }
+            else
+            {
+                var fakeNode = new NodeConnection("http://in-process-node", _nodeHttpClient!);
+                services.AddSingleton<INodeRegistry>(new TestNodeRegistry(fakeNode));
+            }
+
+            _services?.Invoke(services);
         });
     }
 

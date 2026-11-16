@@ -60,6 +60,15 @@ class SchemaTests(unittest.TestCase):
         self.assertTrue(compat.validate({"node": "0x1", "storage": {"tlsNotAfter": "soon"}}, SCHEMA))
         self.assertEqual(compat.validate({"node": "0x1", "unknown": 1}, SCHEMA), [])  # unknown fields are tolerated
 
+    def test_pattern_is_validated_and_tightening_it_is_narrowing(self):
+        hexed = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        self.assertEqual(compat.validate("a" * 64, hexed), [])
+        self.assertTrue(compat.validate("A" * 64, hexed))
+        self.assertTrue(compat.diff_schema({"type": "string"}, hexed))
+        self.assertTrue(compat.diff_schema(hexed, {"type": "string", "pattern": "^[0-9a-f]+$"}))
+        self.assertEqual(compat.diff_schema(hexed, hexed), [])
+        self.assertEqual(compat.diff_schema({"type": "string", "pattern": "^x"}, {"type": "string"}), [])  # loosening passes
+
 
 class FixtureTests(unittest.TestCase):
     def test_deleted_or_edited_fixture_fails_added_passes(self):

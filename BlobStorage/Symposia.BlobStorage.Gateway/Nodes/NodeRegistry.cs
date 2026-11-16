@@ -28,6 +28,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private Timer? _probeTimer;
 
     private readonly IStorageRpcSigner? _signer;
+    private readonly ITlsRefusalSink? _tlsRefusals;
     private readonly INetworkPolicy _policy;
     private readonly HashSet<string> _tlsSeen = new(StringComparer.OrdinalIgnoreCase);
 
@@ -36,8 +37,10 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         GatewayMetadataStore store,
         ILogger<NodeRegistry> logger,
         INetworkPolicy policy,
-        IStorageRpcSigner? signer = null)
+        IStorageRpcSigner? signer = null,
+        ITlsRefusalSink? tlsRefusals = null)
     {
+        _tlsRefusals = tlsRefusals;
         _signer = signer;
         _policy = policy;
         _options = options;
@@ -65,6 +68,11 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     public IReadOnlyList<NodeConnection> All
     {
         get { lock (_lock) return [.._nodes]; }
+    }
+
+    public bool CacheLoaded
+    {
+        get { lock (_lock) return _nodes.Count > 0 && _nodes.All(n => n.LastProbeAttemptAt != DateTimeOffset.MinValue); }
     }
 
     public IReadOnlyList<NodeConnection> Healthy
@@ -110,7 +118,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
             var existing = _nodes.FirstOrDefault(n => n.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
             if (existing is not null) return existing;
 
-            var conn = new NodeConnection(url);
+            var conn = new NodeConnection(url) { ConfiguredRegion = ConfiguredRegion(url, url) };
             _nodes.Add(conn);
             _store.PersistNode(url, "admin");
             _ = ProbeAsync(conn); // probe immediately so health is known
@@ -184,7 +192,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
                 var existing = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
                 if (existing is not null && existing.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(existing.TlsFingerprint, d.TlsFingerprint, StringComparison.OrdinalIgnoreCase))
+                    && string.Equals(existing.TlsFingerprint, d.TlsFingerprint, StringComparison.Ordinal))
                 {
                     existing.LastSeenInSource = now;
                     continue;
@@ -200,7 +208,12 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                     squatter.Dispose();
                 }
 
-                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint) { LastSeenInSource = now };
+                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint, _tlsRefusals,
+                    _options.Value.StorageTlsClockSkew)
+                {
+                    LastSeenInSource = now,
+                    ConfiguredRegion = ConfiguredRegion(d.Url, d.Id),
+                };
                 if (existing is not null)
                 {
                     _logger.LogInformation("Storage node {Node} changed from {Old} to {New} (certificate {Fingerprint}).",
@@ -253,6 +266,13 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         }
     }
 
+    private string? ConfiguredRegion(string url, string id)
+    {
+        var regions = _options.Value.Redundancy.NodeRegions;
+        return (regions.FirstOrDefault(r => r.Node.Equals(id, StringComparison.OrdinalIgnoreCase))
+            ?? regions.FirstOrDefault(r => r.Node.TrimEnd('/').Equals(url, StringComparison.OrdinalIgnoreCase)))?.Region;
+    }
+
     /// <summary>Raised when a node becomes healthy (new or back online); used to start a repair sweep at once.</summary>
     public event Action<NodeConnection>? NodeBecameHealthy;
 
@@ -299,6 +319,18 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         var wasHealthy = node.IsHealthy;
         try
         {
+            await ProbeOnceAsync(node, wasHealthy);
+        }
+        finally
+        {
+            node.LastProbeAttemptAt = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private async Task ProbeOnceAsync(NodeConnection node, bool wasHealthy)
+    {
+        try
+        {
             var response = await node.Client.ProbeAsync(new ProbeRequest(),
                 deadline: DateTime.UtcNow.AddSeconds(5));
             if (node.ExpectedNodeId is { } expected && !string.Equals(response.NodeId, expected, StringComparison.OrdinalIgnoreCase))
@@ -317,6 +349,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
             node.LastProbe = response;
             node.LastProbeTime = DateTimeOffset.UtcNow;
+            node.ObservedIp ??= await ResolveAsync(node.Url);
             node.LastProbeError = null;
             _logger.LogDebug("Node {Url} probe ok: {Used} bytes used, {Available} available, {Blobs} blobs.",
                 node.Url, response.UsedStorageBytes, response.AvailableStorageBytes, response.BlobCount);
@@ -330,11 +363,37 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            node.LastProbeError = ex is Grpc.Core.RpcException rpc ? $"{rpc.StatusCode}: {rpc.Status.Detail}" : ex.Message;
+            var error = ex is Grpc.Core.RpcException rpc ? $"{rpc.StatusCode}: {rpc.Status.Detail}" : ex.Message;
+            // A refused handshake surfaces as a generic transport error: lead with why it was refused (#252 review: Lenny #1).
+            node.LastProbeError = node.LastTlsRefusal is { } tls ? $"{tls} ({error})" : error;
             _logger.LogWarning("Node {Url} probe failed: {Message}", node.Url, node.LastProbeError);
             if (node.IsHealthy || node.LastUnhealthyAt == DateTimeOffset.MinValue)
                 node.LastUnhealthyAt = DateTimeOffset.UtcNow;
             node.LastProbe = null;
+        }
+    }
+
+    /// <summary>The address a node URL's host resolves to (#8 same-IP rule); null when it doesn't resolve.</summary>
+    internal static async Task<System.Net.IPAddress?> ResolveAsync(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        if (System.Net.IPAddress.TryParse(uri.Host, out var literal))
+        {
+            return literal;
+        }
+
+        try
+        {
+            var addresses = await System.Net.Dns.GetHostAddressesAsync(uri.Host).WaitAsync(TimeSpan.FromSeconds(2));
+            return addresses.FirstOrDefault();
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 

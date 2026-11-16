@@ -1,0 +1,12 @@
+{
+  "description": "A storage node certificate minted by the #142 release's own StorageTlsCertificate.LoadOrCreate (bcf874c), with its pin and the v2 proof over it signed by StorageTlsProof.Sign (unchanged by #252). Fixes the pin format (lower-case hex SHA-256 of the DER) and the proof digest as wire contracts, and shows a previous-release certificate passes this release's checks. The certificate is valid for a year from minting: verify at notBeforeUnixSeconds + 3600.",
+  "certificateDer": "MIIBxjCCAW2gAwIBAgIIYUySBfwYuJQwCgYIKoZIzj0EAwIwVTEeMBwGA1UEChMVU3ltcG9zaWEgc3RvcmFnZSBub2RlMTMwMQYDVQQDEyoweDJjNzUzNkUzNjA1RDlDMTZhN2EzRDdiMTg5OGU1MjkzOTZhNjVjMjMwHhcNMjYxMTE2MDMwMDQ5WhcNMjcxMTE2MDMwNTQ5WjBVMR4wHAYDVQQKExVTeW1wb3NpYSBzdG9yYWdlIG5vZGUxMzAxBgNVBAMTKjB4MmM3NTM2RTM2MDVEOUMxNmE3YTNEN2IxODk4ZTUyOTM5NmE2NWMyMzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKMSwTMD2kgGPotbl5VnUuATe+NjX/OTZO89TQLHzxdlRhkjvUUM5x1UHzMeCBdsR6QOiYTG6VkpN0ayEEk1Pq+jJzAlMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAKBggqhkjOPQQDAgNHADBEAiBDGI/k2XG8HYuX+tDQSR3V2sDcF8NbAUxuoHWr3Qw3gQIgFFHNZsGRpH84FWWKe2fwShJO2R8SwnzCB46UfdjPCrk=",
+  "fingerprint": "96cce2d7939658c4b3cbf21a3b639ab8d688b5bad832960337529bd06b257569",
+  "notBeforeUnixSeconds": 1794798049,
+  "chainId": 84532,
+  "registryAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "node": "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
+  "notAfterUnixSeconds": 1826334349,
+  "digest": "7d8f01c3c6b27a21b5ed61cf67dfb52f274b6a83d0df7209a20a69089a27cd29",
+  "proof": "0xdae0ee79b68a23c3a6610955a9b852309716a08955c79526ce21200663876c68766221ceb5c760dfb5eca2f27cc827db9dae2cc6e200901ae11f4b5c8976a78c1b"
+}

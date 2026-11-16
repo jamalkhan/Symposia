@@ -14,7 +14,7 @@ namespace Symposia.BlobStorage.Gateway.Repair;
 ///  a. Removes node_ids that are no longer in the live registry (departed nodes).
 ///  b. Issues an IntegrityChallenge to each replica to verify the blob is intact.
 ///  c. Removes replicas that fail the challenge.
-///  d. Counts healthy replicas; if below MinCopiesPerObject, enqueues an UnderReplicated repair.
+///  d. Counts healthy replicas; if below the object's own copy target, enqueues an UnderReplicated repair.
 ///
 /// This is the network-wide enforcement of the redundancy rules defined in
 /// Requirements/BlobStorage/redundancy-and-data-integrity.md.
@@ -40,14 +40,17 @@ public sealed class ReplicationMonitor : BackgroundService
     private readonly IOptions<GatewayOptions> _options;
     private readonly ILogger<ReplicationMonitor> _logger;
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+    private readonly Integrity.ChallengeScheduler? _challenges;
 
     public ReplicationMonitor(
         GatewayMetadataStore store,
         INodeRegistry nodes,
         RepairQueue repairQueue,
         IOptions<GatewayOptions> options,
-        ILogger<ReplicationMonitor> logger)
+        ILogger<ReplicationMonitor> logger,
+        Integrity.ChallengeScheduler? challenges = null)
     {
+        _challenges = challenges;
         _store = store;
         _nodes = nodes;
         _repairQueue = repairQueue;
@@ -105,25 +108,25 @@ public sealed class ReplicationMonitor : BackgroundService
     }
 
     /// <summary>
-    /// Queues a repair for every object recorded on fewer than MinCopiesPerObject nodes. Index-backed
-    /// (replica_count), so it's cheap enough to run whenever a node comes online or a write lands short.
+    /// Queues a repair for every object recorded on fewer nodes than its own copy target (#7: targets follow
+    /// each object's region assignment). Index-backed (idx_objects_short), so it's cheap enough to run
+    /// whenever a node comes online or a write lands short.
     /// </summary>
     private void SweepUnderReplicated()
     {
-        var minCopies = _options.Value.MinCopiesPerObject;
         if (_nodes.All.Count(n => n.IsHealthy) <= 1)
         {
             _logger.LogDebug("ReplicationMonitor: no second healthy node to copy to yet; skipping sweep.");
             return;
         }
 
-        // Page through every repairable object in (copies, bucket, key) order; the queue drops CIDs
+        // Page through every repairable object in (missing, bucket, key) order; the queue drops CIDs
         // already waiting, so repeated sweeps don't pile up duplicates.
         int found = 0, queued = 0;
-        (int Count, string Bucket, string Key)? cursor = null;
+        (int Missing, string Bucket, string Key)? cursor = null;
         while (true)
         {
-            var page = _store.ListUnderReplicated(minCopies, UnderReplicatedBatch, cursor);
+            var page = _store.ListShortOfTarget(UnderReplicatedBatch, cursor);
             foreach (var record in page)
             {
                 found++;
@@ -138,7 +141,7 @@ public sealed class ReplicationMonitor : BackgroundService
                 break;
             }
 
-            cursor = (page[^1].NodeIds.Count, page[^1].Bucket, page[^1].Key);
+            cursor = (page[^1].TargetCopies - page[^1].NodeIds.Count, page[^1].Bucket, page[^1].Key);
         }
 
         if (found == 0)
@@ -147,13 +150,11 @@ public sealed class ReplicationMonitor : BackgroundService
             return;
         }
 
-        _logger.LogInformation("ReplicationMonitor: {Found} under-replicated object(s), {Queued} newly queued for repair (need {Need} copies).",
-            found, queued, minCopies);
+        _logger.LogInformation("ReplicationMonitor: {Found} under-replicated object(s), {Queued} newly queued for repair.", found, queued);
     }
 
     private async Task ScanAsync(CancellationToken ct)
     {
-        var minCopies = _options.Value.MinCopiesPerObject;
         var knownUrls = _nodes.All.Select(n => n.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         // Pruning by absence is only safe when the node list is the operator's static config.
@@ -188,51 +189,101 @@ public sealed class ReplicationMonitor : BackgroundService
                     _store.UpdateNodeIds(record.Bucket, record.Key, record.Cid, knownReplicas);
                 }
 
-                // b+c. IntegrityChallenge each replica; remove any that fail.
-                var healthyReplicas = new List<string>(knownReplicas.Count);
+                if (record.IsErasureCoded)
+                {
+                    repairQueued += ScanShards(record) ? 1 : 0;
+                    scanned++;
+                    continue;
+                }
+
+                // b+c. Challenge each online replica (a Merkle leaf proof where a root is recorded, #8 FR6.4);
+                //      remove any that fail. Offline replicas within the grace period still count.
+                var grace = TimeSpan.FromSeconds(_options.Value.NodeGracePeriodSeconds);
+                var online = new List<NodeConnection>();
+                var counted = new List<NodeConnection?>();
                 foreach (var nodeUrl in knownReplicas)
                 {
                     var node = _nodes.All.FirstOrDefault(n =>
                         n.Id.Equals(nodeUrl, StringComparison.OrdinalIgnoreCase));
 
-                    var grace = TimeSpan.FromSeconds(_options.Value.NodeGracePeriodSeconds);
-                    if (node is null || !node.IsHealthy)
+                    if (node is null || !node.IsHealthy || node.PenaltyStage >= 3)
                     {
                         // Offline within the grace period: still counts (don't challenge). Past it, or on a
                         // node that left the node list (once this gateway has run long enough to have
                         // loaded every node), it no longer counts, so repair adds a copy elsewhere (#137).
-                        var counts = node?.CountsAsReplica(grace) ?? DateTimeOffset.UtcNow - _startedAt < grace;
+                        // A stage 3+ node is out of service: its copies don't count (#8 FR3.1).
+                        var counts = node is { PenaltyStage: >= 3 } ? false : node?.CountsAsReplica(grace) ?? DateTimeOffset.UtcNow - _startedAt < grace;
                         if (counts)
                         {
-                            healthyReplicas.Add(nodeUrl);
+                            counted.Add(node);
+                        }
+                        else
+                        {
+                            // Past the grace period: the reference is Offline until re-replication confirms (#16 FR4.1).
+                            _store.MarkOffline(record.Bucket, record.Key, record.Cid, nodeUrl);
                         }
 
                         continue;
                     }
 
-                    var intact = await ChallengeAsync(node, record.Cid, ct);
-                    if (intact)
+                    node.ProofCapable |= _store.IsMerkleCapable(node.Id);
+                    var result = await Integrity.ChallengeScheduler.ChallengeAsync(node, record, TimeSpan.FromSeconds(30), ct);
+                    if (result is Integrity.ChallengeResult.Passed or Integrity.ChallengeResult.Unreachable)
                     {
-                        healthyReplicas.Add(nodeUrl);
+                        // Unreachable is not evidence of loss: the grace-period logic catches persistent outages.
+                        online.Add(node);
+                        counted.Add(node);
                     }
                     else
                     {
                         _logger.LogWarning(
                             "Integrity challenge failed for CID {Cid} on node {Url}; removing replica.",
                             record.Cid, nodeUrl);
-                        _repairQueue.EnqueueCorruptReplica(record, nodeUrl, _store, _nodes);
+                        _challenges?.Record(node, record, result);
+                        if (_challenges is null)
+                        {
+                            _repairQueue.EnqueueCorruptReplica(record, nodeUrl, _store, _nodes);
+                        }
+
                         repairQueued++;
                     }
                 }
 
-                // d. Under-replicated? Enqueue a repair to add more copies.
-                if (healthyReplicas.Count < minCopies)
+                // d. Classify against the object's own target into exactly one tier (#8 FR4.1).
+                var target = Math.Max(1, record.TargetCopies);
+
+                // Re-replication confirmed healthy: the Offline references can go (#16 FR4.3). Until then they
+                // stay, so a node that comes back after all isn't forgotten.
+                if (online.Count >= target)
                 {
-                    _logger.LogWarning(
-                        "Object {Bucket}/{Key} has {Have} healthy replica(s), need {Need}; queuing repair.",
-                        record.Bucket, record.Key, healthyReplicas.Count, minCopies);
-                    _repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.UnderReplicated));
-                    repairQueued++;
+                    foreach (var offline in _store.OfflineReplicas(record.Bucket, record.Key))
+                    {
+                        _store.PurgeOfflineReplica(record.Bucket, record.Key, record.Cid, offline);
+                    }
+                }
+
+                var observation = new ReplicaObservation(
+                    target, online.Count, counted.Count,
+                    counted.Count(n => n is { PenaltyStage: >= 2 }),
+                    online.Count(n => n.PenaltyStage == 1),
+                    SoftViolationFixable: SoftGapFixable(record, online),
+                    OverflowFixable: OverflowFixable(record, online),
+                    CanGrow: CanGrow(record, online));
+                if (RepairClassifier.Classify(observation) is { } tier)
+                {
+                    if (tier.Reason == RepairReason.OpportunisticRedundancy)
+                    {
+                        // #8 FR8: one more copy in a region the object isn't in yet, up to the governance maximum.
+                        _store.RaiseTargetCopies(record.Bucket, record.Key, record.Cid, record.NodeIds.Count + 1);
+                    }
+
+                    var bad = tier.Reason == RepairReason.PlacementImprovement ? ConflictingReplica(record, online)?.Id : null;
+                    if (_repairQueue.Enqueue(new RepairTask(record.Cid, bad, tier.Reason) { Priority = tier.Priority }))
+                    {
+                        _logger.LogInformation("Object {Bucket}/{Key}: {Online} online / {Counted} counted of {Need}; queued {Reason} at {Priority}.",
+                            record.Bucket, record.Key, online.Count, counted.Count, target, tier.Reason, tier.Priority);
+                        repairQueued++;
+                    }
                 }
 
                 scanned++;
@@ -250,21 +301,70 @@ public sealed class ReplicationMonitor : BackgroundService
             scanned, repairQueued);
     }
 
-    private async Task<bool> ChallengeAsync(NodeConnection node, string cid, CancellationToken ct)
+    /// <summary>Shards of an erasure-coded object that still serve; P0 once no more than k remain (#8 FR5.3).</summary>
+    private bool ScanShards(ObjectRecord record)
     {
-        try
+        if (!Domain.Erasure.ErasureScheme.TryParse(record.Scheme, out var scheme))
         {
-            var resp = await node.Client.IntegrityChallengeAsync(
-                new IntegrityChallengeRequest { Cid = cid, Offset = 0, Length = 0 },
-                deadline: DateTime.UtcNow.AddSeconds(30),
-                cancellationToken: ct);
-            return resp.Sha256Hex.Equals(cid, StringComparison.OrdinalIgnoreCase);
+            return false;
         }
-        catch
+
+        var grace = TimeSpan.FromSeconds(_options.Value.NodeGracePeriodSeconds);
+        var shards = _store.Shards(record.Bucket, record.Key);
+        var nodesOf = shards.Select(s => _nodes.All.FirstOrDefault(n => n.Id.Equals(s.NodeId, StringComparison.OrdinalIgnoreCase))).ToList();
+        var online = nodesOf.Count(n => n is { IsHealthy: true, PenaltyStage: < 3 });
+        var counted = nodesOf.Count(n => n is { PenaltyStage: < 3 } && n.CountsAsReplica(grace));
+        if (counted >= scheme.TotalShards)
         {
-            // Network error during challenge — treat as unknown, not as failure.
-            // The grace-period logic in NodeRegistry will catch persistent outages.
-            return true;
+            return false;
         }
+
+        var priority = online <= scheme.DataShards ? RepairPriority.P0 : RepairPriority.P1;
+        return _repairQueue.Enqueue(new RepairTask(record.Cid, null, RepairReason.UnderReplicated) { Priority = priority });
+    }
+
+    /// <summary>A recorded soft gap (subnet/ASN/facility) whose conflicting copy now has a compliant alternative.</summary>
+    private bool SoftGapFixable(ObjectRecord record, IReadOnlyList<NodeConnection> online) =>
+        record.PlacementGaps.Any(g => g.Rule is "subnet" or "asn" or "facility") && ConflictingReplica(record, online) is not null;
+
+    /// <summary>The copy that shares a soft fault domain with another, when a writable node shares none with the rest.</summary>
+    private NodeConnection? ConflictingReplica(ObjectRecord record, IReadOnlyList<NodeConnection> online)
+    {
+        foreach (var copy in online)
+        {
+            var others = online.Where(o => o != copy).ToList();
+            if (Placement.PlacementEngine.SoftConflicts(copy, others).Count == 0)
+            {
+                continue;
+            }
+
+            var better = _nodes.Writable(record.SizeBytes).Any(n => !online.Contains(n) && n.PenaltyStage < 3
+                && (n.PublicIp.Length == 0 || others.All(o => o.PublicIp != n.PublicIp))
+                && Placement.PlacementEngine.SoftConflicts(n, others).Count == 0
+                && (record.Regions.Count == 0 || record.Regions.Contains(n.Region, StringComparer.OrdinalIgnoreCase) || !record.Regions.Contains(copy.Region, StringComparer.OrdinalIgnoreCase)));
+            if (better)
+            {
+                return copy;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>An overflow copy shares a region (recorded at write) and a region with no copy now has writable nodes.</summary>
+    private bool OverflowFixable(ObjectRecord record, IReadOnlyList<NodeConnection> online) =>
+        record.PlacementGaps.Any(g => g.Rule == "overflow-region") && FreshRegionAvailable(record, online);
+
+    /// <summary>P3 growth (#8 FR8): only global objects (a constrained one never leaves its regions, FR8.2), up to the maximum.</summary>
+    private bool CanGrow(ObjectRecord record, IReadOnlyList<NodeConnection> online) =>
+        _options.Value.Redundancy.Mode == RedundancyMode.Network && record.Regions.Count == 0
+        && record.NodeIds.Count >= record.TargetCopies && record.NodeIds.Count < _options.Value.Redundancy.MaxReplicationFactor
+        && FreshRegionAvailable(record, online);
+
+    private bool FreshRegionAvailable(ObjectRecord record, IReadOnlyList<NodeConnection> online)
+    {
+        var held = online.Select(n => n.Region).Where(r => r.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var targets = record.Regions.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _nodes.Writable(record.SizeBytes).Any(n => n.Region.Length > 0 && !held.Contains(n.Region) && !targets.Contains(n.Region) && n.PenaltyStage < 3);
     }
 }
