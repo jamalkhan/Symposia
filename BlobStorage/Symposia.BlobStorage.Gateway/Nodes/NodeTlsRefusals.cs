@@ -26,26 +26,32 @@ public sealed class NodeTlsRefusals(ILogger<NodeTlsRefusals> logger, IMeterFacto
 
     public void Refused(string nodeId, string url, TlsPinResult reason, string? presentedFingerprint)
     {
-        _refusals.Add(1, new KeyValuePair<string, object?>("reason", Tag(reason)));
+        _refusals.Add(1, new KeyValuePair<string, object?>("reason", reason.ToTag()));
         var now = DateTimeOffset.UtcNow;
         var key = (nodeId, reason);
-        if (_lastLogged.TryGetValue(key, out var last) && now - last < LogEvery)
+        // Atomic claim of the log slot: two probes refused at once log once, not twice (review: Frank #2).
+        var logged = false;
+        _lastLogged.AddOrUpdate(key, _ => { logged = true; return now; }, (_, last) =>
+        {
+            if (now - last < LogEvery) return last;
+            logged = true;
+            return now;
+        });
+        if (!logged)
         {
             return;
         }
 
-        _lastLogged[key] = now;
-        logger.LogWarning("Refused TLS to storage node {Node} at {Url}: {Reason} (presented certificate {Fingerprint}).",
-            nodeId, url, Tag(reason), presentedFingerprint ?? "none");
-    }
+        if (_lastLogged.Count > 4096)
+        {
+            // Nodes that left the registry: drop anything outside the window rather than grow forever.
+            foreach (var stale in _lastLogged.Where(e => now - e.Value >= LogEvery).Select(e => e.Key).ToList())
+            {
+                _lastLogged.TryRemove(stale, out _);
+            }
+        }
 
-    public static string Tag(TlsPinResult reason) => reason switch
-    {
-        TlsPinResult.NoCertificate => "no_certificate",
-        TlsPinResult.FingerprintMismatch => "fingerprint_mismatch",
-        TlsPinResult.NotYetValid => "not_yet_valid",
-        TlsPinResult.Expired => "expired",
-        TlsPinResult.MissingUsage => "missing_usage",
-        _ => "ok",
-    };
+        logger.LogWarning("Refused TLS to storage node {Node} at {Url}: {Reason} (presented certificate {Fingerprint}).",
+            nodeId, url, reason.ToTag(), presentedFingerprint ?? "none");
+    }
 }

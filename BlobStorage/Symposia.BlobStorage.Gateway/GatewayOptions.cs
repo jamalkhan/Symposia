@@ -28,6 +28,8 @@ public sealed class GatewayOptions
     /// </summary>
     public int StorageTlsClockSkewSeconds { get; set; } = 300;
 
+    public TimeSpan StorageTlsClockSkew => TimeSpan.FromSeconds(Math.Max(0, StorageTlsClockSkewSeconds));
+
     /// <summary>gRPC endpoint URLs of storage nodes (e.g. "http://localhost:5180").</summary>
     public string[] Nodes { get; set; } = [];
 
@@ -273,6 +275,8 @@ public sealed class CredentialAuthorityOptions
 {
     /// <summary>How far the Authority's clock may run ahead before its fresh certificate counts as not yet valid (#252).</summary>
     public int ClockSkewSeconds { get; set; } = 300;
+
+    public TimeSpan ClockSkew => TimeSpan.FromSeconds(Math.Max(0, ClockSkewSeconds));
 
     /// <summary>Base URL of the Credential Authority (HTTP/2 for Watch).</summary>
     public string Url { get; set; } = "";

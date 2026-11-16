@@ -7,6 +7,9 @@
 # Protocol definitions and the compatibility tooling
 /protocol/                                              @jamalkhan
 /tools/protocol-compat/                                 @jamalkhan
+
+# Shared security primitives (#252): certificate pinning for storage nodes and the Credential Authority
+/Security/                                              @jamalkhan
 /docs/engineering/                                      @jamalkhan
 /BlobStorage/Symposia.BlobStorage.Protocol/Protos/      @jamalkhan
 
@@ -16,7 +19,6 @@
 /Network/Symposia.Network.Node/ProtocolSchedule.cs      @jamalkhan
 /Network/Symposia.Network.Node/StorageRpcAuth.cs        @jamalkhan
 /Network/Symposia.Network.Node/StorageTlsProof.cs       @jamalkhan
-/Security/                                               @jamalkhan
 /Network/Symposia.Network.Node/NodeIdentity.cs          @jamalkhan
 /Network/Symposia.Network.Node/PeerHandshake*.cs        @jamalkhan
 /BlobStorage/Symposia.BlobStorage.Gateway/Nodes/NetworkPolicy.cs  @jamalkhan

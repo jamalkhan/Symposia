@@ -192,7 +192,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
 
                 var existing = _nodes.FirstOrDefault(n => n.Id.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
                 if (existing is not null && existing.Url.Equals(d.Url, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(existing.TlsFingerprint, d.TlsFingerprint, StringComparison.OrdinalIgnoreCase))
+                    && string.Equals(existing.TlsFingerprint, d.TlsFingerprint, StringComparison.Ordinal))
                 {
                     existing.LastSeenInSource = now;
                     continue;
@@ -209,7 +209,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                 }
 
                 var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint, _tlsRefusals,
-                    TimeSpan.FromSeconds(Math.Max(0, _options.Value.StorageTlsClockSkewSeconds)))
+                    _options.Value.StorageTlsClockSkew)
                 {
                     LastSeenInSource = now,
                     ConfiguredRegion = ConfiguredRegion(d.Url, d.Id),
@@ -363,7 +363,9 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            node.LastProbeError = ex is Grpc.Core.RpcException rpc ? $"{rpc.StatusCode}: {rpc.Status.Detail}" : ex.Message;
+            var error = ex is Grpc.Core.RpcException rpc ? $"{rpc.StatusCode}: {rpc.Status.Detail}" : ex.Message;
+            // A refused handshake surfaces as a generic transport error: lead with why it was refused (#252 review: Lenny #1).
+            node.LastProbeError = node.LastTlsRefusal is { } tls ? $"{tls} ({error})" : error;
             _logger.LogWarning("Node {Url} probe failed: {Message}", node.Url, node.LastProbeError);
             if (node.IsHealthy || node.LastUnhealthyAt == DateTimeOffset.MinValue)
                 node.LastUnhealthyAt = DateTimeOffset.UtcNow;

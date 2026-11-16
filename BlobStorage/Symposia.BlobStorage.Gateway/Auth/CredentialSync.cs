@@ -443,7 +443,7 @@ public static class AuthorityTls
         {
             var pins = o.ServerFingerprints.Select(Symposia.Security.TlsPinning.TlsPin.Normalize).ToArray();
             handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) =>
-                Symposia.Security.TlsPinning.TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow, Symposia.Security.TlsPinning.TlsPin.ServerAuth, TimeSpan.FromSeconds(Math.Max(0, o.ClockSkewSeconds)));
+                Symposia.Security.TlsPinning.TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow, Symposia.Security.TlsPinning.TlsPin.ServerAuth, o.ClockSkew);
         }
         else if (o.ServerCaPath.Length > 0)
         {

@@ -14,6 +14,24 @@ public enum TlsPinResult
     MissingUsage,
 }
 
+public static class TlsPinResults
+{
+    /// <summary>
+    /// The stable metric/log tag for a result, shared by every TLS consumer. Exhaustive: a result added without a tag
+    /// throws (and a test covers every value) rather than being counted as something it isn't.
+    /// </summary>
+    public static string ToTag(this TlsPinResult result) => result switch
+    {
+        TlsPinResult.Ok => "ok",
+        TlsPinResult.NoCertificate => "no_certificate",
+        TlsPinResult.FingerprintMismatch => "fingerprint_mismatch",
+        TlsPinResult.NotYetValid => "not_yet_valid",
+        TlsPinResult.Expired => "expired",
+        TlsPinResult.MissingUsage => "missing_usage",
+        _ => throw new ArgumentOutOfRangeException(nameof(result), result, "TlsPinResult has no tag; add one."),
+    };
+}
+
 /// <summary>
 /// Certificate pinning: the one implementation (#252), used by gateway→storage-node TLS (#142, where the node's key
 /// vouches for the pin on chain) and the Credential Authority's internal mTLS (#245). The fingerprint is a wire

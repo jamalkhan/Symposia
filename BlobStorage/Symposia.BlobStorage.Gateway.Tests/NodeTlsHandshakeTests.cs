@@ -47,12 +47,16 @@ public sealed class NodeTlsHandshakeTests : IDisposable
         return X509CertificateLoader.LoadPkcs12(cert.Export(X509ContentType.Pkcs12), null);
     }
 
+    /// <summary>What the gateway side saw: whether its certificate check passed, and the refusal it recorded.</summary>
+    private sealed record Outcome(bool ClientAccepted, string? TlsRefusal);
+
     /// <summary>
-    /// Serves TLS with <paramref name="certificate"/> and dials it through a pinned NodeConnection; true when the
-    /// server saw the handshake complete. What follows isn't gRPC, so the call itself is expected to fail. Under TLS 1.3
-    /// the server finishes before the client checks the certificate, so a refusal shows only in the sink.
+    /// Serves TLS with <paramref name="certificate"/> and dials it through a pinned NodeConnection. Under TLS 1.3 the
+    /// server finishes its side before the client checks the certificate, so success is judged on the client: the
+    /// server waits for the HTTP/2 preface, which a client only sends once it has accepted the certificate (review:
+    /// Lenny #2). What follows isn't gRPC, so the call itself is expected to fail either way.
     /// </summary>
-    private static async Task<bool> HandshakeAsync(X509Certificate2 certificate, ITlsRefusalSink sink, string? pin = null)
+    private static async Task<Outcome> HandshakeAsync(X509Certificate2 certificate, ITlsRefusalSink sink, string? pin = null)
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -68,7 +72,9 @@ public sealed class NodeTlsHandshakeTests : IDisposable
                     ServerCertificate = certificate,
                     ApplicationProtocols = [SslApplicationProtocol.Http2],
                 });
-                return true;
+                var preface = new byte[24];
+                return await tls.ReadAtLeastAsync(preface, preface.Length, throwOnEndOfStream: false) == preface.Length
+                    && preface.AsSpan().SequenceEqual("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8);
             }
             catch (Exception ex) when (ex is IOException or System.Security.Authentication.AuthenticationException)
             {
@@ -86,7 +92,7 @@ public sealed class NodeTlsHandshakeTests : IDisposable
         {
         }
 
-        return await server.WaitAsync(TimeSpan.FromSeconds(10));
+        return new Outcome(await server.WaitAsync(TimeSpan.FromSeconds(10)), node.LastTlsRefusal);
     }
 
     [Fact]
@@ -95,7 +101,7 @@ public sealed class NodeTlsHandshakeTests : IDisposable
         using var created = NodeAlias::Symposia.BlobStorage.StorageNode.Grpc.StorageTlsCertificate.LoadOrCreate(Path.Combine(_dir, "node.pfx"), "0xnode");
         var sink = new Recorder();
 
-        Assert.True(await HandshakeAsync(created, sink));
+        Assert.Equal(new Outcome(true, null), await HandshakeAsync(created, sink));
         Assert.Empty(sink.Refusals);
     }
 
@@ -105,7 +111,7 @@ public sealed class NodeTlsHandshakeTests : IDisposable
         using var cert = Cert(TimeSpan.FromMinutes(3), TlsPin.ServerAuth);
         var sink = new Recorder();
 
-        Assert.True(await HandshakeAsync(cert, sink));
+        Assert.Equal(new Outcome(true, null), await HandshakeAsync(cert, sink));
         Assert.Empty(sink.Refusals);
     }
 
@@ -117,8 +123,7 @@ public sealed class NodeTlsHandshakeTests : IDisposable
         using var cert = Cert(TimeSpan.FromMinutes(notBeforeMinutes), usage);
         var sink = new Recorder();
 
-        await HandshakeAsync(cert, sink);
-
+        Assert.Equal(new Outcome(false, "tls: " + reason.ToTag()), await HandshakeAsync(cert, sink));
         Assert.Equal([("0xnode", reason)], sink.Refusals);
     }
 
@@ -129,8 +134,7 @@ public sealed class NodeTlsHandshakeTests : IDisposable
         using var other = Cert(TimeSpan.FromMinutes(-5), TlsPin.ServerAuth);
         var sink = new Recorder();
 
-        await HandshakeAsync(cert, sink, pin: TlsPin.Fingerprint(other));
-
+        Assert.Equal(new Outcome(false, "tls: fingerprint_mismatch"), await HandshakeAsync(cert, sink, pin: TlsPin.Fingerprint(other)));
         Assert.Equal([("0xnode", TlsPinResult.FingerprintMismatch)], sink.Refusals);
     }
 
@@ -140,8 +144,59 @@ public sealed class NodeTlsHandshakeTests : IDisposable
         using var cert = Cert(TimeSpan.FromMinutes(-5), TlsPin.ServerAuth);
         var sink = new Recorder();
 
-        Assert.True(await HandshakeAsync(cert, sink, pin: TlsPin.Fingerprint(cert).ToUpperInvariant()));
+        Assert.Equal(new Outcome(true, null), await HandshakeAsync(cert, sink, pin: TlsPin.Fingerprint(cert).ToUpperInvariant()));
         Assert.Empty(sink.Refusals);
+    }
+
+    private sealed class ThrowingSink : ITlsRefusalSink
+    {
+        public void Refused(string nodeId, string url, TlsPinResult reason, string? presentedFingerprint) => throw new InvalidOperationException("meter down");
+    }
+
+    [Fact]
+    public async Task AFaultingSink_NeitherFlipsTheOutcome_NorLosesTheReason() // review: Lenny #7
+    {
+        using var cert = Cert(TimeSpan.FromMinutes(-5), TlsPin.ClientAuth);
+
+        Assert.Equal(new Outcome(false, "tls: missing_usage"), await HandshakeAsync(cert, new ThrowingSink()));
+    }
+
+    [Fact]
+    public async Task TheRegistrysProbeError_LeadsWithTheTlsReason() // review: Lenny #1, through NodeRegistry's own probe
+    {
+        using var cert = Cert(TimeSpan.FromMinutes(-5), TlsPin.ClientAuth);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                var client = await listener.AcceptTcpClientAsync();
+                _ = Task.Run(async () =>
+                {
+                    using (client)
+                    await using (var tls = new SslStream(client.GetStream()))
+                    {
+                        try { await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = cert, ApplicationProtocols = [SslApplicationProtocol.Http2] }); }
+                        catch (Exception) { }
+                    }
+                });
+            }
+        });
+        var options = Microsoft.Extensions.Options.Options.Create(new GatewayOptions { MetadataDbPath = Path.Combine(_dir, "meta.db"), ProbeIntervalSeconds = 3600 });
+        var store = new Metadata.GatewayMetadataStore(options);
+        store.Initialize();
+        using var nodes = new NodeRegistry(options, store, NullLogger<NodeRegistry>.Instance, new NetworkPolicy(options, NullLogger<NetworkPolicy>.Instance),
+            tlsRefusals: new Recorder());
+        nodes.Sync([new StorageNodeDescriptor("0xnode", $"https://127.0.0.1:{port}", TlsPin.Fingerprint(cert))]);
+
+        await nodes.StartAsync(CancellationToken.None); // probes at once
+        var node = nodes.All.Single();
+        for (var i = 0; i < 100 && node.LastProbeError is null; i++) await Task.Delay(50);
+        await nodes.StopAsync(CancellationToken.None);
+
+        Assert.StartsWith("tls: missing_usage (", node.LastProbeError);
     }
 
     [Fact]

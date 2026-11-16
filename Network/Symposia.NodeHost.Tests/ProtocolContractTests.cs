@@ -172,10 +172,11 @@ public sealed class ProtocolContractTests
                 var fingerprint = tls.GetProperty("fingerprint").GetString()!;
                 var (chain, registry, node, notAfter) = (tls.GetProperty("chainId").GetUInt64(), tls.GetProperty("registryAddress").GetString()!,
                     tls.GetProperty("node").GetString()!, tls.GetProperty("notAfterUnixSeconds").GetInt64());
+                var at = DateTimeOffset.FromUnixTimeSeconds(tls.GetProperty("notBeforeUnixSeconds").GetInt64() + 3600); // fixed clock: never rots
                 Assert.Equal(fingerprint, Symposia.Security.TlsPinning.TlsPin.Fingerprint(der));
                 Assert.Equal(tls.GetProperty("digest").GetString(),
                     Convert.ToHexStringLower(StorageTlsProof.Digest(chain, registry, node, Convert.FromHexString(fingerprint), notAfter)));
-                Assert.Null(StorageTlsProof.Validate(chain, registry, node, fingerprint, notAfter, tls.GetProperty("proof").GetString(), DateTimeOffset.UtcNow));
+                Assert.Null(StorageTlsProof.Validate(chain, registry, node, fingerprint, notAfter, tls.GetProperty("proof").GetString(), at));
                 break;
             default:
                 Assert.Fail($"{fixture}: no deserialization test for fixture folder '{kind}'. Add one here.");

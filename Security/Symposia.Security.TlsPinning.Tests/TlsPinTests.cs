@@ -24,15 +24,29 @@ public sealed class TlsPinTests
     private static X509Certificate2 Valid(params string[] usages) => Cert(Now.AddMinutes(-5), Now.AddDays(1), usages);
 
     [Fact]
-    public void GoldenFingerprint_IsTheWireFormat() // AC3, TC4.1
+    public void GoldenFingerprint_IsTheWireFormat_AndAPreviousReleaseCertificatePassesTheNewChecks() // AC3, TC4.1, TC5.2
     {
+        // Minted by the #142 release's own StorageTlsCertificate.LoadOrCreate (see the fixture's description).
+        const string Golden = "96cce2d7939658c4b3cbf21a3b639ab8d688b5bad832960337529bd06b257569";
         using var fixture = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "fixtures", "0.1.0-node-certificate.json")));
         var der = Convert.FromBase64String(fixture.RootElement.GetProperty("certificateDer").GetString()!);
-        var expected = fixture.RootElement.GetProperty("fingerprint").GetString();
+        var at = DateTimeOffset.FromUnixTimeSeconds(fixture.RootElement.GetProperty("notBeforeUnixSeconds").GetInt64() + 3600);
+        using var cert = X509CertificateLoader.LoadCertificate(der);
 
-        Assert.Equal(expected, TlsPin.Fingerprint(der));
-        Assert.Equal(expected, TlsPin.Fingerprint(X509CertificateLoader.LoadCertificate(der)));
-        Assert.Equal(expected, Convert.ToHexStringLower(SHA256.HashData(der))); // the #142 formula, spelled out
+        Assert.Equal(Golden, fixture.RootElement.GetProperty("fingerprint").GetString());
+        Assert.Equal(Golden, TlsPin.Fingerprint(der));
+        Assert.Equal(Golden, TlsPin.Fingerprint(cert));
+        Assert.Equal(Golden, Convert.ToHexStringLower(SHA256.HashData(der))); // the #142 formula, spelled out
+        Assert.Equal(TlsPinResult.Ok, TlsPin.Check(cert, [Golden], at, TlsPin.ServerAuth));
+    }
+
+    [Fact]
+    public void EveryResult_HasADistinctTag() // review: Carl #2, Frank #4
+    {
+        var tags = Enum.GetValues<TlsPinResult>().Select(r => r.ToTag()).ToList();
+
+        Assert.Equal(tags.Count, tags.Distinct().Count());
+        Assert.Throws<ArgumentOutOfRangeException>(() => ((TlsPinResult)99).ToTag());
     }
 
     [Theory]

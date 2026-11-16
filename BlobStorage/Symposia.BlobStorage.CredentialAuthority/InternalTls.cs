@@ -78,7 +78,7 @@ public sealed class InternalTls(InternalTlsBinding binding, IOptionsMonitor<Auth
                     // Pins, not a CA: chain errors on self-signed gateway certificates are expected. The allowlist is
                     // re-read per handshake, so adding or removing a gateway needs no restart.
                     https.ClientCertificateValidation = (cert, _, _) =>
-                        TlsPin.Matches(cert, Pins(builder.Configuration), DateTimeOffset.UtcNow, TlsPin.ClientAuth, TimeSpan.FromSeconds(Math.Max(0, o.ClockSkewSeconds)));
+                        TlsPin.Matches(cert, Pins(builder.Configuration), DateTimeOffset.UtcNow, TlsPin.ClientAuth, o.ClockSkew);
                 });
             });
         });
@@ -133,7 +133,7 @@ public sealed class InternalTls(InternalTlsBinding binding, IOptionsMonitor<Auth
         }
 
         var tls = options.CurrentValue.InternalTls;
-        var pins = tls.ClientFingerprints.Select(TlsPin.Normalize);
-        return TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow, TlsPin.ClientAuth, TimeSpan.FromSeconds(Math.Max(0, tls.ClockSkewSeconds))) ? null : "client certificate not allowlisted";
+        var pins = tls.ClientFingerprints.Select(TlsPin.Normalize).ToArray(); // materialised: no lazy work in the check (review: Carl #5)
+        return TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow, TlsPin.ClientAuth, tls.ClockSkew) ? null : "client certificate not allowlisted";
     }
 }

@@ -35,6 +35,9 @@ def diff_schema(base: dict[str, Any], head: dict[str, Any], path: str = "$") -> 
     if base_types and not base_types <= head_types:
         problems.append(f"{path}: type narrowed from {sorted(base_types)} to {sorted(head_types)}")
 
+    if head.get("pattern") is not None and head.get("pattern") != base.get("pattern"):
+        problems.append(f"{path}: pattern added or changed (values older peers send may no longer match)")
+
     newly_required = set(head.get("required", [])) - set(base.get("required", []))
     for name in sorted(newly_required):
         problems.append(f"{path}.{name}: became required")
@@ -55,12 +58,15 @@ def diff_schema(base: dict[str, Any], head: dict[str, Any], path: str = "$") -> 
 
 
 def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> list[str]:
-    """The subset of JSON Schema our protocol schemas use: type, required, properties, items."""
+    """The subset of JSON Schema our protocol schemas use: type, required, properties, items, pattern."""
     problems: list[str] = []
     types = _types(schema)
     actual = _json_type(instance)
     if types and actual not in types and not (actual == "integer" and "number" in types):
         return [f"{path}: is {actual}, schema allows {sorted(types)}"]
+
+    if isinstance(instance, str) and "pattern" in schema and not re.search(schema["pattern"], instance):
+        problems.append(f"{path}: does not match pattern {schema['pattern']}")
 
     if isinstance(instance, dict):
         for name in schema.get("required", []):

@@ -150,7 +150,7 @@ public sealed class NetworkPolicy : INetworkPolicy
             var invalid = StorageTlsProof.Validate(o.ChainId, o.NodeRegistryAddress, node, storage.TlsFingerprint,
                 storage.TlsNotAfter, storage.TlsProof, now);
             return invalid is null
-                ? new AdmitResult(new StorageNodeDescriptor(node, tlsUrl, Symposia.Security.TlsPinning.TlsPin.Normalize(storage.TlsFingerprint!)), null, verdict.Upcoming)
+                ? new AdmitResult(new StorageNodeDescriptor(node, tlsUrl, storage.TlsFingerprint!.ToLowerInvariant()), null, verdict.Upcoming)
                 : AdmitResult.Refuse($"it offers TLS storage but {invalid}", verdict.Upcoming);
         }
 

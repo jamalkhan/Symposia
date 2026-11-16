@@ -103,7 +103,7 @@ Gateways pin each storage node to the certificate fingerprint that the node's ke
 - its NotBefore date is more than `Gateway:StorageTlsClockSkewSeconds` ahead (default 300);
 - it declares extended key usages without serverAuth.
 
-Certificates the node creates itself always pass. Refusals are counted in `storage_node_tls_refusals_total{reason}`, where `reason` is one of `fingerprint_mismatch`, `expired`, `not_yet_valid`, `missing_usage` or `no_certificate`. Each refusal is also logged as a warning with the node ID, at most once every five minutes per node and reason. The node's `LastProbeError` shows `tls: <reason>`. If you supply your own node certificate (`StorageNode:TlsCertificatePath`), it must either list serverAuth or carry no extended key usage at all.
+Certificates the node creates itself always pass. Refusals are counted in `storage_node_tls_refusals_total{reason}`, where `reason` is one of `fingerprint_mismatch`, `expired`, `not_yet_valid`, `missing_usage` or `no_certificate`. Each refusal is also logged as a warning with the node ID, at most once every five minutes per node and reason. The node's `LastProbeError` starts with `tls: <reason>`. Like the other gateway settings, `StorageTlsClockSkewSeconds` is read when a node's connection is built, so a change takes effect after a gateway restart. If you supply your own node certificate (`StorageNode:TlsCertificatePath`), it must either list serverAuth or carry no extended key usage at all.
 
 ### Credential sync, mutual TLS and master keys
 

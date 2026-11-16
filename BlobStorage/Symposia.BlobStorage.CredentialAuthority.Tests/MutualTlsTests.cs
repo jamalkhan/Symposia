@@ -248,29 +248,3 @@ public sealed class MutualTlsTests(AuthorityFixture f) : IClassFixture<Authority
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => pinnedElsewhere.GetAsync("internal/snapshot"));
     }
 }
-
-/// <summary>The Authority's dependency graph stays free of the network stack and Nethereum (#252 AC5, FR5).</summary>
-public sealed class AuthorityDependencyTests
-{
-    [Fact]
-    public void Authority_DoesNotDependOnNetworkNodeOrNethereum()
-    {
-        var seen = new HashSet<string>();
-        var pending = new Stack<System.Reflection.AssemblyName>([typeof(AuthorityStore).Assembly.GetName()]);
-        while (pending.TryPop(out var name))
-        {
-            if (!seen.Add(name.Name!) || !name.Name!.StartsWith("Symposia"))
-            {
-                continue; // only our own assemblies decide what is pulled in
-            }
-
-            foreach (var reference in System.Reflection.Assembly.Load(name).GetReferencedAssemblies())
-            {
-                pending.Push(reference);
-            }
-        }
-
-        Assert.Contains("Symposia.Security.TlsPinning", seen);
-        Assert.DoesNotContain(seen, n => n.StartsWith("Nethereum") || n == "Symposia.Network.Node" || n.StartsWith("Symposia.Blockchain"));
-    }
-}

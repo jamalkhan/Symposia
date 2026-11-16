@@ -52,18 +52,26 @@ public sealed class NodeConnection : IDisposable
         try
         {
             var result = TlsPin.Check(certificate, pins, DateTimeOffset.UtcNow, TlsPin.ServerAuth, clockSkew);
+            LastTlsRefusal = result == TlsPinResult.Ok ? null : "tls: " + result.ToTag();
             if (result == TlsPinResult.Ok)
             {
                 return true;
             }
 
-            LastProbeError = "tls: " + NodeTlsRefusals.Tag(result);
-            refusals?.Refused(Id, Url, result, certificate is null ? null : TlsPin.Fingerprint(certificate));
+            try
+            {
+                refusals?.Refused(Id, Url, result, certificate is null ? null : TlsPin.Fingerprint(certificate));
+            }
+            catch (Exception)
+            {
+                // A logging or metrics fault must not change the outcome or lose the reason (review: Lenny #7).
+            }
+
             return false;
         }
-        catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or ArgumentException)
+        catch (Exception)
         {
-            LastProbeError = "tls: unreadable certificate";
+            LastTlsRefusal = "tls: unreadable certificate";
             return false; // never throw from the handshake callback
         }
     }
@@ -97,6 +105,12 @@ public sealed class NodeConnection : IDisposable
     /// NodeId differs marks the node unhealthy, so an endpoint can't pose as another node.
     /// </summary>
     public string? ExpectedNodeId { get; }
+
+    /// <summary>
+    /// Why this node's last TLS handshake was refused (<c>tls: &lt;reason&gt;</c>), or null after an accepted one. Kept
+    /// apart from <see cref="LastProbeError"/>, which the failed call overwrites with the transport's generic error.
+    /// </summary>
+    public string? LastTlsRefusal { get; private set; }
 
     /// <summary>Why the last probe failed (e.g. "Unauthenticated: caller is not registered"), or null after a success.</summary>
     public string? LastProbeError { get; set; }

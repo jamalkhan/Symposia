@@ -34,6 +34,8 @@ public sealed class InternalTlsOptions
     /// <summary>How far a gateway's clock may run ahead before its fresh certificate counts as not yet valid (#252).</summary>
     public int ClockSkewSeconds { get; set; } = 300;
 
+    public TimeSpan ClockSkew => TimeSpan.FromSeconds(Math.Max(0, ClockSkewSeconds));
+
     /// <summary>Unset: Off in Development or when no certificate is configured (with a warning), else Permissive.</summary>
     public InternalTlsMode? Mode { get; set; }
 
