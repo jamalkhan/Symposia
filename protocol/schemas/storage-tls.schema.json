@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jamalkhan/Symposia/protocol/schemas/storage-tls.schema.json",
+  "title": "Storage-node TLS pin and proof vector",
+  "description": "A storage node's certificate, its pin (lower-case hex SHA-256 of the DER) and the node key's EIP-191 proof over it (#142). Golden: the fingerprint and digest are wire contracts (#252). Properties may be added, never removed, retyped or made required (#146).",
+  "type": "object",
+  "required": [
+    "certificateDer",
+    "fingerprint",
+    "chainId",
+    "registryAddress",
+    "node",
+    "notAfterUnixSeconds",
+    "digest",
+    "proof"
+  ],
+  "properties": {
+    "description": {
+      "type": "string"
+    },
+    "certificateDer": {
+      "type": "string"
+    },
+    "fingerprint": {
+      "type": "string"
+    },
+    "chainId": {
+      "type": "integer"
+    },
+    "registryAddress": {
+      "type": "string"
+    },
+    "node": {
+      "type": "string"
+    },
+    "notAfterUnixSeconds": {
+      "type": "integer"
+    },
+    "digest": {
+      "type": "string"
+    },
+    "proof": {
+      "type": "string"
+    }
+  }
+}

@@ -22,6 +22,12 @@ public sealed class GatewayOptions
     /// </summary>
     public int MinCopiesPerObject { get; set; } = 1;
 
+    /// <summary>
+    /// How far a storage node's clock may run ahead before its fresh TLS certificate counts as not yet valid (#252).
+    /// Expiry has no tolerance: it is the replay boundary the node's proof signs.
+    /// </summary>
+    public int StorageTlsClockSkewSeconds { get; set; } = 300;
+
     /// <summary>gRPC endpoint URLs of storage nodes (e.g. "http://localhost:5180").</summary>
     public string[] Nodes { get; set; } = [];
 
@@ -265,6 +271,9 @@ public sealed class GcOptions
 
 public sealed class CredentialAuthorityOptions
 {
+    /// <summary>How far the Authority's clock may run ahead before its fresh certificate counts as not yet valid (#252).</summary>
+    public int ClockSkewSeconds { get; set; } = 300;
+
     /// <summary>Base URL of the Credential Authority (HTTP/2 for Watch).</summary>
     public string Url { get; set; } = "";
 

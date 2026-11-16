@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
+    <ProjectReference Include="..\..\Security\Symposia.Security.TlsPinning\Symposia.Security.TlsPinning.csproj" />
     <ProjectReference Include="..\Symposia.BlobStorage.Domain\Symposia.BlobStorage.Domain.csproj" />
     <ProjectReference Include="..\Symposia.BlobStorage.Protocol\Symposia.BlobStorage.Protocol.csproj" />
     <ProjectReference Include="..\..\Network\Symposia.Network.Node\Symposia.Network.Node.csproj" />

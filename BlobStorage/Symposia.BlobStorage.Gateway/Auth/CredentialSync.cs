@@ -436,19 +436,19 @@ public static class AuthorityTls
         if (o.ClientCertificatePath.Length > 0)
         {
             handler.SslOptions.ClientCertificates =
-                [Domain.TlsPin.Load(o.ClientCertificatePath, o.ClientKeyPath, o.ClientCertificatePassword)];
+                [Symposia.Security.TlsPinning.TlsPin.Load(o.ClientCertificatePath, o.ClientKeyPath, o.ClientCertificatePassword)];
         }
 
         if (o.ServerFingerprints.Length > 0)
         {
-            var pins = o.ServerFingerprints.Select(Domain.TlsPin.Normalize).ToArray();
+            var pins = o.ServerFingerprints.Select(Symposia.Security.TlsPinning.TlsPin.Normalize).ToArray();
             handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) =>
-                Domain.TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow, Domain.TlsPin.ServerAuth);
+                Symposia.Security.TlsPinning.TlsPin.Matches(certificate, pins, DateTimeOffset.UtcNow, Symposia.Security.TlsPinning.TlsPin.ServerAuth, TimeSpan.FromSeconds(Math.Max(0, o.ClockSkewSeconds)));
         }
         else if (o.ServerCaPath.Length > 0)
         {
             // A CA file holds no private key: CreateFromPemFile would demand one and throw (review: Carl #1).
-            var ca = Domain.TlsPin.LoadCertificate(o.ServerCaPath);
+            var ca = Symposia.Security.TlsPinning.TlsPin.LoadCertificate(o.ServerCaPath);
             handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
             {
                 if (certificate is null || errors.HasFlag(System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch)

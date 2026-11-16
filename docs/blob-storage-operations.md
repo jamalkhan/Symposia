@@ -95,6 +95,16 @@ A bucket belongs to the tenant that created it. Any other tenant gets `403 Cross
 
 **Secrets at rest.** SigV4 needs the secret itself to check a signature, so secrets can't be stored only as a one-way hash. The Authority stores each one AES-GCM encrypted, alongside a SHA-256 hash, and never returns it after issuance. Gateways receive it over the service-token channel and hold it only in memory.
 
+### Storage-node TLS pinning
+
+Gateways pin each storage node to the certificate fingerprint that the node's key signed on chain (BlobStorage #142). Since #252 this pinning shares its rules with the Authority's mutual TLS. A node certificate is refused when:
+- it isn't the pinned one;
+- it has expired (no tolerance: the expiry is what the node's proof signs);
+- its NotBefore date is more than `Gateway:StorageTlsClockSkewSeconds` ahead (default 300);
+- it declares extended key usages without serverAuth.
+
+Certificates the node creates itself always pass. Refusals are counted in `storage_node_tls_refusals_total{reason}`, where `reason` is one of `fingerprint_mismatch`, `expired`, `not_yet_valid`, `missing_usage` or `no_certificate`. Each refusal is also logged as a warning with the node ID, at most once every five minutes per node and reason. The node's `LastProbeError` shows `tls: <reason>`. If you supply your own node certificate (`StorageNode:TlsCertificatePath`), it must either list serverAuth or carry no extended key usage at all.
+
 ### Credential sync, mutual TLS and master keys
 
 BlobStorage #245. Gateways pull only what changed (`/internal/changes`). A credential's secret crosses the wire only when the credential is created. A full snapshot is pulled only at startup, every `Gateway:CredentialAuthority:ReconcileMinutes` (default 10, jittered), and when the Authority answers 410. The Authority returns 410 when a gateway is further behind than `ChangeLogRetentionDays` (default 7), when the Authority's database has been restored, or when the delta would exceed `MaxDeltaEntities`.
@@ -102,7 +112,7 @@ BlobStorage #245. Gateways pull only what changed (`/internal/changes`). A crede
 **Turning on mutual TLS for `/internal/*` and Watch:**
 1. Give the Authority a server certificate (`CredentialAuthority:InternalTls:CertificatePath`). The internal API then listens on `InternalTls:Port` (default 5443). `/v1` and `/health` stay on `OperatorPort`, or on whatever `Kestrel:Endpoints` declares.
 2. Set `InternalTls:Mode` to `Permissive`. Outside Development this is already the default, and an Authority with no certificate configured refuses to start rather than serve the internal API without TLS. Only an explicit `Mode: Off` turns it off. The mode and port are read once at startup, so changing either needs a restart. The allowlist reloads live.
-3. Give each gateway a client certificate (`Gateway:CredentialAuthority:ClientCertificatePath`). Pin the Authority with `ServerFingerprints`, or trust it through a CA with `ServerCaPath`. Add each gateway's fingerprint to `InternalTls:ClientFingerprints`. A fingerprint is the hex SHA-256 of the certificate's DER, the same format storage-node pins use. Colons and upper case (as `openssl x509 -fingerprint -sha256` prints them) are accepted. Anything that isn't 64 hex digits fails startup. A certificate is refused before its NotBefore date or after its NotAfter date, and also when it declares extended key usages without serverAuth (for the Authority) or clientAuth (for gateways).
+3. Give each gateway a client certificate (`Gateway:CredentialAuthority:ClientCertificatePath`). Pin the Authority with `ServerFingerprints`, or trust it through a CA with `ServerCaPath`. Add each gateway's fingerprint to `InternalTls:ClientFingerprints`. A fingerprint is the hex SHA-256 of the certificate's DER, the same format storage-node pins use. Colons and upper case (as `openssl x509 -fingerprint -sha256` prints them) are accepted. Anything that isn't 64 hex digits fails startup. A certificate is refused after its NotAfter date, and before its NotBefore date minus a clock-skew allowance (`ClockSkewSeconds` on both ends, default 300). It is also refused when it declares extended key usages without serverAuth (for the Authority) or clientAuth (for gateways).
 4. Watch `authority_internal_requests_without_cert_total`. When it stays at 0, set `Mode` to `Enforced`. Production must run `Enforced`.
 
 **Rotating the master key:**

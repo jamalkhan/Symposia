@@ -28,6 +28,7 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
     private Timer? _probeTimer;
 
     private readonly IStorageRpcSigner? _signer;
+    private readonly ITlsRefusalSink? _tlsRefusals;
     private readonly INetworkPolicy _policy;
     private readonly HashSet<string> _tlsSeen = new(StringComparer.OrdinalIgnoreCase);
 
@@ -36,8 +37,10 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
         GatewayMetadataStore store,
         ILogger<NodeRegistry> logger,
         INetworkPolicy policy,
-        IStorageRpcSigner? signer = null)
+        IStorageRpcSigner? signer = null,
+        ITlsRefusalSink? tlsRefusals = null)
     {
+        _tlsRefusals = tlsRefusals;
         _signer = signer;
         _policy = policy;
         _options = options;
@@ -205,7 +208,8 @@ public sealed class NodeRegistry : INodeRegistry, IHostedService, IDisposable
                     squatter.Dispose();
                 }
 
-                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint)
+                var conn = new NodeConnection(d.Url, d.Id == d.Url ? null : d.Id, _signer, d.TlsFingerprint, _tlsRefusals,
+                    TimeSpan.FromSeconds(Math.Max(0, _options.Value.StorageTlsClockSkewSeconds)))
                 {
                     LastSeenInSource = now,
                     ConfiguredRegion = ConfiguredRegion(d.Url, d.Id),

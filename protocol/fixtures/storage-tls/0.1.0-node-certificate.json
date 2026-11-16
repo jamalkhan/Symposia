@@ -1,0 +1,11 @@
+{
+  "description": "A storage node's TLS certificate as #142 creates it, its pin, and the node key's proof over it. Fixes the fingerprint and proof digest as wire contracts (#252).",
+  "certificateDer": "MIIByTCCAW+gAwIBAgIIbUdDDl8TotowCgYIKoZIzj0EAwIwVTEeMBwGA1UEChMVU3ltcG9zaWEgc3RvcmFnZSBub2RlMTMwMQYDVQQDEyoweDJjNzUzNkUzNjA1RDlDMTZhN2EzRDdiMTg5OGU1MjkzOTZhNjVjMjMwIBcNMjYxMTE1MDAwMDAwWhgPMjEwMDAxMDEwMDAwMDBaMFUxHjAcBgNVBAoTFVN5bXBvc2lhIHN0b3JhZ2Ugbm9kZTEzMDEGA1UEAxMqMHgyYzc1MzZFMzYwNUQ5QzE2YTdhM0Q3YjE4OThlNTI5Mzk2YTY1YzIzMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMlJI5BVIoVzrXZNdchqjR1f9IEO1UXvSZXeXRbIfHe83YeFQIx6PVQpQcKF9C6qDHzrCOpO91FYm9LbUMKtwr6MnMCUwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqGSM49BAMCA0gAMEUCIGm0fueOyajf2bDXNpeHuBdNgqiBlrb13Ej0UC1qAvo2AiEAmP0aCBbGtWGCbh6oRk2NYrVnaQeH2m3o9oyTWDF4JGs=",
+  "fingerprint": "38f92522a687e52c0ff4c8aa3c9fbc9defe08e48680e181074fa3b9e6a1df2a0",
+  "chainId": 84532,
+  "registryAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "node": "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
+  "notAfterUnixSeconds": 4102444800,
+  "digest": "8d88be3e4e6d33737771103cc62054c6d0320029546718d28d3cdd0ebd99ecf4",
+  "proof": "0xb169fc1fdce869e290499c7dac135d5967382ed20b7e2eaf7c076cf30c93efa476adab74f8b4c18e43106506e1b5a2dfae165df32cf97ba9896eb1f5dc5fbfbf1c"
+}

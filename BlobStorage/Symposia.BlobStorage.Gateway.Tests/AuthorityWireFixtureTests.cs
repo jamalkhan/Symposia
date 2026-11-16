@@ -39,17 +39,3 @@ public sealed class AuthorityWireFixtureTests
         }
     }
 }
-
-/// <summary>One fingerprint format for every pin in the system (#245, #142): runbooks produce one kind of pin.</summary>
-public sealed class TlsPinTests
-{
-    [Fact]
-    public void AuthorityPins_AndStorageNodePins_AreTheSameFingerprint()
-    {
-        using var key = System.Security.Cryptography.ECDsa.Create();
-        using var cert = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=x", key, System.Security.Cryptography.HashAlgorithmName.SHA256)
-            .CreateSelfSigned(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddDays(1));
-
-        Assert.Equal(Symposia.Network.Node.StorageTlsProof.Fingerprint(cert.RawData), Symposia.BlobStorage.Domain.TlsPin.Fingerprint(cert));
-    }
-}

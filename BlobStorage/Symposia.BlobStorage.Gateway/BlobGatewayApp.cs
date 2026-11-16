@@ -70,6 +70,7 @@ public static class BlobGatewayApp
         // The IHostedService delegate resolves NodeRegistry, so NodeRegistry must stay registered.
         // INodeRegistry is separately registered so QuorumWriter, endpoints, and background services
         // can inject it without knowing the concrete type (and tests can replace it).
+        builder.Services.AddSingleton<ITlsRefusalSink, NodeTlsRefusals>(); // #252
         builder.Services.AddSingleton<NodeRegistry>();
         builder.Services.AddSingleton<INodeRegistry>(sp => sp.GetRequiredService<NodeRegistry>());
         builder.Services.AddHostedService(sp => sp.GetRequiredService<NodeRegistry>());

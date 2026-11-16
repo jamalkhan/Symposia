@@ -166,6 +166,17 @@ public sealed class ProtocolContractTests
                 var delta = JsonSerializer.Deserialize<Symposia.BlobStorage.Domain.Credentials.AuthorityDelta>(text, AuthorityJson)!;
                 Assert.True(delta.Version > delta.FromVersion, $"{fixture}: a delta moves forward");
                 break;
+            case "storage-tls": // gateway → storage node pin and proof (#142, #252): byte-exact, not just parseable
+                var tls = JsonDocument.Parse(text).RootElement;
+                var der = Convert.FromBase64String(tls.GetProperty("certificateDer").GetString()!);
+                var fingerprint = tls.GetProperty("fingerprint").GetString()!;
+                var (chain, registry, node, notAfter) = (tls.GetProperty("chainId").GetUInt64(), tls.GetProperty("registryAddress").GetString()!,
+                    tls.GetProperty("node").GetString()!, tls.GetProperty("notAfterUnixSeconds").GetInt64());
+                Assert.Equal(fingerprint, Symposia.Security.TlsPinning.TlsPin.Fingerprint(der));
+                Assert.Equal(tls.GetProperty("digest").GetString(),
+                    Convert.ToHexStringLower(StorageTlsProof.Digest(chain, registry, node, Convert.FromHexString(fingerprint), notAfter)));
+                Assert.Null(StorageTlsProof.Validate(chain, registry, node, fingerprint, notAfter, tls.GetProperty("proof").GetString(), DateTimeOffset.UtcNow));
+                break;
             default:
                 Assert.Fail($"{fixture}: no deserialization test for fixture folder '{kind}'. Add one here.");
                 break;

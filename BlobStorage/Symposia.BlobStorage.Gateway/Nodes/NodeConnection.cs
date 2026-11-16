@@ -1,4 +1,5 @@
 using Symposia.Network.Node;
+using Symposia.Security.TlsPinning;
 using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
 
@@ -12,12 +13,16 @@ public sealed class NodeConnection : IDisposable
 {
     private readonly GrpcChannel _channel;
 
-    public NodeConnection(string url, string? expectedNodeId = null, IStorageRpcSigner? signer = null, string? tlsFingerprint = null)
+    public NodeConnection(string url, string? expectedNodeId = null, IStorageRpcSigner? signer = null, string? tlsFingerprint = null,
+        ITlsRefusalSink? refusals = null, TimeSpan? clockSkew = null)
     {
         TlsFingerprint = tlsFingerprint;
         Url = url;
         ExpectedNodeId = expectedNodeId;
         Id = expectedNodeId ?? url;
+        // Normalised once: the registry vouches for 64 hex digits (StorageTlsProof.Validate), but a malformed pin
+        // must refuse the handshake, not throw here. An empty pin set matches nothing.
+        string[] pins = TlsPin.TryNormalize(tlsFingerprint, out var pin) ? [pin] : [];
         // Allow unencrypted HTTP/2 (h2c) for node communication in dev.
         // Production: set TLS on the channel or terminate TLS at a sidecar.
         // A short connect timeout keeps a powered-off node from stalling writes and probes.
@@ -27,14 +32,12 @@ public sealed class NodeConnection : IDisposable
             {
                 ConnectTimeout = TimeSpan.FromSeconds(5),
                 EnableMultipleHttp2Connections = true,
-                // TLS (#142): trust exactly the certificate whose fingerprint the node's key vouched for.
-                // Pinning replaces CA validation, so chain/name errors are expected and ignored.
+                // TLS (#142): trust exactly the certificate whose fingerprint the node's key vouched for, inside its
+                // validity (NotBefore with clock skew) and allowed for server auth (#252). Pinning replaces CA
+                // validation, so chain/name errors are expected and ignored.
                 SslOptions = tlsFingerprint is null ? new() : new System.Net.Security.SslClientAuthenticationOptions
                 {
-                    RemoteCertificateValidationCallback = (_, certificate, _, _) => StorageTlsProof.PinMatches(
-                        certificate?.GetRawCertData(),
-                        certificate is System.Security.Cryptography.X509Certificates.X509Certificate2 c2 ? new DateTimeOffset(c2.NotAfter.ToUniversalTime(), TimeSpan.Zero) : null,
-                        tlsFingerprint, DateTimeOffset.UtcNow),
+                    RemoteCertificateValidationCallback = (_, certificate, _, _) => Verify(certificate, pins, refusals, clockSkew),
                 },
             },
         });
@@ -42,6 +45,27 @@ public sealed class NodeConnection : IDisposable
         Client = signer is not null && expectedNodeId is not null
             ? new Protocol.StorageNode.StorageNodeClient(_channel.Intercept(new StorageRpcSigningInterceptor(signer, expectedNodeId)))
             : new Protocol.StorageNode.StorageNodeClient(_channel);
+    }
+
+    private bool Verify(System.Security.Cryptography.X509Certificates.X509Certificate? certificate, string[] pins, ITlsRefusalSink? refusals, TimeSpan? clockSkew)
+    {
+        try
+        {
+            var result = TlsPin.Check(certificate, pins, DateTimeOffset.UtcNow, TlsPin.ServerAuth, clockSkew);
+            if (result == TlsPinResult.Ok)
+            {
+                return true;
+            }
+
+            LastProbeError = "tls: " + NodeTlsRefusals.Tag(result);
+            refusals?.Refused(Id, Url, result, certificate is null ? null : TlsPin.Fingerprint(certificate));
+            return false;
+        }
+        catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or ArgumentException)
+        {
+            LastProbeError = "tls: unreadable certificate";
+            return false; // never throw from the handshake callback
+        }
     }
 
     // For integration tests: inject a pre-built client backed by an in-process TestServer.
