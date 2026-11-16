@@ -99,6 +99,22 @@ public sealed class ManifestFeedAndEpochTests : IClassFixture<StorageNodeIntegra
     }
 
     [Fact]
+    public async Task ACursorFromAnotherFeedIncarnation_Resets()
+    {
+        await WriteAsync("incarnation.txt", "seq spaces differ after a rebuild " + Guid.NewGuid());
+        Assert.NotEmpty(Manifest.FeedId);
+
+        using var same = _client.WatchManifest(new WatchManifestRequest { AfterSeq = Manifest.HeadSeq(), FeedId = Manifest.FeedId });
+        var resumed = await ReadUntilAsync(same, e => e.Kind == ManifestEvent.Types.Kind.CaughtUp);
+        Assert.DoesNotContain(resumed, e => e.Reset);
+        Assert.All(resumed, e => Assert.Equal(Manifest.FeedId, e.FeedId));
+
+        // A rebuilt manifest restarts seq at 1: a cursor that happens to be in range must still resync.
+        using var other = _client.WatchManifest(new WatchManifestRequest { AfterSeq = 1, FeedId = "an-older-incarnation" });
+        Assert.True((await ReadUntilAsync(other, e => e.Kind == ManifestEvent.Types.Kind.CaughtUp))[0].Reset);
+    }
+
+    [Fact]
     public async Task ManifestProof_ProvesAgainstTheSubmittedRoot_AndNotForAbsentCids()
     {
         var cid = await WriteAsync("proven.txt", "attested this epoch " + Guid.NewGuid(), tenant: "alice");

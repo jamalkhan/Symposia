@@ -38,7 +38,7 @@ A missing or bad signature gets `401` and a JSON error. The S3 surface keeps S3'
 | `PUT /v1/account/quota` | Set a self-imposed limit: `{"tenant_self_limit_bytes": 107374182400}`. |
 | `DELETE /v1/account/quota/self-limit` | Remove it. The platform-imposed limit still applies. |
 | `GET /v1/buckets/{bucket}/quota` | The bucket's quota and usage, including `object_count`. |
-| `PUT /v1/buckets/{bucket}/quota` | Set `{"limit_bytes": …, "max_object_count": …}` (either or both). Enforced in addition to the account quota. |
+| `PUT /v1/buckets/{bucket}/quota` | Replace the bucket's quota with `{"limit_bytes": …, "max_object_count": …}` (either or both; an omitted one is cleared). Enforced in addition to the account quota. |
 | `DELETE /v1/buckets/{bucket}/quota` | Remove it. The account quota still applies. |
 
 Keys may contain `/`. Capabilities attach to the object path as query flags (`?meta`, and `?history` from #204), so a key ending in a word like `history` is never ambiguous.
@@ -69,7 +69,7 @@ S3 has no equivalent API; AWS offers per-object history only through access logs
 
 ## Quotas
 
-Every write is checked before any data moves. That covers PUT, multipart Complete (for the whole object; parts don't count until then) and copy (at the destination). The write is checked against the account's effective limit, the lower of the platform-imposed limit and your self-limit. It is also checked against the bucket's byte and object-count quotas. Usage is logical size, counted once however many copies are stored. It includes noncurrent versions and soft-deleted objects still in their recovery window. A write that lands exactly on a limit fits. Once a quota is full, nothing more fits. Concurrent writes reserve their size first, so together they can't overrun a limit.
+Every write is checked before any data moves. That covers PUT, multipart Complete (for the whole object; parts don't count until then) and copy (at the destination). The write is checked against the account's effective limit, the lower of the platform-imposed limit and your self-limit. It is also checked against the bucket's byte and object-count quotas. Usage is logical size, counted once however many copies are stored. It includes noncurrent versions and soft-deleted objects still in their recovery window. A write that lands exactly on a limit fits. An overwrite in an unversioned bucket needs room only for its growth. Concurrent new writes to the same key each reserve an object slot until they commit. Once a quota is full, nothing more fits. Concurrent writes reserve their size first, so together they can't overrun a limit.
 
 The quota endpoints use the snake_case shape from `quota-management.md`: `limit_bytes`, `used_bytes`, `reserved_bytes` (in-flight writes), `available_bytes`, `utilization_pct`, `platform_imposed_limit_bytes`, `tenant_self_limit_bytes`, `effective_limit_bytes`, `egress_limit_bytes_per_month` and `free_tier`. A null limit means unlimited, and then `available_bytes` and `utilization_pct` are null too.
 

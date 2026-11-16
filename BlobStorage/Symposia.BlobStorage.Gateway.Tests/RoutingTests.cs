@@ -63,7 +63,11 @@ public sealed class RoutingTests
 
         cache.Evict("n1", "c1");
         Assert.Empty(cache.Holders("c1"));
-        Assert.Equal(0, cache.CountFor("n1"));
+        Assert.Equal(1, cache.CountFor("n1")); // the feed-derived count is left for the digest compare
+
+        cache.Learn("n2", "c9"); // out of band: routable, but never counted against n2's digest
+        Assert.Equal(["n2"], cache.Holders("c9"));
+        Assert.Equal(0, cache.CountFor("n2"));
 
         cache.Forget("n1");
         Assert.DoesNotContain("n1", cache.Nodes);
@@ -212,8 +216,8 @@ public sealed class RoutingTests
 
         chain.Roots[7] = frozen.Root;
         cache.Apply(node.Id, newer, held: true); // gossip says the node holds it
-        Assert.Equal(Attestation.Attested, await disputes.ResolveAsync(node, attested, CancellationToken.None));
-        Assert.Equal(Attestation.NotAttested, await disputes.ResolveAsync(node, newer, CancellationToken.None));
+        Assert.Equal(Attestation.Attested, await disputes.ResolveAsync(node, attested, 7, CancellationToken.None));
+        Assert.Equal(Attestation.NotAttested, await disputes.ResolveAsync(node, newer, 7, CancellationToken.None));
         Assert.Empty(cache.Holders(newer)); // the chain wins: evicted
         Assert.Equal((node.Id, newer), (sink.Reports.Single().Node, sink.Reports.Single().Cid)); // for the epoch's penalty/reward calculation
 

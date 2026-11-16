@@ -21,7 +21,8 @@ public static class PeerRoutingEndpoints
     public static void Map(IEndpointRouteBuilder app) =>
         app.MapGet(Path + "/{cid}", (string cid, HttpContext ctx, RoutingCache cache, GatewayMetadataStore store, IOptions<GatewayOptions> options) =>
         {
-            if (!Authorized(ctx.Request.Headers.Authorization.ToString(), options.Value.Routing.PeerToken))
+            var routing = options.Value.Routing;
+            if (!routing.AcceptedPeerTokens.Prepend(routing.PeerToken).Any(t => Authorized(ctx.Request.Headers.Authorization.ToString(), t)))
             {
                 return Results.Unauthorized();
             }

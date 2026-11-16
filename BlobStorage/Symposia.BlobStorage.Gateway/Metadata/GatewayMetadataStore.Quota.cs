@@ -103,6 +103,14 @@ public sealed partial class GatewayMetadataStore
                        (SELECT COUNT(*) FROM objects o WHERE o.bucket = b.name)
                 FROM buckets b
                 """);
+
+            // Accounts that already exist were unlimited before quotas; they stay so (not free tier) until billing sets
+            // a contracted limit. Only accounts first seen from now on start on the free tier (review: Carl #4).
+            Run(conn, tx, """
+                INSERT OR IGNORE INTO account_quota (tenant_id, platform_limit_bytes, free_tier, created_at, updated_at)
+                SELECT tenant_id, NULL, 0, $now, $now FROM tenant_usage
+                UNION SELECT DISTINCT tenant_id, NULL, 0, $now, $now FROM buckets WHERE tenant_id IS NOT NULL
+                """, ("$now", Now()));
         }
 
         tx.Commit();
@@ -240,6 +248,27 @@ public sealed partial class GatewayMetadataStore
         using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
         var now = Now();
         var account = EnsureAccount(conn, tx, tenantId, defaults);
+
+        // An overwrite replaces an object rather than adding one, and in an unversioned bucket its old bytes are freed
+        // by the commit, so only the growth needs room (review: Lenny #2).
+        long newObject = 1;
+        using (var existing = Query(conn, """
+            SELECT o.size_bytes, COALESCE((SELECT versioning FROM bucket_lifecycle WHERE bucket = $b), 0)
+            FROM objects o WHERE o.bucket = $b AND o.key = $k
+            """, ("$b", bucket), ("$k", key)))
+        {
+            existing.Transaction = tx;
+            using var r = existing.ExecuteReader();
+            if (r.Read())
+            {
+                newObject = 0;
+                if (r.GetInt64(1) == 0)
+                {
+                    incomingBytes = Math.Max(0, incomingBytes - r.GetInt64(0));
+                }
+            }
+        }
+
         if (accountLimit(account) is { } limit)
         {
             var usage = AccountUsage(conn, tx, tenantId, now);
@@ -249,12 +278,6 @@ public sealed partial class GatewayMetadataStore
             }
         }
 
-        long newObject;
-        using (var exists = Query(conn, "SELECT 1 FROM objects WHERE bucket = $b AND key = $k", ("$b", bucket), ("$k", key)))
-        {
-            exists.Transaction = tx;
-            newObject = exists.ExecuteScalar() is null ? 1 : 0; // an overwrite replaces an object, it doesn't add one
-        }
 
         using (var read = Query(conn, "SELECT limit_bytes, max_object_count FROM bucket_quota WHERE bucket = $b", ("$b", bucket)))
         {

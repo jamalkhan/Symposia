@@ -134,6 +134,59 @@ public sealed class QuotaTests
         Assert.Null(Store(cluster).GetBucketQuota(TestCluster.Bucket));
     }
 
+    [Fact]
+    public async Task ARecreatedBucket_StartsWithoutTheOldQuotaOrUsage()
+    {
+        using var cluster = await StartAsync();
+        var signed = cluster.Signed();
+        await signed.PutAsync("/v1/buckets/recycled", null);
+        await signed.PutAsJsonAsync("/v1/buckets/recycled/quota", new { limit_bytes = 100 });
+        await signed.PutAsync("/v1/buckets/recycled/objects/x", new ByteArrayContent(new byte[60]));
+        await signed.DeleteAsync("/v1/buckets/recycled/objects/x");
+        Store(cluster).DeleteBucket("recycled"); // the soft-deleted version's bytes are still billed to the old owner
+
+        await signed.PutAsync("/v1/buckets/recycled", null);
+
+        Assert.Null(Store(cluster).GetBucketQuota("recycled"));
+        Assert.Equal(0, Store(cluster).BucketUsage("recycled").UsedBytes);
+    }
+
+    [Fact]
+    public async Task Overwrites_NeedRoomOnlyForTheirGrowth()
+    {
+        using var cluster = await StartAsync();
+        Store(cluster).SetBucketQuota(TestCluster.Bucket, 100, null);
+        Assert.Equal(HttpStatusCode.OK, (await PutV1Async(cluster, "backup", 90)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK, (await PutV1Async(cluster, "backup", 95)).StatusCode); // replaces 90 bytes: needs 5 more
+        Assert.Equal(95, Store(cluster).BucketUsage(TestCluster.Bucket).UsedBytes);
+        Assert.Equal((HttpStatusCode)507, (await PutV1Async(cluster, "backup", 101)).StatusCode);
+    }
+
+    [Fact]
+    public void Upgrading_KeepsExistingTenantsUnlimited_WhileNewOnesGetTheFreeTier()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"symposia-quota-upgrade-{Guid.NewGuid():N}", "m.db");
+        var store = new GatewayMetadataStore(Microsoft.Extensions.Options.Options.Create(new GatewayOptions { MetadataDbPath = path }));
+        store.Initialize();
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+        {
+            // What a pre-#15 database looks like: usage, no quota tables.
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DROP TABLE bucket_usage; DELETE FROM account_quota; INSERT INTO tenant_usage (tenant_id, bytes) VALUES ('veteran', 50000000000);";
+            cmd.ExecuteNonQuery();
+        }
+
+        store.Initialize();
+
+        var freeTier = new AccountDefaults(10L << 30, null, FreeTier: true);
+        var veteran = store.Account("veteran", freeTier);
+        Assert.Equal((null, false), (veteran.PlatformLimitBytes, veteran.FreeTier));
+        Assert.Equal((10L << 30, true), (store.Account("newcomer", freeTier).PlatformLimitBytes, store.Account("newcomer", freeTier).FreeTier));
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+    }
+
     // ── Reservations (AC3, AC4) ───────────────────────────────────────────────
 
     [Fact]

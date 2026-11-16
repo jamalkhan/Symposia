@@ -21,6 +21,13 @@ public sealed class RoutingCache(Health.GatewayMetrics? metrics = null)
     private readonly ConcurrentDictionary<string, bool> _caughtUp = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new();
 
+    // Holdings learned outside the feeds (peer gateways, chain proofs), kept apart so the per-node counts stay purely
+    // feed-derived: the watcher compares them with each node's own Active count (review: Carl #1).
+    private readonly ConcurrentDictionary<(string Cid, string Node), DateTimeOffset> _learned = new();
+
+    /// <summary>How long an out-of-band holding is trusted without the node's feed confirming it.</summary>
+    public static readonly TimeSpan LearnedTtl = TimeSpan.FromMinutes(10);
+
     /// <summary>When the cache first became warm; null until then.</summary>
     public DateTimeOffset? WarmSince { get; private set; }
 
@@ -34,8 +41,19 @@ public sealed class RoutingCache(Health.GatewayMetrics? metrics = null)
     public bool IsWarm => !_caughtUp.IsEmpty && _caughtUp.Values.All(c => c);
 
     /// <summary>Nodes that, by their own feeds, currently hold <paramref name="cid"/>.</summary>
-    public IReadOnlyList<string> Holders(string cid) =>
-        _byCid.TryGetValue(cid, out var holders) ? holders.Keys.ToList() : [];
+    public IReadOnlyList<string> Holders(string cid)
+    {
+        var holders = _byCid.TryGetValue(cid, out var fed) ? fed.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase) : [];
+        var now = DateTimeOffset.UtcNow;
+        foreach (var ((learnedCid, node), expires) in _learned)
+        {
+            if (learnedCid != cid) continue;
+            if (expires > now) holders.Add(node);
+            else _learned.TryRemove((learnedCid, node), out _);
+        }
+
+        return [.. holders];
+    }
 
     /// <summary>CIDs <paramref name="nodeId"/> currently holds, by its feed.</summary>
     public int CountFor(string nodeId) => _byNode.TryGetValue(nodeId, out var held) ? held.Count : 0;
@@ -104,18 +122,17 @@ public sealed class RoutingCache(Health.GatewayMetrics? metrics = null)
     /// <summary>The node said it doesn't hold <paramref name="cid"/> (a read answered NotFound, or a dispute went against it).</summary>
     public void Evict(string nodeId, string cid)
     {
+        // Routing stops at once, but the per-node set stays as the node's feed reported it, so the digest compare
+        // isn't skewed (review: Frank #2). The next feed event or snapshot for that CID is authoritative again.
+        _learned.TryRemove((cid, nodeId), out _);
         lock (_gate)
         {
             RemoveHolder(cid, nodeId);
-            if (_byNode.TryGetValue(nodeId, out var held))
-            {
-                held.TryRemove(cid, out _);
-            }
         }
     }
 
     /// <summary>A holding learned outside the feed (a peer gateway or an on-chain proof), until the feed says otherwise.</summary>
-    public void Learn(string nodeId, string cid) => Apply(nodeId, cid, held: true);
+    public void Learn(string nodeId, string cid) => _learned[(cid, nodeId)] = DateTimeOffset.UtcNow + LearnedTtl;
 
     private void RemoveHolder(string cid, string nodeId)
     {

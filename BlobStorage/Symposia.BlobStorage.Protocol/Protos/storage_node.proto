@@ -130,6 +130,8 @@ message ListBlobsChunk {
 
 message WatchManifestRequest {
   int64 after_seq = 1; // 0 = start with a snapshot
+  // The feed_id the cursor came from; a different one (the manifest was rebuilt and seq restarted) means a snapshot.
+  string feed_id = 2;
 }
 
 message ManifestEvent {
@@ -151,6 +153,7 @@ message ManifestEvent {
   int64 head_seq = 8;        // the node's latest seq (CAUGHT_UP, HEARTBEAT)
   int64 active_count = 9;    // Active blobs the node holds (CAUGHT_UP, HEARTBEAT): a cheap anti-entropy digest
   int32 schema_version = 10; // 1 for this shape; consumers ignore fields they don't know
+  string feed_id = 11;       // identifies this manifest's seq space; changes when the manifest is recreated
 }
 
 message ManifestProofRequest {

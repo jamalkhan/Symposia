@@ -22,9 +22,19 @@ public sealed class ReplicaLocator(
 {
     public const string HttpClientName = "peer-gateways";
 
+    // CIDs nothing could locate recently: a hot missing object doesn't fan proofs out to the fleet on every read (review: Carl #3).
+    private static readonly TimeSpan MissTtl = TimeSpan.FromSeconds(30);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _misses = new(StringComparer.Ordinal);
+
     /// <summary>Holders of <paramref name="cid"/> outside <paramref name="tried"/>, healthiest first; empty when none is found.</summary>
     public async Task<IReadOnlyList<NodeConnection>> LocateAsync(string cid, IReadOnlySet<string> tried, CancellationToken ct)
     {
+        if (_misses.TryGetValue(cid, out var until) && until > DateTimeOffset.UtcNow)
+        {
+            metrics.RoutingLookups.WithLabels("none").Inc();
+            return [];
+        }
+
         var fromPeers = await AskPeersAsync(cid, ct);
         var found = S3.ReplicaReader.Order(nodes, fromPeers).Where(n => !tried.Contains(n.Id)).ToList();
         if (found.Count > 0)
@@ -42,6 +52,15 @@ public sealed class ReplicaLocator(
                 metrics.RoutingLookups.WithLabels("chain").Inc();
                 found.ForEach(n => cache.Learn(n.Id, cid));
                 return found;
+            }
+        }
+
+        _misses[cid] = DateTimeOffset.UtcNow + MissTtl;
+        if (_misses.Count > 10_000)
+        {
+            foreach (var (key, expiry) in _misses)
+            {
+                if (expiry <= DateTimeOffset.UtcNow) _misses.TryRemove(key, out _);
             }
         }
 
@@ -81,7 +100,8 @@ public sealed class ReplicaLocator(
 
     private async Task<List<NodeConnection>> AskChainAsync(string cid, IReadOnlySet<string> tried, CancellationToken ct)
     {
-        var candidates = nodes.Healthy.Where(n => n.ExpectedNodeId is not null && !tried.Contains(n.Id)).ToList();
+        var candidates = nodes.Healthy.Where(n => n.ExpectedNodeId is not null && !tried.Contains(n.Id))
+            .OrderBy(_ => Random.Shared.Next()).Take(Math.Max(1, options.Value.Routing.ChainFallbackMaxNodes)).ToList();
         var attested = new System.Collections.Concurrent.ConcurrentBag<NodeConnection>();
         await Parallel.ForEachAsync(candidates,
             new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.Value.Routing.ChainFallbackParallelism), CancellationToken = ct },

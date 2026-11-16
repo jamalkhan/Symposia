@@ -49,14 +49,17 @@ internal static class AdminEndpoints
     private static async Task<IResult> ResolveDispute(DisputeRequest request, Nodes.INodeRegistry nodes, Routing.EpochRootDisputes disputes,
         CancellationToken ct)
     {
+        if (request.Epoch is not { } epoch)
+            return Results.BadRequest(new { error = "epoch is required: the epoch by which the node should have held the CID" });
+
         if (!Domain.Cid.TryParse(request.Cid, out _) || nodes.All.FirstOrDefault(n => string.Equals(n.Id, request.Node, StringComparison.OrdinalIgnoreCase)) is not { } node)
             return Results.BadRequest(new { error = "cid must be a CID and node a known node ID" });
 
-        var outcome = await disputes.ResolveAsync(node, request.Cid, ct);
-        return Results.Ok(new { node = node.Id, cid = request.Cid, outcome = outcome.ToString() });
+        var outcome = await disputes.ResolveAsync(node, request.Cid, epoch, ct);
+        return Results.Ok(new { node = node.Id, cid = request.Cid, epoch, outcome = outcome.ToString() });
     }
 
-    private sealed record DisputeRequest(string Node, string Cid);
+    private sealed record DisputeRequest(string Node, string Cid, ulong? Epoch);
 
     private static IResult SetPenalty(PenaltyRequest request, Penalties.ManualPenaltySource penalties)
     {

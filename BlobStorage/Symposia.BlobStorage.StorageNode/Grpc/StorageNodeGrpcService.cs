@@ -334,7 +334,8 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         var ct = context.CancellationToken;
         var cursor = request.AfterSeq;
         var oldest = _manifestStore.OldestSeq();
-        if (cursor <= 0 || cursor < oldest - 1 || cursor > _manifestStore.HeadSeq())
+        var otherFeed = request.FeedId.Length > 0 && request.FeedId != _manifestStore.FeedId;
+        if (otherFeed || cursor <= 0 || cursor < oldest - 1 || cursor > _manifestStore.HeadSeq())
         {
             // Read the head before the snapshot: anything committed while it streams is replayed after it.
             cursor = _manifestStore.HeadSeq();
@@ -356,7 +357,10 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
             if (reset)
             {
                 // An empty manifest still has to tell the caller to forget what it knew.
-                await responseStream.WriteAsync(new ManifestEvent { Kind = ManifestEvent.Types.Kind.CaughtUp, Reset = true, HeadSeq = cursor, SchemaVersion = 1 }, ct);
+                await responseStream.WriteAsync(new ManifestEvent
+                {
+                    Kind = ManifestEvent.Types.Kind.CaughtUp, Reset = true, HeadSeq = cursor, SchemaVersion = 1, FeedId = _manifestStore.FeedId,
+                }, ct);
             }
         }
 
@@ -399,11 +403,16 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         }
     }
 
-    private ManifestEvent Digest(ManifestEvent.Types.Kind kind, long cursor) =>
-        new() { Kind = kind, HeadSeq = cursor, ActiveCount = _manifestStore.CountActive(), SchemaVersion = 1 };
-
-    private static ManifestEvent ToEvent(ManifestChange change, bool reset) => new()
+    // The digest's head and count are read together; a client compares counts only when that head is its cursor.
+    private ManifestEvent Digest(ManifestEvent.Types.Kind kind, long cursor)
     {
+        var (head, active) = _manifestStore.Digest();
+        return new() { Kind = kind, HeadSeq = Math.Max(head, cursor), ActiveCount = active, SchemaVersion = 1, FeedId = _manifestStore.FeedId };
+    }
+
+    private ManifestEvent ToEvent(ManifestChange change, bool reset) => new()
+    {
+        FeedId = _manifestStore.FeedId,
         Kind = change.Removed ? ManifestEvent.Types.Kind.Removed : ManifestEvent.Types.Kind.Put,
         Seq = change.Seq,
         Cid = change.Cid.Value,
@@ -432,8 +441,9 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
             return Task.FromResult(new ManifestProofResponse { Found = false, Epoch = request.Epoch });
         }
 
-        var leaves = _manifestStore.EpochLeaves(epoch.Epoch);
-        var index = leaves.ToList().FindIndex(l => l.Cid.Equals(cid));
+        var proofIndex = _manifestStore.ProofIndex(epoch.Epoch);
+        var leaves = proofIndex.Leaves;
+        var index = proofIndex.IndexOf.TryGetValue(cid.Value, out var found) ? found : -1;
         var response = new ManifestProofResponse
         {
             Epoch = epoch.Epoch,
@@ -449,7 +459,7 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         response.LeafIndex = index;
         response.SizeBytes = leaves[index].SizeBytes;
         response.TenantId = leaves[index].TenantId;
-        response.Siblings.AddRange(MerkleTree.Proof(ManifestMerkle.LeafHashes(leaves), index).Select(ByteString.CopyFrom));
+        response.Siblings.AddRange(MerkleTree.Proof(proofIndex.Hashes, index).Select(ByteString.CopyFrom));
         return Task.FromResult(response);
     }
 

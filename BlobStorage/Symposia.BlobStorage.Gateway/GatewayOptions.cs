@@ -355,6 +355,12 @@ public sealed class RoutingOptions
 
     /// <summary>How many nodes the on-chain fallback asks for a proof at once.</summary>
     public int ChainFallbackParallelism { get; set; } = 8;
+
+    /// <summary>At most this many nodes (chosen at random) are asked per lookup, so a miss doesn't scale with the fleet.</summary>
+    public int ChainFallbackMaxNodes { get; set; } = 32;
+
+    /// <summary>Further tokens accepted from peers alongside <see cref="PeerToken"/>, for rotating it without downtime.</summary>
+    public string[] AcceptedPeerTokens { get; set; } = [];
 }
 
 /// <summary>Quota management (#15, Requirements/BlobStorage/quota-management.md).</summary>

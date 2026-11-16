@@ -59,6 +59,7 @@ public sealed class ManifestLayerTests : IDisposable
         Assert.NotNull(store.QuarantinedPath);
         Assert.True(File.Exists(store.QuarantinedPath)); // moved aside, never deleted
         Assert.Equal(0, store.CountBlobs());
+        Assert.NotEmpty(store.FeedId); // a fresh incarnation: gateways resync instead of trusting old cursors
     }
 
     [Fact]

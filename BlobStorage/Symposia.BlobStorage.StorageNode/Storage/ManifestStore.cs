@@ -59,6 +59,9 @@ public sealed class ManifestStore
     /// </summary>
     public bool NeedsRebuild { get; private set; }
 
+    /// <summary>This manifest's change-feed incarnation; sequence numbers are only comparable within one.</summary>
+    public string FeedId { get; private set; } = "";
+
     /// <summary>Where a corrupt database was moved, when one was.</summary>
     public string? QuarantinedPath { get; private set; }
 
@@ -124,8 +127,19 @@ public sealed class ManifestStore
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_blob_manifest_status ON blob_manifest (status, cid);
+
+                -- One row: the change feed's incarnation. A rebuilt manifest gets a new one, so a gateway whose cursor
+                -- belongs to the old seq space resyncs instead of skipping the restarted sequence (review: Frank #1).
+                CREATE TABLE IF NOT EXISTS manifest_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT OR IGNORE INTO manifest_meta (name, value) VALUES ('feed_id', lower(hex(randomblob(16))));
                 """;
             command.ExecuteNonQuery();
+        }
+
+        using (var feed = connection.CreateCommand())
+        {
+            feed.CommandText = "SELECT value FROM manifest_meta WHERE name = 'feed_id'";
+            FeedId = (string)feed.ExecuteScalar()!;
         }
 
         BackfillReferences(connection);
@@ -527,6 +541,21 @@ public sealed class ManifestStore
         return events;
     }
 
+    /// <summary>The head seq and Active count read together, so a heartbeat's digest matches its cursor (review: Frank #4).</summary>
+    public (long HeadSeq, long Active) Digest()
+    {
+        using var connection = OpenConnection();
+        using var tx = connection.BeginTransaction(deferred: true);
+        using var command = connection.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText =
+            "SELECT (SELECT COALESCE(MAX(seq), 0) FROM manifest_events), (SELECT COUNT(*) FROM blob_manifest WHERE status = $s)";
+        command.Parameters.AddWithValue("$s", nameof(BlobStatus.Active));
+        using var reader = command.ExecuteReader();
+        reader.Read();
+        return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
     /// <summary>Completes the next time the manifest changes (or immediately if it changed since this was last armed).</summary>
     public Task WaitForChangeAsync(CancellationToken ct) => Volatile.Read(ref _changed).Task.WaitAsync(ct);
 
@@ -600,6 +629,34 @@ public sealed class ManifestStore
     {
         using var connection = OpenConnection();
         return ReadEpochLeaves(connection, null, epoch);
+    }
+
+    /// <summary>A frozen epoch's leaves, leaf hashes and CID positions, for answering proofs without rebuilding them per request.</summary>
+    public sealed record EpochProofIndex(ulong Epoch, IReadOnlyList<ManifestLeaf> Leaves, IReadOnlyList<byte[]> Hashes, IReadOnlyDictionary<string, int> IndexOf);
+
+    private EpochProofIndex? _proofIndex;
+
+    /// <summary>
+    /// The proof index for <paramref name="epoch"/>, built once and cached (frozen epochs never change), so a proof costs
+    /// one sibling walk, not a whole tree (review: Carl #3).
+    /// </summary>
+    public EpochProofIndex ProofIndex(ulong epoch)
+    {
+        if (Volatile.Read(ref _proofIndex) is { } cached && cached.Epoch == epoch)
+        {
+            return cached;
+        }
+
+        var leaves = EpochLeaves(epoch);
+        var index = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < leaves.Count; i++)
+        {
+            index.TryAdd(leaves[i].Cid.Value, i); // a CID's first leaf (several tenants may share it)
+        }
+
+        var built = new EpochProofIndex(epoch, leaves, ManifestMerkle.LeafHashes(leaves), index);
+        Volatile.Write(ref _proofIndex, built);
+        return built;
     }
 
     /// <summary>Records how submitting <paramref name="epoch"/>'s root ended; <paramref name="onChain"/> when the chain holds it.</summary>

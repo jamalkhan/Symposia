@@ -40,11 +40,11 @@ public sealed class EpochRootDisputes(
     public bool Enabled => chain is not null;
 
     /// <summary>Asks <paramref name="node"/> to prove it holds <paramref name="cid"/> in its latest on-chain root.</summary>
-    public async Task<(Attestation Outcome, ulong Epoch)> CheckAsync(NodeConnection node, string cid, CancellationToken ct)
+    public async Task<(Attestation Outcome, ulong Epoch)> CheckAsync(NodeConnection node, string cid, CancellationToken ct, ulong epoch = 0)
     {
         try
         {
-            return await CheckOrThrowAsync(node, cid, ct);
+            return await CheckOrThrowAsync(node, cid, epoch, ct);
         }
         catch (HttpRequestException ex)
         {
@@ -54,7 +54,7 @@ public sealed class EpochRootDisputes(
         }
     }
 
-    private async Task<(Attestation Outcome, ulong Epoch)> CheckOrThrowAsync(NodeConnection node, string cid, CancellationToken ct)
+    private async Task<(Attestation Outcome, ulong Epoch)> CheckOrThrowAsync(NodeConnection node, string cid, ulong epoch, CancellationToken ct)
     {
         if (chain is null || node.ExpectedNodeId is not { } address)
         {
@@ -64,7 +64,7 @@ public sealed class EpochRootDisputes(
         ManifestProofResponse proof;
         try
         {
-            proof = await node.Client.GetManifestProofAsync(new ManifestProofRequest { Cid = cid }, deadline: DateTime.UtcNow.AddSeconds(10), cancellationToken: ct);
+            proof = await node.Client.GetManifestProofAsync(new ManifestProofRequest { Cid = cid, Epoch = epoch }, deadline: DateTime.UtcNow.AddSeconds(10), cancellationToken: ct);
         }
         catch (RpcException ex) when (!ct.IsCancellationRequested)
         {
@@ -92,12 +92,14 @@ public sealed class EpochRootDisputes(
     }
 
     /// <summary>
-    /// Resolves a dispute over whether <paramref name="node"/> holds <paramref name="cid"/> (FR3.4): the on-chain
-    /// root decides. Against the node, its routing entry is evicted and the incident reported.
+    /// Resolves a dispute over whether <paramref name="node"/> held <paramref name="cid"/> at <paramref name="epoch"/> (FR3.4):
+    /// that epoch's on-chain root decides. The caller names the epoch because it asserts the CID existed by then; a blob
+    /// written after a node's latest root is legitimately absent from it, so "latest" never costs a node a penalty
+    /// (review: Carl #2). Against the node, its routing entry is evicted and the incident reported.
     /// </summary>
-    public async Task<Attestation> ResolveAsync(NodeConnection node, string cid, CancellationToken ct)
+    public async Task<Attestation> ResolveAsync(NodeConnection node, string cid, ulong epoch, CancellationToken ct)
     {
-        var (outcome, epoch) = await CheckAsync(node, cid, ct);
+        var (outcome, _) = await CheckAsync(node, cid, ct, epoch);
         metrics.Disputes.WithLabels(outcome.ToString()).Inc();
         switch (outcome)
         {

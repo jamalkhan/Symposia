@@ -58,9 +58,14 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         var tenantId = ctx.Items["TenantId"] as string ?? "";
         var expected = S3.UploadBody.ExpectedLength(ctx.Request);
         // Reserved before placement or any node contact (#1 FR-2, #15 FR4); released however the write ends.
-        using var reservation = quota.Reserve(tenantId, bucket, key, expected);
-        var (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected,
-            Placement.RegionAssignmentResolver.FromHeader(ctx.Request));
+        ObjectRecord? record;
+        bool replaced;
+        using (quota.Reserve(tenantId, bucket, key, expected))
+        {
+            (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected,
+                Placement.RegionAssignmentResolver.FromHeader(ctx.Request));
+        } // released the moment the commit has charged usage, so the bytes aren't counted twice (review: Lenny #3)
+
         if (record is not null)
         {
             quota.AfterCommit(tenantId, bucket);
@@ -85,9 +90,12 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         var written = History.HistoryCapture.Mark(ctx, History.HistoryOperation.Insert, bucket, key, api);
         // No bytes move, but the destination gains a logical object of the source's size (#15 FR2).
         var tenantId = ctx.Items["TenantId"] as string ?? "";
-        using var reservation = quota.Reserve(tenantId, bucket, key, source.SizeBytes);
         var copy = source with { Bucket = bucket, Key = key, LastModified = DateTimeOffset.UtcNow };
-        Fill(written, copy, store.PutObject(copy));
+        using (quota.Reserve(tenantId, bucket, key, source.SizeBytes))
+        {
+            Fill(written, copy, store.PutObject(copy));
+        }
+
         quota.AfterCommit(tenantId, bucket);
         return copy;
     }

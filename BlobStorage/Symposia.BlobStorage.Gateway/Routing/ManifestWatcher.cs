@@ -68,7 +68,13 @@ public sealed class ManifestWatcher(
             existing?.Stop.Cancel();
             var stop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             cache.Watching(id);
-            _watches[id] = new Watch(node, stop, Task.Run(() => RunAsync(node, stop.Token), CancellationToken.None));
+            // The old feed finishes before the new one starts, so none of its writes land after the new snapshot's reset (review: Frank #3).
+            var previous = existing?.Task ?? Task.CompletedTask;
+            _watches[id] = new Watch(node, stop, Task.Run(async () =>
+            {
+                await previous;
+                await RunAsync(node, stop.Token);
+            }, CancellationToken.None));
         }
 
         foreach (var (id, watch) in _watches)
@@ -76,19 +82,19 @@ public sealed class ManifestWatcher(
             if (!current.ContainsKey(id) && _watches.TryRemove(id, out _))
             {
                 watch.Stop.Cancel();
-                cache.Forget(id);
+                _ = watch.Task.ContinueWith(_ => cache.Forget(id), TaskScheduler.Default); // after its last write
             }
         }
     }
 
     private async Task RunAsync(NodeConnection node, CancellationToken ct)
     {
-        long cursor = 0;
+        var position = new FeedPosition();
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                cursor = await FollowAsync(node, cursor, ct);
+                await FollowAsync(node, position, ct);
             }
             catch (RpcException ex) when (ex.StatusCode == StatusCode.Unimplemented)
             {
@@ -99,7 +105,7 @@ public sealed class ManifestWatcher(
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                logger.LogDebug(ex, "Manifest feed from {Node} dropped at seq {Seq}; reconnecting.", node.Id, cursor);
+                logger.LogDebug(ex, "Manifest feed from {Node} dropped at seq {Seq}; reconnecting.", node.Id, position.Cursor);
                 await Pause(RetryDelay, ct);
             }
             catch (OperationCanceledException)
@@ -109,16 +115,29 @@ public sealed class ManifestWatcher(
         }
     }
 
-    /// <summary>Follows one stream until it drops; returns the cursor to resume from (0 = resync from a snapshot).</summary>
-    internal async Task<long> FollowAsync(NodeConnection node, long cursor, CancellationToken ct)
+    /// <summary>Where a feed resumes: the last seq applied and the incarnation it belongs to. Cursor 0 = resync from a snapshot.</summary>
+    internal sealed class FeedPosition
     {
-        using var call = node.Client.WatchManifest(new WatchManifestRequest { AfterSeq = cursor }, cancellationToken: ct);
+        public long Cursor { get; set; }
+
+        public string FeedId { get; set; } = "";
+    }
+
+    /// <summary>Follows one stream until it drops, advancing <paramref name="position"/>.</summary>
+    internal async Task FollowAsync(NodeConnection node, FeedPosition position, CancellationToken ct)
+    {
+        using var call = node.Client.WatchManifest(new WatchManifestRequest { AfterSeq = position.Cursor, FeedId = position.FeedId }, cancellationToken: ct);
         var live = false;
         await foreach (var e in call.ResponseStream.ReadAllAsync(ct))
         {
             if (e.Reset)
             {
                 cache.Reset(node.Id);
+            }
+
+            if (e.FeedId.Length > 0)
+            {
+                position.FeedId = e.FeedId;
             }
 
             switch (e.Kind)
@@ -135,11 +154,13 @@ public sealed class ManifestWatcher(
                     break;
                 case ManifestEvent.Types.Kind.Heartbeat:
                     // Sent only when the node is idle, so the counts are comparable; a busy node is checked at its next lull.
-                    if (cache.CountFor(node.Id) != e.ActiveCount)
+                    // Only comparable when the digest describes exactly the state this cursor reached.
+                    if (e.HeadSeq == position.Cursor && cache.CountFor(node.Id) != e.ActiveCount)
                     {
+                        position.Cursor = 0;
                         logger.LogInformation("Routing cache drifted from node {Node} ({Held} vs {Count} active); resyncing from a snapshot.",
                             node.Id, cache.CountFor(node.Id), e.ActiveCount);
-                        return 0;
+                        return;
                     }
 
                     break;
@@ -147,19 +168,17 @@ public sealed class ManifestWatcher(
 
             if (e.Seq > 0)
             {
-                cursor = e.Seq;
+                position.Cursor = e.Seq;
                 if (live && e.OccurredAtUnixMs > 0)
                 {
                     metrics.GossipLag.Observe(Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - e.OccurredAtUnixMs) / 1000.0);
                 }
             }
-            else if (e.HeadSeq > 0)
+            else if (e.Kind == ManifestEvent.Types.Kind.CaughtUp && e.HeadSeq > 0)
             {
-                cursor = Math.Max(cursor, e.HeadSeq);
+                position.Cursor = Math.Max(position.Cursor, e.HeadSeq);
             }
         }
-
-        return cursor;
     }
 
     private static async Task Pause(TimeSpan delay, CancellationToken ct)

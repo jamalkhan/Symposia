@@ -305,6 +305,7 @@ internal static class MultipartEndpoints
             }
 
             committed = true;
+            reservation?.Dispose(); // usage is charged; don't count it twice (review: Lenny #3)
             writer.AfterCommit(blob, upload.Bucket, upload.Key);
             quota.AfterCommit(upload.TenantId, upload.Bucket);
             logger.LogInformation("Multipart upload {UploadId} completed: {Parts} parts, {Size} bytes, CID {Cid}, in {ElapsedMs} ms.",
