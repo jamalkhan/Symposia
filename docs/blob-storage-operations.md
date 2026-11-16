@@ -90,10 +90,11 @@ BlobStorage #16. A delete is a **soft delete**. The object disappears from the A
 BlobStorage #15 (`quota-management.md`). Tenants manage their own quotas through `/v1` (see `blob-api.md`). For operators:
 
 - **Upgrading.** Tenants that already have buckets or usage when this release first starts stay unlimited (not free tier) until billing sets a contracted limit.
-- **Free tier.** An account is provisioned the first time it is used. It starts with a platform-imposed limit of `Gateway:Quota:FreeTierStorageBytes` (10 GiB) and an egress allowance of `FreeTierEgressBytesPerMonth` (100 GiB, provisioned only; egress metering enforces it). Set `FreeTierStorageBytes` to 0 to start accounts unlimited. `Gateway:TenantQuotaBytes:<tenant>` still pins a tenant's platform limit and wins over the stored one.
+- **Free tier.** An account is provisioned the first time it is used. It starts with a platform-imposed limit of `Gateway:Quota:FreeTierStorageBytes` (10 GiB) and an egress allowance of `FreeTierEgressBytesPerMonth` (100 GiB, provisioned only; egress metering enforces it). Set `FreeTierStorageBytes` to 0 to start accounts unlimited. The value is fixed into each account when it is created, so changing it later affects only new accounts. `Gateway:TenantQuotaBytes:<tenant>` still pins a tenant's platform limit and wins over the stored one.
 - **Payment added.** The billing system calls `PUT /admin/tenants/{tenant}/quota {"platform_imposed_limit_bytes": <contracted, or null for none>}` (`X-Admin-Secret`). This takes the account off the free tier and unblocks its writes at once.
 - **Alerts.** Each crossing of `Gateway:Quota:AlertThresholdsPct` (75/90/100) logs one INFO, WARNING or CRITICAL alert per account and per bucket. Dropping back below a threshold re-arms it. Tenant webhook and email delivery come with tenant observability.
 - **Reservations.** Each write holds a lease of `ReservationLeaseSeconds` (120), renewed while it runs. A gateway that dies mid-upload has its reservations swept once the lease lapses.
+- **Peer routing endpoint.** Expose `/internal/v1/routing` only on the internal network, behind the TLS-terminating load balancer.
 - **One gateway per metadata database.** Reservations are atomic within one gateway's metadata index. Gateways with separate indexes keep separate counters, so race safety across gateways needs the shared metadata index (tracked separately).
 
 ## Tenants and credentials

@@ -132,9 +132,9 @@ public sealed partial class GatewayMetadataStore
 
         Run(conn, tx, """
             INSERT INTO tenant_usage (tenant_id, bytes)
-            SELECT tenant_id, $d FROM buckets WHERE name = $b AND tenant_id IS NOT NULL
-            ON CONFLICT(tenant_id) DO UPDATE SET bytes = MAX(0, bytes + excluded.bytes)
-            """, ("$b", bucket), ("$d", delta));
+            SELECT tenant_id, MAX(0, $d) FROM buckets WHERE name = $b AND tenant_id IS NOT NULL
+            ON CONFLICT(tenant_id) DO UPDATE SET bytes = MAX(0, bytes + $d)
+            """, ("$b", bucket), ("$d", delta)); // clamped on insert too, like bucket_usage (review: Frank #6)
         AdjustBucketUsage(conn, tx, bucket, delta); // bucket quotas count exactly what account quotas do (#15)
     }
 }
