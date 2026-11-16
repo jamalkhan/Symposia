@@ -321,6 +321,138 @@ public sealed class StorageNodeGrpcService : Protocol.StorageNode.StorageNodeBas
         }
     }
 
+    /// <summary>
+    /// The manifest change feed (#12 Layer 2): a snapshot when the caller has no usable cursor, then every event
+    /// after it, then live events as they commit, with a heartbeat carrying the node's digest when idle. Events
+    /// are read from the durable outbox, so a gateway that reconnects with its last seq misses nothing that's
+    /// still retained, and one further behind is told to reset and gets a fresh snapshot.
+    /// </summary>
+    public override async Task WatchManifest(
+        WatchManifestRequest request, IServerStreamWriter<ManifestEvent> responseStream, ServerCallContext context)
+    {
+        const int Page = 500;
+        var ct = context.CancellationToken;
+        var cursor = request.AfterSeq;
+        var oldest = _manifestStore.OldestSeq();
+        if (cursor <= 0 || cursor < oldest - 1 || cursor > _manifestStore.HeadSeq())
+        {
+            // Read the head before the snapshot: anything committed while it streams is replayed after it.
+            cursor = _manifestStore.HeadSeq();
+            var reset = true;
+            var after = "";
+            while (true)
+            {
+                var rows = _manifestStore.SnapshotPage(after, Page);
+                foreach (var row in rows)
+                {
+                    await responseStream.WriteAsync(ToEvent(row, reset), ct);
+                    reset = false;
+                }
+
+                if (rows.Count < Page) break;
+                after = rows[^1].Cid.Value;
+            }
+
+            if (reset)
+            {
+                // An empty manifest still has to tell the caller to forget what it knew.
+                await responseStream.WriteAsync(new ManifestEvent { Kind = ManifestEvent.Types.Kind.CaughtUp, Reset = true, HeadSeq = cursor, SchemaVersion = 1 }, ct);
+            }
+        }
+
+        var caughtUp = false;
+        var heartbeat = TimeSpan.FromSeconds(Math.Max(1, _options.Value.ManifestHeartbeatSeconds));
+        while (!ct.IsCancellationRequested)
+        {
+            // Arm before reading so a commit between the read and the wait isn't missed.
+            var changed = _manifestStore.WaitForChangeAsync(ct);
+            var events = _manifestStore.EventsAfter(cursor, Page);
+            foreach (var change in events)
+            {
+                await responseStream.WriteAsync(ToEvent(change, reset: false), ct);
+                cursor = change.Seq;
+            }
+
+            if (events.Count == Page)
+            {
+                continue;
+            }
+
+            if (!caughtUp)
+            {
+                caughtUp = true;
+                await responseStream.WriteAsync(Digest(ManifestEvent.Types.Kind.CaughtUp, cursor), ct);
+            }
+
+            try
+            {
+                await changed.WaitAsync(heartbeat, ct);
+            }
+            catch (TimeoutException)
+            {
+                await responseStream.WriteAsync(Digest(ManifestEvent.Types.Kind.Heartbeat, cursor), ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+    }
+
+    private ManifestEvent Digest(ManifestEvent.Types.Kind kind, long cursor) =>
+        new() { Kind = kind, HeadSeq = cursor, ActiveCount = _manifestStore.CountActive(), SchemaVersion = 1 };
+
+    private static ManifestEvent ToEvent(ManifestChange change, bool reset) => new()
+    {
+        Kind = change.Removed ? ManifestEvent.Types.Kind.Removed : ManifestEvent.Types.Kind.Put,
+        Seq = change.Seq,
+        Cid = change.Cid.Value,
+        SizeBytes = change.SizeBytes,
+        Status = change.Status.ToString(),
+        OccurredAtUnixMs = change.OccurredAt.ToUnixTimeMilliseconds(),
+        Reset = reset,
+        SchemaVersion = 1,
+    };
+
+    /// <summary>
+    /// An inclusion proof for <c>cid</c> in the manifest root this node froze for an epoch (#12 Layer 3, FR3.2).
+    /// Only epochs whose root reached the chain are answered, so a proof always refers to a root a verifier can
+    /// fetch; not found otherwise, which a verifier treats as "not attested".
+    /// </summary>
+    public override Task<ManifestProofResponse> GetManifestProof(ManifestProofRequest request, ServerCallContext context)
+    {
+        if (!Cid.TryParse(request.Cid, out var cid))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, $"'{request.Cid}' is not a valid CID."));
+        }
+
+        var epoch = request.Epoch == 0 ? _manifestStore.LatestSubmittedEpoch() : _manifestStore.GetEpochRoot(request.Epoch);
+        if (epoch is not { SubmittedAt: not null })
+        {
+            return Task.FromResult(new ManifestProofResponse { Found = false, Epoch = request.Epoch });
+        }
+
+        var leaves = _manifestStore.EpochLeaves(epoch.Epoch);
+        var index = leaves.ToList().FindIndex(l => l.Cid.Equals(cid));
+        var response = new ManifestProofResponse
+        {
+            Epoch = epoch.Epoch,
+            Root = ByteString.CopyFrom(epoch.Root),
+            LeafCount = leaves.Count,
+        };
+        if (index < 0)
+        {
+            return Task.FromResult(response);
+        }
+
+        response.Found = true;
+        response.LeafIndex = index;
+        response.SizeBytes = leaves[index].SizeBytes;
+        response.TenantId = leaves[index].TenantId;
+        response.Siblings.AddRange(MerkleTree.Proof(ManifestMerkle.LeafHashes(leaves), index).Select(ByteString.CopyFrom));
+        return Task.FromResult(response);
+    }
+
     private (Cid Cid, long Remaining, long Offset) ResolveRange(string cidValue, long offset, long length)
     {
         if (!Cid.TryParse(cidValue, out var cid) || !_blobStore.Exists(cid))

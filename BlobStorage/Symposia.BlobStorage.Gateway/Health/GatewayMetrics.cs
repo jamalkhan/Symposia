@@ -34,6 +34,14 @@ public sealed class GatewayMetrics
         NodeCacheSize = f.CreateGauge("gateway_node_cache_size", "Storage nodes in the health cache.");
         MetadataIndexLag = f.CreateGauge("gateway_metadata_index_lag_seconds", "Seconds since the metadata index last answered.");
         EligibleNodes = f.CreateGauge("gateway_eligible_nodes_count", "Healthy nodes that take writes.");
+
+        // #12 Layer 2/3: the gossip-fed routing cache, its fallbacks, and epoch-root disputes.
+        RoutingCacheCids = f.CreateGauge("gateway_routing_cache_cids", "CIDs in the routing cache with at least one holder.");
+        RoutingCacheWarm = f.CreateGauge("gateway_routing_cache_warm", "1 once every watched node has delivered its snapshot and backlog.");
+        GossipLag = f.CreateSummary("gateway_gossip_propagation_lag_seconds", "Commit-on-node to applied-in-cache delay of live manifest events.",
+            new SummaryConfiguration { Objectives = Quantiles });
+        RoutingLookups = f.CreateCounter("gateway_routing_lookups_total", "Replica lookups beyond the metadata index, by where they were answered.", "source");
+        Disputes = f.CreateCounter("gateway_epoch_root_disputes_total", "Holdings checked against a node's on-chain manifest root, by outcome.", "outcome");
     }
 
     public CollectorRegistry Registry { get; }
@@ -50,4 +58,9 @@ public sealed class GatewayMetrics
     public Gauge NodeCacheSize { get; }
     public Gauge MetadataIndexLag { get; }
     public Gauge EligibleNodes { get; }
+    public Gauge RoutingCacheCids { get; }
+    public Gauge RoutingCacheWarm { get; }
+    public Summary GossipLag { get; }
+    public Counter RoutingLookups { get; }
+    public Counter Disputes { get; }
 }

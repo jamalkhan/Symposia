@@ -76,4 +76,33 @@ public sealed class StorageNodeOptions
 
     /// <summary>How long in-flight calls may run after shutdown starts (#1 FR-28).</summary>
     public int ShutdownTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Manifest change-feed events kept for WatchManifest (#12). A gateway further behind than this resyncs
+    /// from a snapshot, so this bounds disk, not correctness.
+    /// </summary>
+    public long ManifestEventRetention { get; set; } = 100_000;
+
+    /// <summary>How often WatchManifest sends a heartbeat with the node's digest when nothing changes (#12).</summary>
+    public int ManifestHeartbeatSeconds { get; set; } = 15;
+
+    /// <summary>Epoch Merkle root submission (#12 Layer 3).</summary>
+    public EpochRootOptions EpochRoots { get; set; } = new();
+}
+
+/// <summary>
+/// Where a storage node attests its manifest on-chain (#12 Layer 3). Epochs are the network's telemetry epochs
+/// (<c>StorageNode:Telemetry</c>, synced from the EpochController when the telemetry chain is configured), so roots,
+/// heartbeats and rewards all count the same epoch.
+/// </summary>
+public sealed class EpochRootOptions
+{
+    /// <summary>Submit a root at each epoch boundary. Needs the Blockchain Gateway and <see cref="RegistryAddress"/>.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>The EpochRootRegistry contract the root's EIP-712 signature is bound to.</summary>
+    public string RegistryAddress { get; set; } = "";
+
+    /// <summary>How often the submitter checks for a finished epoch and retries an unconfirmed submission.</summary>
+    public int CheckIntervalSeconds { get; set; } = 30;
 }

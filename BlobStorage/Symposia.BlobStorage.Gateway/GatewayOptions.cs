@@ -161,6 +161,9 @@ public sealed class GatewayOptions
 
     /// <summary>Garbage collection (#16).</summary>
     public GcOptions Gc { get; set; } = new();
+
+    /// <summary>The gossip-fed CID routing cache and its fallbacks (#12 Layer 2/3).</summary>
+    public RoutingOptions Routing { get; set; } = new();
 }
 
 public enum RedundancyMode
@@ -319,4 +322,33 @@ public sealed class CredentialAuthorityOptions
 
     /// <summary>Most use events kept locally while the Authority is unreachable before the oldest are dropped (with an error).</summary>
     public int AuditSpoolLimit { get; set; } = 1_000_000;
+}
+
+/// <summary>
+/// How the gateway finds replicas beyond its own metadata index (#12). Each storage node's manifest change feed
+/// keeps an in-memory CID → holders cache; on a miss the gateway asks its peer gateways, then checks nodes'
+/// inclusion proofs against their on-chain epoch roots.
+/// </summary>
+public sealed class RoutingOptions
+{
+    /// <summary>Subscribe to storage nodes' manifest change feeds (WatchManifest).</summary>
+    public bool WatchManifests { get; set; } = true;
+
+    /// <summary>Peer gateways' base URLs (e.g. <c>http://gw2:5181</c>) asked to resolve a CID this gateway can't (FR2.6).</summary>
+    public string[] PeerGateways { get; set; } = [];
+
+    /// <summary>
+    /// Bearer token peer gateways present to <c>/internal/v1/routing</c>, and this gateway presents to them.
+    /// Empty = the endpoint refuses every call (it is never open).
+    /// </summary>
+    public string PeerToken { get; set; } = "";
+
+    /// <summary>How long a peer gateway lookup may take before it's abandoned.</summary>
+    public int PeerTimeoutMilliseconds { get; set; } = 2000;
+
+    /// <summary>Ask nodes for inclusion proofs against their on-chain epoch roots when nothing else locates a CID (FR2.6, FR3.2).</summary>
+    public bool ChainFallback { get; set; } = true;
+
+    /// <summary>How many nodes the on-chain fallback asks for a proof at once.</summary>
+    public int ChainFallbackParallelism { get; set; } = 8;
 }

@@ -29,14 +29,38 @@ public static class Eip712NodeRegistrySigner
         return Sign(key, digest);
     }
 
+    /// <summary>
+    /// Signs "SubmitRoot(address node,uint64 epoch,bytes32 root)" for <c>EpochRootRegistry.sol</c>
+    /// (EIP712("Symposia.EpochRootRegistry", "1")), the epoch manifest root a storage node attests (#12 FR3.1).
+    /// </summary>
+    public static byte[] SignSubmitRoot(EthECKey key, ulong epoch, byte[] root, string epochRootRegistryAddress, ulong chainId) =>
+        Sign(key, SubmitRootDigest(key.GetPublicAddress(), epoch, root, epochRootRegistryAddress, chainId));
+
+    /// <summary>The digest <see cref="SignSubmitRoot"/> signs, so a verifier can recover the signer.</summary>
+    public static byte[] SubmitRootDigest(string node, ulong epoch, byte[] root, string epochRootRegistryAddress, ulong chainId)
+    {
+        if (root.Length != 32)
+        {
+            throw new ArgumentException("An epoch root is 32 bytes.", nameof(root));
+        }
+
+        var abiEncode = new ABIEncode();
+        var structHash = Keccak.CalculateHash(abiEncode.GetABIEncoded(
+            new ABIValue("bytes32", HashUtf8("SubmitRoot(address node,uint64 epoch,bytes32 root)")),
+            new ABIValue("address", node),
+            new ABIValue("uint64", epoch),
+            new ABIValue("bytes32", root)));
+        return TypedDataDigest(DomainSeparator(epochRootRegistryAddress, chainId, "Symposia.EpochRootRegistry"), structHash);
+    }
+
     private static byte[] HashUtf8(string value) => Keccak.CalculateHash(Encoding.UTF8.GetBytes(value));
 
-    private static byte[] DomainSeparator(string verifyingContract, ulong chainId)
+    private static byte[] DomainSeparator(string verifyingContract, ulong chainId, string name = "Symposia.NodeRegistry")
     {
         var abiEncode = new ABIEncode();
         return Keccak.CalculateHash(abiEncode.GetABIEncoded(
             new ABIValue("bytes32", HashUtf8("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")),
-            new ABIValue("bytes32", HashUtf8("Symposia.NodeRegistry")),
+            new ABIValue("bytes32", HashUtf8(name)),
             new ABIValue("bytes32", HashUtf8("1")),
             new ABIValue("uint256", chainId),
             new ABIValue("address", verifyingContract)));

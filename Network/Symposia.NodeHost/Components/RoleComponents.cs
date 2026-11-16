@@ -80,6 +80,8 @@ public sealed class StorageRoleComponent : WebAppComponent
             ["StorageNode:Telemetry:Enabled"] = storage.Heartbeats.ToString(),
         };
         var network = context.Network!;
+        // Signed epoch roots of this node's manifest, relayed to EpochRootRegistry by the Blockchain Gateway (#12 Layer 3).
+        config["StorageNode:EpochRoots:RegistryAddress"] = network.EpochRootRegistryAddress;
         if (!string.IsNullOrEmpty(network.TelemetryRegistryAddress) && !string.IsNullOrEmpty(network.RpcUrl) && storage.Heartbeats)
         {
             // HTTP gossip, the self-checkpoint fallback and committee duties (#158); the schedule syncs from the EpochController.
