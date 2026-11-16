@@ -75,6 +75,8 @@ public static class TlsPin
     /// ordinally). It must be inside its validity period, with NotBefore allowed up to <paramref name="clockSkew"/>
     /// ahead (inclusive) and NotAfter strict, since for storage nodes expiry is the replay boundary. When it declares
     /// extended key usages they must include <paramref name="usage"/>; one declaring none passes (RFC 5280).
+    /// Runs inside TLS handshake callbacks and enumerates <paramref name="pins"/> on every call: pass a materialised
+    /// collection.
     /// </summary>
     public static TlsPinResult Check(X509Certificate? certificate, IEnumerable<string> pins, DateTimeOffset now, string? usage = null, TimeSpan? clockSkew = null)
     {

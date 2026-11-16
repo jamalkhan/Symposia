@@ -30,14 +30,9 @@ public sealed class NodeTlsRefusals(ILogger<NodeTlsRefusals> logger, IMeterFacto
         var now = DateTimeOffset.UtcNow;
         var key = (nodeId, reason);
         // Atomic claim of the log slot: two probes refused at once log once, not twice (review: Frank #2).
-        var logged = false;
-        _lastLogged.AddOrUpdate(key, _ => { logged = true; return now; }, (_, last) =>
-        {
-            if (now - last < LogEvery) return last;
-            logged = true;
-            return now;
-        });
-        if (!logged)
+        // Decided from the stored value, not inside the delegates: AddOrUpdate may run them more than once under a race.
+        var stored = _lastLogged.AddOrUpdate(key, now, (_, last) => now - last < LogEvery ? last : now);
+        if (stored != now)
         {
             return;
         }
