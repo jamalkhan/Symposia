@@ -36,6 +36,9 @@ internal static class AdminEndpoints
             nodes = cache.Nodes.Select(n => new { node = n, cids = cache.CountFor(n) }),
         })).AddEndpointFilter(AdminAuthFilter);
         group.MapPost("/routing/disputes", ResolveDispute).AddEndpointFilter(AdminAuthFilter);
+
+        // #15 FR8: the billing system raises or removes a tenant's platform-imposed limit when payment is added.
+        group.MapPut("/tenants/{tenant}/quota", Api.QuotaEndpoints.SetPlatformLimit).AddEndpointFilter(AdminAuthFilter);
         group.MapGet("/gc", (Metadata.GatewayMetadataStore store, IOptions<GatewayOptions> options, GC.SafetyInvariantGate gate) => Results.Ok(new
         {
             report = Api.BlobApiEndpoints.GcReport(store, options.Value, null),

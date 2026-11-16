@@ -161,6 +161,31 @@ public sealed class ManifestLayerTests : IDisposable
         Assert.Equal(new ManifestRecovery.Result(0, 0), ManifestRecovery.RebuildIfNeeded(Store(), blobs, NullLogger.Instance));
     }
 
+    [Fact]
+    public void ChangeFeedAndEpochQueries_AreIndexBacked()
+    {
+        Store();
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={DbPath}");
+        conn.Open();
+        (string Sql, string MustUse)[] queries =
+        [
+            ("SELECT COUNT(*) FROM blob_manifest WHERE status = 'Active'", "idx_blob_manifest_status"),
+            ("SELECT seq, cid FROM manifest_events WHERE seq > 5 ORDER BY seq LIMIT 500", "INTEGER PRIMARY KEY"),
+            ("SELECT cid, size_bytes FROM blob_manifest WHERE cid > 'c' ORDER BY cid LIMIT 500", "sqlite_autoindex_blob_manifest_1"),
+            ("SELECT tenant_id, bucket, key FROM blob_references WHERE cid = 'c'", "sqlite_autoindex_blob_references_1"),
+            ("SELECT cid, tenant_id, size_bytes FROM epoch_leaves WHERE epoch = 3", "sqlite_autoindex_epoch_leaves_1"),
+        ];
+        foreach (var (sql, mustUse) in queries)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "EXPLAIN QUERY PLAN " + sql;
+            using var r = cmd.ExecuteReader();
+            var plan = new List<string>();
+            while (r.Read()) plan.Add(r.GetString(3));
+            Assert.True(plan.Any(p => p.Contains(mustUse, StringComparison.Ordinal)), $"{sql}: expected {mustUse} in {string.Join(" | ", plan)}");
+        }
+    }
+
     // ── ManifestMerkle (the shared reference implementation) ─────────────────
 
     [Fact]

@@ -78,7 +78,10 @@ public static class BlobGatewayApp
         builder.Services.AddSingleton<Placement.PlacementEngine>();
         builder.Services.AddSingleton<Placement.RegionAssignmentResolver>();
         builder.Services.AddScoped<QuorumWriter>();
-        builder.Services.AddSingleton<TenantQuota>();
+        // Quotas (#15): reservations, threshold alerts (logged until tenant alert channels exist), lapsed-lease sweeping.
+        builder.Services.AddSingleton<Quota.QuotaGate>();
+        builder.Services.TryAddSingleton<Quota.IQuotaAlertSink, Quota.LoggingQuotaAlertSink>();
+        builder.Services.AddHostedService<Quota.ReservationSweeper>();
         builder.Services.AddSingleton<IWriteQuorumRequirement, ConfiguredWriteQuorum>();
 
         // Health, readiness, metrics and drain (#1).

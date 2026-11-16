@@ -30,6 +30,9 @@ internal static class S3Xml
 
     internal static IResult Error(int status, string code, string message) => ErrorXml(status, code, message);
 
+    /// <summary>A rejection, with its error-catalog details as extra elements (S3 SDKs ignore elements they don't know).</summary>
+    internal static IResult Error(S3RequestRejectedException ex) => ErrorXml(ex.Status, ex.Code, ex.Message, ex.Details);
+
     /// <summary>Seconds a client should wait before retrying a 503 (#1 FR-18).</summary>
     internal const int RetryAfterSeconds = 5;
 
@@ -69,16 +72,26 @@ internal static class S3Xml
     internal static IResult BadRequest(string message) =>
         ErrorXml(400, "BadRequest", message);
 
-    private static IResult ErrorXml(int status, string code, string message)
+    private static IResult ErrorXml(int status, string code, string message, IReadOnlyDictionary<string, object?>? details = null)
     {
         var doc = new XDocument(
             new XDeclaration("1.0", "UTF-8", null),
             new XElement("Error",
                 new XElement("Code", code),
                 new XElement("Message", message),
+                details?.Where(d => d.Value is not null).Select(d => new XElement(PascalCase(d.Key), FormatValue(d.Value!))),
                 new XElement("RequestId", Guid.NewGuid().ToString("N"))));
         return Results.Content(doc.ToString(), "application/xml", statusCode: status);
     }
+
+    private static string PascalCase(string snake) => string.Concat(snake.Split('_').Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
+
+    private static string FormatValue(object value) => value switch
+    {
+        bool b => b ? "true" : "false",
+        IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+        _ => value.ToString() ?? "",
+    };
 
     // ── Bucket responses ─────────────────────────────────────────────────────
 

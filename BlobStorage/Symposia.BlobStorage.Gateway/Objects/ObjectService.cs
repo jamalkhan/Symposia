@@ -33,7 +33,7 @@ public enum ServeOutcome
 /// its own history entry here, the one hook point, and the adapters only map results to XML or JSON.
 /// </summary>
 public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry nodes, RepairQueue repairQueue, Quorum.QuorumWriter writer,
-    Quorum.TenantQuota quota, Health.GatewayMetrics metrics, Erasure.ErasureObjects erasure, ILogger<ObjectService> logger,
+    Quota.QuotaGate quota, Health.GatewayMetrics metrics, Erasure.ErasureObjects erasure, ILogger<ObjectService> logger,
     Routing.RoutingCache? routing = null, Routing.ReplicaLocator? locator = null)
 {
     /// <summary>Reads an object (or a range of it) into the response, recording a view.</summary>
@@ -57,11 +57,13 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
             bucket, key, History.HistoryCapture.ApiOf(ctx));
         var tenantId = ctx.Items["TenantId"] as string ?? "";
         var expected = S3.UploadBody.ExpectedLength(ctx.Request);
-        quota.EnsureRoom(tenantId, expected); // before placement or any node contact (#1 FR-2)
+        // Reserved before placement or any node contact (#1 FR-2, #15 FR4); released however the write ends.
+        using var reservation = quota.Reserve(tenantId, bucket, key, expected);
         var (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected,
             Placement.RegionAssignmentResolver.FromHeader(ctx.Request));
         if (record is not null)
         {
+            quota.AfterCommit(tenantId, bucket);
             Fill(written, record, replaced);
             Health.RequestLog.SelectedNode(ctx, string.Join(',', record.NodeIds));
         }
@@ -81,8 +83,12 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
 
         (read.Size, read.Etag, read.Cid) = (source.SizeBytes, source.ETag, source.Cid);
         var written = History.HistoryCapture.Mark(ctx, History.HistoryOperation.Insert, bucket, key, api);
+        // No bytes move, but the destination gains a logical object of the source's size (#15 FR2).
+        var tenantId = ctx.Items["TenantId"] as string ?? "";
+        using var reservation = quota.Reserve(tenantId, bucket, key, source.SizeBytes);
         var copy = source with { Bucket = bucket, Key = key, LastModified = DateTimeOffset.UtcNow };
         Fill(written, copy, store.PutObject(copy));
+        quota.AfterCommit(tenantId, bucket);
         return copy;
     }
 

@@ -34,6 +34,12 @@ A missing or bad signature gets `401` and a JSON error. The S3 surface keeps S3'
 | `GET /v1/buckets/{bucket}/objects/{key}?history` | The object's operation history (#204). See below. |
 | `HEAD /v1/buckets/{bucket}/objects/{key}` | Headers only. |
 | `DELETE /v1/buckets/{bucket}/objects/{key}` | Delete. Idempotent. |
+| `GET /v1/account/quota` | The account's quota and usage (#15). See below. |
+| `PUT /v1/account/quota` | Set a self-imposed limit: `{"tenant_self_limit_bytes": 107374182400}`. |
+| `DELETE /v1/account/quota/self-limit` | Remove it. The platform-imposed limit still applies. |
+| `GET /v1/buckets/{bucket}/quota` | The bucket's quota and usage, including `object_count`. |
+| `PUT /v1/buckets/{bucket}/quota` | Set `{"limit_bytes": …, "max_object_count": …}` (either or both). Enforced in addition to the account quota. |
+| `DELETE /v1/buckets/{bucket}/quota` | Remove it. The account quota still applies. |
 
 Keys may contain `/`. Capabilities attach to the object path as query flags (`?meta`, and `?history` from #204), so a key ending in a word like `history` is never ambiguous.
 
@@ -60,6 +66,14 @@ Things to know:
 - **Storage:** history lives in `gateway-history.db`, beside the metadata DB. A busy gateway at 30 days can reach tens of GB.
 
 S3 has no equivalent API; AWS offers per-object history only through access logs and CloudTrail, delivered offline.
+
+## Quotas
+
+Every write is checked before any data moves. That covers PUT, multipart Complete (for the whole object; parts don't count until then) and copy (at the destination). The write is checked against the account's effective limit, the lower of the platform-imposed limit and your self-limit. It is also checked against the bucket's byte and object-count quotas. Usage is logical size, counted once however many copies are stored. It includes noncurrent versions and soft-deleted objects still in their recovery window. A write that lands exactly on a limit fits. Once a quota is full, nothing more fits. Concurrent writes reserve their size first, so together they can't overrun a limit.
+
+The quota endpoints use the snake_case shape from `quota-management.md`: `limit_bytes`, `used_bytes`, `reserved_bytes` (in-flight writes), `available_bytes`, `utilization_pct`, `platform_imposed_limit_bytes`, `tenant_self_limit_bytes`, `effective_limit_bytes`, `egress_limit_bytes_per_month` and `free_tier`. A null limit means unlimited, and then `available_bytes` and `utilization_pct` are null too.
+
+A write over quota gets `507`. The error code is `AccountQuotaExceeded` or `BucketQuotaExceeded` here, and `QuotaExceeded` on S3. `details` gives `quota_type`, `limit_bytes`, `used_bytes`, `incoming_bytes` and `exceeded_by_bytes`; for object counts, `limit_objects`, `used_objects` and `incoming_objects`. S3 XML carries the same fields as extra elements (`QuotaType`, `LimitBytes`, …). On a full free tier, `payment_required` is `true`.
 
 ## Errors and request IDs
 

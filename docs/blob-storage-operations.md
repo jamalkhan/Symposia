@@ -85,6 +85,16 @@ BlobStorage #16. A delete is a **soft delete**. The object disappears from the A
 - A blob a node holds that nothing references is deleted only after `Gc:OrphanGraceHours` (48) from first sighting, **and** once the chain confirms it has no record. That confirmation doesn't exist yet, so orphans are detected and aged but never deleted. The node itself never deletes them either; it records them for reconciliation.
 - `GET /v1/gc` (tenant) and `GET /admin/gc` show objects pending physical deletion, their estimated purge time and placement warnings. `safetyRefusals` in `/admin/gc` should stay at 0. Anything else means GC was asked to delete protected data and refused.
 
+## Quotas
+
+BlobStorage #15 (`quota-management.md`). Tenants manage their own quotas through `/v1` (see `blob-api.md`). For operators:
+
+- **Free tier.** An account is provisioned the first time it is used. It starts with a platform-imposed limit of `Gateway:Quota:FreeTierStorageBytes` (10 GiB) and an egress allowance of `FreeTierEgressBytesPerMonth` (100 GiB, provisioned only; egress metering enforces it). Set `FreeTierStorageBytes` to 0 to start accounts unlimited. `Gateway:TenantQuotaBytes:<tenant>` still pins a tenant's platform limit and wins over the stored one.
+- **Payment added.** The billing system calls `PUT /admin/tenants/{tenant}/quota {"platform_imposed_limit_bytes": <contracted, or null for none>}` (`X-Admin-Secret`). This takes the account off the free tier and unblocks its writes at once.
+- **Alerts.** Each crossing of `Gateway:Quota:AlertThresholdsPct` (75/90/100) logs one INFO, WARNING or CRITICAL alert per account and per bucket. Dropping back below a threshold re-arms it. Tenant webhook and email delivery come with tenant observability.
+- **Reservations.** Each write holds a lease of `ReservationLeaseSeconds` (120), renewed while it runs. A gateway that dies mid-upload has its reservations swept once the lease lapses.
+- **One gateway per metadata database.** Reservations are atomic within one gateway's metadata index. Gateways with separate indexes keep separate counters, so race safety across gateways needs the shared metadata index (tracked separately).
+
 ## Tenants and credentials
 
 BlobStorage #3. The **Credential Authority** (`BlobStorage/Symposia.BlobStorage.CredentialAuthority`) is the source of truth for tenants, credentials, bucket policies, object ACLs and the credential audit log. It needs Postgres. Configure:
