@@ -113,7 +113,12 @@ public sealed class NodeIdentity
     public byte[] SignRegistration(string endpoint, ulong nonce, string nodeRegistryAddress, ulong chainId) =>
         Eip712NodeRegistrySigner.SignRegister(Key, endpoint, nonce, nodeRegistryAddress, chainId);
 
+    /// <summary>Signs this node's epoch manifest root for EpochRootRegistry (#12 FR3.1).</summary>
+    public byte[] SignEpochRoot(ulong epoch, byte[] root, string epochRootRegistryAddress, ulong chainId) =>
+        Eip712NodeRegistrySigner.SignSubmitRoot(Key, epoch, root, epochRootRegistryAddress, chainId);
+
     /// <summary>Answers a peer handshake challenge from <paramref name="dialer"/> (#129 FR-D1).</summary>
+
     public string SignHandshake(string dialer, byte[] nonce) =>
         PeerHandshake.Sign(Key, _options.ChainId, _options.NodeRegistryAddress, dialer, nonce);
 

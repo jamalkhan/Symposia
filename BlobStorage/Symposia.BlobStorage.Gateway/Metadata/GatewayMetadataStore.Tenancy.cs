@@ -122,7 +122,7 @@ public sealed partial class GatewayMetadataStore
         return Query(conn, "SELECT bytes FROM tenant_usage WHERE tenant_id = $t", ("$t", tenantId)).ExecuteScalar() as long? ?? 0;
     }
 
-    /// <summary>Moves the owning tenant's usage by <paramref name="delta"/> bytes, in the caller's transaction.</summary>
+    /// <summary>Moves the owning tenant's and the bucket's usage by <paramref name="delta"/> bytes, in the caller's transaction.</summary>
     internal static void AdjustUsage(SqliteConnection conn, SqliteTransaction tx, string bucket, long delta)
     {
         if (delta == 0)
@@ -132,8 +132,9 @@ public sealed partial class GatewayMetadataStore
 
         Run(conn, tx, """
             INSERT INTO tenant_usage (tenant_id, bytes)
-            SELECT tenant_id, $d FROM buckets WHERE name = $b AND tenant_id IS NOT NULL
-            ON CONFLICT(tenant_id) DO UPDATE SET bytes = MAX(0, bytes + excluded.bytes)
-            """, ("$b", bucket), ("$d", delta));
+            SELECT tenant_id, MAX(0, $d) FROM buckets WHERE name = $b AND tenant_id IS NOT NULL
+            ON CONFLICT(tenant_id) DO UPDATE SET bytes = MAX(0, bytes + $d)
+            """, ("$b", bucket), ("$d", delta)); // clamped on insert too, like bucket_usage (review: Frank #6)
+        AdjustBucketUsage(conn, tx, bucket, delta); // bucket quotas count exactly what account quotas do (#15)
     }
 }

@@ -163,6 +163,7 @@ public sealed partial class GatewayMetadataStore
         InitializeReplication(conn, _minCopies);
         InitializeRedundancy(conn);
         InitializeGc(conn);
+        InitializeQuota(conn);
 
         // Schema generation, so a later release can refuse to run an older binary against a newer database
         // (review: Frank #3). 2 = soft delete, versions, shards (#7/#8/#16); 1 = everything before.
@@ -204,9 +205,18 @@ public sealed partial class GatewayMetadataStore
     public bool DeleteBucket(string name)
     {
         using var conn = Open();
-        if (Query(conn, "SELECT 1 FROM objects WHERE bucket = $n LIMIT 1", ("$n", name)).ExecuteScalar() is not null)
-            return false;
-        Execute(Query(conn, "DELETE FROM buckets WHERE name = $n", ("$n", name)));
+        using var tx = conn.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        using (var any = Query(conn, "SELECT 1 FROM objects WHERE bucket = $n LIMIT 1", ("$n", name)))
+        {
+            any.Transaction = tx;
+            if (any.ExecuteScalar() is not null)
+                return false;
+        }
+
+        // A recreated bucket of the same name starts with no quota and no usage of its own (#15; review: Frank #5).
+        Run(conn, tx, "DELETE FROM buckets WHERE name = $n; DELETE FROM bucket_quota WHERE bucket = $n; DELETE FROM bucket_usage WHERE bucket = $n;",
+            ("$n", name));
+        tx.Commit();
         return true;
     }
 

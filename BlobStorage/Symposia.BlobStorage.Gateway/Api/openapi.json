@@ -581,7 +581,7 @@
         }
       },
       "put": {
-        "summary": "Set versioning, version limits, minimum retention, recovery window (1\u2013365 days) and multipart TTL (1\u2013720 hours).",
+        "summary": "Set versioning, version limits, minimum retention, recovery window (1–365 days) and multipart TTL (1–720 hours).",
         "requestBody": {
           "required": true,
           "content": {
@@ -800,6 +800,127 @@
           },
           "501": {
             "description": "No Credential Authority configured"
+          }
+        }
+      }
+    },
+    "/v1/account/quota": {
+      "get": {
+        "summary": "The account's quota and usage (#15). Null limits are unlimited.",
+        "responses": {
+          "200": {
+            "description": "AccountQuota: limit_bytes, used_bytes, reserved_bytes, available_bytes, utilization_pct, platform_imposed_limit_bytes, tenant_self_limit_bytes, effective_limit_bytes, egress_limit_bytes_per_month, free_tier"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set the tenant's self-imposed account limit; the effective limit is min(platform, self).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tenant_self_limit_bytes": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "tenant_self_limit_bytes"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "AccountQuota: limit_bytes, used_bytes, reserved_bytes, available_bytes, utilization_pct, platform_imposed_limit_bytes, tenant_self_limit_bytes, effective_limit_bytes, egress_limit_bytes_per_month, free_tier"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          }
+        }
+      }
+    },
+    "/v1/account/quota/self-limit": {
+      "delete": {
+        "summary": "Remove the self-imposed limit; the platform-imposed limit still applies.",
+        "responses": {
+          "200": {
+            "description": "AccountQuota: limit_bytes, used_bytes, reserved_bytes, available_bytes, utilization_pct, platform_imposed_limit_bytes, tenant_self_limit_bytes, effective_limit_bytes, egress_limit_bytes_per_month, free_tier"
+          }
+        }
+      }
+    },
+    "/v1/buckets/{bucket}/quota": {
+      "parameters": [
+        {
+          "name": "bucket",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "The bucket's quota and usage (#15).",
+        "responses": {
+          "200": {
+            "description": "BucketQuota: limit_bytes, used_bytes, reserved_bytes, available_bytes, utilization_pct, max_object_count, object_count"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set the bucket's byte and/or object-count quota, enforced in addition to the account quota.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "limit_bytes": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "max_object_count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "BucketQuota: limit_bytes, used_bytes, reserved_bytes, available_bytes, utilization_pct, max_object_count, object_count"
+          },
+          "400": {
+            "description": "InvalidArgument"
+          },
+          "404": {
+            "description": "NoSuchBucket"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove the bucket's quota; the account quota still applies.",
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "NoSuchBucket"
           }
         }
       }

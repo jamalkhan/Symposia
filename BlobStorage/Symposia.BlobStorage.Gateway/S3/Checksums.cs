@@ -4,11 +4,18 @@ using System.Security.Cryptography;
 namespace Symposia.BlobStorage.Gateway.S3;
 
 /// <summary>An S3 request rejected for its content (issue #139); rendered as an S3 XML error.</summary>
-public sealed class S3RequestRejectedException(int status, string code, string message) : Exception(message)
+public class S3RequestRejectedException(int status, string code, string message) : Exception(message)
 {
     public int Status { get; } = status;
 
+    /// <summary>The S3 error code.</summary>
     public string Code { get; } = code;
+
+    /// <summary>The /v1 API's error code (Requirements/BlobStorage/error-catalog.md), when it differs from S3's.</summary>
+    public string? NativeCode { get; init; }
+
+    /// <summary>Error-catalog <c>details</c> (snake_case keys): extra elements in S3 XML, a <c>details</c> object in /v1 JSON.</summary>
+    public IReadOnlyDictionary<string, object?>? Details { get; init; }
 }
 
 /// <summary>An incremental hash whose result is compared to what the client declared.</summary>

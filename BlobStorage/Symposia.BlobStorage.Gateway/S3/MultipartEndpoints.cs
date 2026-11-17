@@ -97,8 +97,8 @@ internal static class MultipartEndpoints
         BlobWriteResult? blob;
         try
         {
-            // Each part is checked against quota before placement (#1 FR-2).
-            ctx.RequestServices.GetRequiredService<TenantQuota>().EnsureRoom(tenantId, UploadBody.ExpectedLength(ctx.Request));
+            // Parts don't count toward quota until Complete (#15 AC6); only a full account refuses them.
+            ctx.RequestServices.GetRequiredService<Quota.QuotaGate>().EnsureNotFull(tenantId);
             body = UploadBody.Open(ctx);
             blob = await writer.WriteBlobAsync(tenantId, bucket, key, body, ctx.RequestAborted, UploadBody.ExpectedLength(ctx.Request));
         }
@@ -109,7 +109,7 @@ internal static class MultipartEndpoints
         catch (S3RequestRejectedException ex)
         {
             Logger(ctx).LogWarning("Rejected part {Part} of upload {UploadId}: {Code} {Message}", partNumber, upload.UploadId, ex.Code, ex.Message);
-            return S3Xml.Error(ex.Status, ex.Code, ex.Message);
+            return S3Xml.Error(ex);
         }
 
         if (blob is null)
@@ -271,8 +271,13 @@ internal static class MultipartEndpoints
         var started = System.Diagnostics.Stopwatch.StartNew();
         BlobWriteResult? blob = null;
         var committed = false;
+        Quota.QuotaReservation? reservation = null;
         try
         {
+            // The assembled object's whole size is checked and reserved once, before it's written (#15 AC6).
+            var quota = services.GetRequiredService<Quota.QuotaGate>();
+            reservation = quota.Reserve(upload.TenantId, upload.Bucket, upload.Key, parts.Sum(p => p.SizeBytes));
+
             // The parts are already stored, so unlike a streamed PUT the object can be re-read: a write that
             // misses quorum because nodes refused as read-only is retried once on the remaining ones (#199).
             for (var attempt = 0; attempt < 2 && blob is null; attempt++)
@@ -288,7 +293,6 @@ internal static class MultipartEndpoints
                 return (false, 503, "SlowDown", "Write quorum was not reached while assembling the object.", false);
             }
 
-            // Quota (quota-management.md) would be enforced here once a quota engine exists; descoped (#5 addendum).
             // The same object row and post-commit path as a single PUT (#7 FR10): no divergent multipart variant.
             var writer = services.GetRequiredService<QuorumWriter>();
             var record = QuorumWriter.ToRecord(blob, upload.Bucket, upload.Key, upload.ContentType, finalEtag);
@@ -301,7 +305,9 @@ internal static class MultipartEndpoints
             }
 
             committed = true;
+            reservation?.Dispose(); // usage is charged; don't count it twice (review: Lenny #3)
             writer.AfterCommit(blob, upload.Bucket, upload.Key);
+            quota.AfterCommit(upload.TenantId, upload.Bucket);
             logger.LogInformation("Multipart upload {UploadId} completed: {Parts} parts, {Size} bytes, CID {Cid}, in {ElapsedMs} ms.",
                 upload.UploadId, parts.Count, blob.SizeBytes, blob.Cid, started.ElapsedMilliseconds);
             return (true, 200, "", "", replaced);
@@ -318,6 +324,7 @@ internal static class MultipartEndpoints
         }
         finally
         {
+            reservation?.Dispose();
             if (!committed)
             {
                 if (blob is not null)

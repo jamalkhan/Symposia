@@ -27,6 +27,18 @@
       "description": "Writes return a Merkle root over 64 KiB leaves, and IntegrityChallenge answers a leaf with an inclusion proof (BlobStorage #8 FR6.4). Gateways fall back to whole-blob hashes for nodes without it.",
       "issue": 8,
       "history": [{ "stage": "offered", "release": "0.1.0" }]
+    },
+    {
+      "name": "storage.manifest.watch.v1",
+      "description": "WatchManifest streams the node's manifest change feed (snapshot, then live events and heartbeats) so gateways keep a CID routing cache without polling (BlobStorage #12 Layer 2). Gateways fall back to ListBlobs reconciliation for nodes without it.",
+      "issue": 12,
+      "history": [{ "stage": "offered", "release": "0.1.0" }]
+    },
+    {
+      "name": "storage.manifest.epoch-roots.v1",
+      "description": "The node submits a signed Merkle root of its manifest to EpochRootRegistry each epoch and answers GetManifestProof with inclusion proofs against it (BlobStorage #12 Layer 3).",
+      "issue": 12,
+      "history": [{ "stage": "offered", "release": "0.1.0" }]
     }
   ]
 }

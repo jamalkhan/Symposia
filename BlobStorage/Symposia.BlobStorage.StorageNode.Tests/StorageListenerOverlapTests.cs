@@ -100,7 +100,7 @@ public sealed class StorageListenerOverlapTests : IAsyncLifetime
         var (_, services) = await StartAsync(grpcPort: FreePort(), grpcTlsPort: 0);
         Assert.Null(services.Storage!.GrpcTls);
         Assert.Null(services.Storage.TlsFingerprint);
-        Assert.Equal([ProtocolFeatures.StorageGrpcPlaintext, ProtocolFeatures.StorageIntegrityMerkleV1], services.Features!);
+        Assert.Equal([ProtocolFeatures.StorageGrpcPlaintext, ProtocolFeatures.StorageIntegrityMerkleV1, ProtocolFeatures.StorageManifestWatchV1], services.Features!);
     }
 
     public Task InitializeAsync() => Task.CompletedTask;

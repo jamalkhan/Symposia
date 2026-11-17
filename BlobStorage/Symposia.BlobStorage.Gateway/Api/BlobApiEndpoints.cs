@@ -24,6 +24,7 @@ public static partial class BlobApiEndpoints
     {
         var v1 = app.MapGroup(Prefix);
         v1.MapGet("/openapi.json", () => Results.Text(OpenApi.Value, "application/json"));
+        QuotaEndpoints.Map(v1); // #15
 
         // Only the caller's tenant's buckets: listing never reveals another tenant's names (#3 FR1.3).
         v1.MapGet("/buckets", (HttpContext ctx, GatewayMetadataStore store) =>
@@ -92,7 +93,7 @@ public static partial class BlobApiEndpoints
             }
             catch (S3RequestRejectedException ex)
             {
-                return Error(ex.Status, ex.Code, ex.Message);
+                return Error(ex);
             }
 
             return record is null ? Unavailable() : Results.Ok(Describe(record));
@@ -356,6 +357,9 @@ public static partial class BlobApiEndpoints
     /// <summary>A JSON error, <c>{"error":{"code","message","requestId"}}</c>, with S3's codes and statuses.</summary>
     public static IResult Error(int status, string code, string message) => new ErrorResult(status, code, message);
 
+    /// <summary>A rejection in /v1 form: its native code when it has one, and its error-catalog details.</summary>
+    public static IResult Error(S3RequestRejectedException ex) => new ErrorResult(ex.Status, ex.NativeCode ?? ex.Code, ex.Message, ex.Details);
+
     private static IResult NoSuchBucket(string bucket) => Error(404, "NoSuchBucket", $"The bucket '{bucket}' does not exist.");
 
     private static IResult NoSuchKey(string key) => Error(404, "NoSuchKey", $"The key '{key}' does not exist.");
@@ -392,12 +396,14 @@ public static partial class BlobApiEndpoints
         return new StreamReader(stream).ReadToEnd();
     });
 
-    private sealed class ErrorResult(int status, string code, string message) : IResult
+    private sealed class ErrorResult(int status, string code, string message, IReadOnlyDictionary<string, object?>? details = null) : IResult
     {
         public Task ExecuteAsync(HttpContext ctx)
         {
             ctx.Response.StatusCode = status;
-            return ctx.Response.WriteAsJsonAsync(new { error = new { code, message, requestId = RequestIds.Of(ctx) } });
+            return details is null
+                ? ctx.Response.WriteAsJsonAsync(new { error = new { code, message, requestId = RequestIds.Of(ctx) } })
+                : ctx.Response.WriteAsJsonAsync(new { error = new { code, message, details, requestId = RequestIds.Of(ctx) } });
         }
     }
 }

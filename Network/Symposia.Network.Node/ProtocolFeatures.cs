@@ -19,6 +19,10 @@ public static class ProtocolFeatures
 
     public const string StorageIntegrityMerkleV1 = "storage.integrity.merkle.v1";
 
+    public const string StorageManifestWatchV1 = "storage.manifest.watch.v1";
+
+    public const string StorageManifestEpochRootsV1 = "storage.manifest.epoch-roots.v1";
+
     private static readonly Lazy<ProtocolRegistry> LazyRegistry = new(Load);
 
     /// <summary>The embedded <c>protocol/features.json</c>.</summary>

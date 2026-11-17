@@ -27,12 +27,39 @@ internal static class AdminEndpoints
         group.MapPost("/nodes/penalty", SetPenalty).AddEndpointFilter(AdminAuthFilter);
         group.MapGet("/repair/sla", RepairSla).AddEndpointFilter(AdminAuthFilter);
         group.MapGet("/placement/ip-violations", IpViolations).AddEndpointFilter(AdminAuthFilter);
+        // #12: the routing cache's state, and resolving a holding dispute against a node's on-chain epoch root (FR3.4).
+        group.MapGet("/routing", (Routing.RoutingCache cache) => Results.Ok(new
+        {
+            warm = cache.IsWarm,
+            startedAt = cache.StartedAt,
+            warmSince = cache.WarmSince,
+            nodes = cache.Nodes.Select(n => new { node = n, cids = cache.CountFor(n) }),
+        })).AddEndpointFilter(AdminAuthFilter);
+        group.MapPost("/routing/disputes", ResolveDispute).AddEndpointFilter(AdminAuthFilter);
+
+        // #15 FR8: the billing system raises or removes a tenant's platform-imposed limit when payment is added.
+        group.MapPut("/tenants/{tenant}/quota", Api.QuotaEndpoints.SetPlatformLimit).AddEndpointFilter(AdminAuthFilter);
         group.MapGet("/gc", (Metadata.GatewayMetadataStore store, IOptions<GatewayOptions> options, GC.SafetyInvariantGate gate) => Results.Ok(new
         {
             report = Api.BlobApiEndpoints.GcReport(store, options.Value, null),
             safetyRefusals = gate.Refusals, // anything but 0 means an evaluator queued protected data (#16 AC10)
         })).AddEndpointFilter(AdminAuthFilter);
     }
+
+    private static async Task<IResult> ResolveDispute(DisputeRequest request, Nodes.INodeRegistry nodes, Routing.EpochRootDisputes disputes,
+        CancellationToken ct)
+    {
+        if (request.Epoch is not { } epoch)
+            return Results.BadRequest(new { error = "epoch is required: the epoch by which the node should have held the CID" });
+
+        if (!Domain.Cid.TryParse(request.Cid, out _) || nodes.All.FirstOrDefault(n => string.Equals(n.Id, request.Node, StringComparison.OrdinalIgnoreCase)) is not { } node)
+            return Results.BadRequest(new { error = "cid must be a CID and node a known node ID" });
+
+        var outcome = await disputes.ResolveAsync(node, request.Cid, epoch, ct);
+        return Results.Ok(new { node = node.Id, cid = request.Cid, epoch, outcome = outcome.ToString() });
+    }
+
+    private sealed record DisputeRequest(string Node, string Cid, ulong? Epoch);
 
     private static IResult SetPenalty(PenaltyRequest request, Penalties.ManualPenaltySource penalties)
     {

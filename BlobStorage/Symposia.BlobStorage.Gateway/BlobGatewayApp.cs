@@ -78,7 +78,10 @@ public static class BlobGatewayApp
         builder.Services.AddSingleton<Placement.PlacementEngine>();
         builder.Services.AddSingleton<Placement.RegionAssignmentResolver>();
         builder.Services.AddScoped<QuorumWriter>();
-        builder.Services.AddSingleton<TenantQuota>();
+        // Quotas (#15): reservations, threshold alerts (logged until tenant alert channels exist), lapsed-lease sweeping.
+        builder.Services.AddSingleton<Quota.QuotaGate>();
+        builder.Services.TryAddSingleton<Quota.IQuotaAlertSink, Quota.LoggingQuotaAlertSink>();
+        builder.Services.AddHostedService<Quota.ReservationSweeper>();
         builder.Services.AddSingleton<IWriteQuorumRequirement, ConfiguredWriteQuorum>();
 
         // Health, readiness, metrics and drain (#1).
@@ -114,6 +117,13 @@ public static class BlobGatewayApp
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ReplicationMonitor>());
         builder.Services.AddHostedService<ReconcilePollerService>();
 
+        // Layer 2/3 of the metadata architecture (#12): the gossip-fed routing cache, peer-gateway and on-chain fallbacks.
+        builder.Services.AddSingleton<Routing.RoutingCache>();
+        builder.Services.AddHostedService<Routing.ManifestWatcher>();
+        builder.Services.AddSingleton<Routing.EpochRootDisputes>();
+        builder.Services.AddSingleton<Routing.ReplicaLocator>();
+        builder.Services.AddHttpClient(Routing.ReplicaLocator.HttpClientName);
+
         // Which storage nodes may be used, from the network's on-chain protocol activations (issue #145).
         // With a static node source there is no chain to read, so nothing is required.
         builder.Services.AddSingleton<NetworkPolicy>();
@@ -135,6 +145,12 @@ public static class BlobGatewayApp
             });
             builder.Services.AddHttpClient(RegistryNodeSource.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(3));
             builder.Services.AddSingleton<IStorageNodeSource, RegistryNodeSource>();
+            // Nodes' on-chain epoch roots, for disputes and the on-chain routing fallback (#12 Layer 3).
+            builder.Services.AddHttpClient<IEpochRootClient, EpochRootClient>(http =>
+            {
+                http.BaseAddress = new Uri(chainGateway);
+                http.Timeout = TimeSpan.FromSeconds(10);
+            });
             builder.Services.AddHttpClient(ProtocolScheduleSyncService.HttpClientName, http => http.Timeout = TimeSpan.FromSeconds(5));
             // Before NodeSourceSyncService, so the first node sync already applies the schedule.
             builder.Services.AddHostedService<ProtocolScheduleSyncService>();
@@ -234,6 +250,7 @@ public static class BlobGatewayApp
             var path = ctx.Request.Path.Value ?? "";
             if (Health.HealthEndpoints.IsHealthPath(path) ||
                 path.StartsWith("/admin/", StringComparison.Ordinal) ||
+                Routing.PeerRoutingEndpoints.IsPeerPath(path) || // bearer-token peer gateways (#12)
                 path == BlobApiEndpoints.OpenApiPath ||
                 (servesPrimary && Symposia.Network.Node.PrimaryEndpointPaths.Contains(path)))
             {
@@ -305,6 +322,7 @@ public static class BlobGatewayApp
         // ── Admin endpoints ───────────────────────────────────────────────────────────
 
         AdminEndpoints.Map(app);
+        Routing.PeerRoutingEndpoints.Map(app);
 
         // Local diagnostics for the last epoch this gateway measured (#221 FR4); admin paths skip SigV4.
         app.MapGet("/admin/service-metrics", (HttpContext ctx, History.HistoryStore store) =>

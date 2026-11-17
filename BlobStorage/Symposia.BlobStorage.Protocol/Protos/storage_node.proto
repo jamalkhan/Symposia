@@ -23,6 +23,15 @@ service StorageNode {
 
   // Enumerate all CIDs this node holds, paginated. Used by the gateway for reconciliation.
   rpc ListBlobs(ListBlobsRequest) returns (stream ListBlobsChunk);
+
+  // #12 Layer 2: the node's manifest change feed. Events after `after_seq`, or a full snapshot
+  // (first message has reset = true) when the cursor is 0 or older than the node still keeps,
+  // then live events, with periodic heartbeats. Never ends on its own; the caller cancels.
+  rpc WatchManifest(WatchManifestRequest) returns (stream ManifestEvent);
+
+  // #12 Layer 3: a Merkle inclusion proof for `cid` in the manifest root this node submitted
+  // on-chain for `epoch` (0 = its latest submitted epoch), for disputes and the on-chain fallback.
+  rpc GetManifestProof(ManifestProofRequest) returns (ManifestProofResponse);
 }
 
 message WriteBlobChunk {
@@ -117,4 +126,48 @@ message ListBlobsRequest {
 
 message ListBlobsChunk {
   repeated string cids = 1;
+}
+
+message WatchManifestRequest {
+  int64 after_seq = 1; // 0 = start with a snapshot
+  // The feed_id the cursor came from; a different one (the manifest was rebuilt and seq restarted) means a snapshot.
+  string feed_id = 2;
+}
+
+message ManifestEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    PUT = 1;        // the node holds `cid` with `status`; snapshot rows are PUTs too
+    REMOVED = 2;    // the node no longer holds `cid`
+    CAUGHT_UP = 3;  // snapshot and backlog delivered; what follows is live
+    HEARTBEAT = 4;  // no change; carries the digest fields only
+  }
+
+  Kind kind = 1;
+  int64 seq = 2;             // 0 on snapshot rows, CAUGHT_UP and HEARTBEAT
+  string cid = 3;
+  int64 size_bytes = 4;
+  string status = 5;         // Active | PendingGc | Orphaned; only Active counts as holding
+  int64 occurred_at_unix_ms = 6;
+  bool reset = 7;            // drop everything previously learned from this node first
+  int64 head_seq = 8;        // the node's latest seq (CAUGHT_UP, HEARTBEAT)
+  int64 active_count = 9;    // Active blobs the node holds (CAUGHT_UP, HEARTBEAT): a cheap anti-entropy digest
+  int32 schema_version = 10; // 1 for this shape; consumers ignore fields they don't know
+  string feed_id = 11;       // identifies this manifest's seq space; changes when the manifest is recreated
+}
+
+message ManifestProofRequest {
+  string cid = 1;
+  uint64 epoch = 2; // 0 = latest submitted
+}
+
+message ManifestProofResponse {
+  bool found = 1;             // false: no submitted root, or `cid` isn't in it
+  uint64 epoch = 2;
+  bytes root = 3;
+  int64 leaf_index = 4;
+  int64 leaf_count = 5;
+  repeated bytes siblings = 6; // bottom-up, as IntegrityChallengeResponse.siblings
+  int64 size_bytes = 7;        // with cid and tenant_id, the leaf the verifier rebuilds
+  string tenant_id = 8;
 }

@@ -35,6 +35,15 @@ public sealed class QueryPlanTests
         ("#16 versions waiting on a blob",
             "SELECT v.id FROM version_purges p JOIN object_versions v ON v.id = p.version_id WHERE p.cid = 'c' AND v.physically_deleted_at IS NULL",
             "idx_version_purges_cid"),
+        ("#12 replicas of a CID (peer routing)", "SELECT node_ids FROM objects WHERE cid = 'c'", "idx_objects_cid"),
+        ("#15 account quota", "SELECT platform_limit_bytes, self_limit_bytes FROM account_quota WHERE tenant_id = 't'", "sqlite_autoindex_account_quota_1"),
+        ("#15 bucket quota", "SELECT limit_bytes, max_object_count FROM bucket_quota WHERE bucket = 'b'", "sqlite_autoindex_bucket_quota_1"),
+        ("#15 bucket usage", "SELECT bytes, objects FROM bucket_usage WHERE bucket = 'b'", "sqlite_autoindex_bucket_usage_1"),
+        ("#15 account reservations", "SELECT SUM(bytes) FROM quota_reservations WHERE tenant_id = 't' AND expires_at > 'x'", "idx_quota_reservations_tenant"),
+        ("#15 bucket reservations", "SELECT SUM(bytes), SUM(objects) FROM quota_reservations WHERE bucket = 'b' AND expires_at > 'x'", "idx_quota_reservations_bucket"),
+        ("#15 lapsed reservations", "SELECT id FROM quota_reservations WHERE expires_at <= 'x'", "idx_quota_reservations_expiry"),
+        ("#15 object exists (new vs overwrite)", "SELECT 1 FROM objects WHERE bucket = 'b' AND key = 'k'", "sqlite_autoindex_objects_1"),
+        ("#15 alert state", "SELECT 1 FROM quota_alert_state WHERE scope = 'account' AND scope_id = 't' AND threshold_pct = 75", "sqlite_autoindex_quota_alert_state_1"),
     ];
 
     [Fact]

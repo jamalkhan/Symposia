@@ -77,10 +77,11 @@ public sealed class NodeConnection : IDisposable
     }
 
     // For integration tests: inject a pre-built client backed by an in-process TestServer.
-    internal NodeConnection(string url, HttpClient httpClient)
+    internal NodeConnection(string url, HttpClient httpClient, string? expectedNodeId = null)
     {
         Url = url;
-        Id = url;
+        ExpectedNodeId = expectedNodeId;
+        Id = expectedNodeId ?? url;
         _channel = GrpcChannel.ForAddress(httpClient.BaseAddress!, new GrpcChannelOptions
         {
             HttpClient = httpClient,

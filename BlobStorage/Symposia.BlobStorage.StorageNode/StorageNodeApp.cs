@@ -93,6 +93,20 @@ public static class StorageNodeApp
         // Signed 5-minute heartbeats with this node's capacity readings (issue #75).
         builder.Services.AddSingleton<IHeartbeatMetricsSource, StorageHeartbeatMetricsSource>();
         builder.Services.AddTelemetryHeartbeats(builder.Configuration.GetSection("StorageNode"));
+        // Epoch manifest roots on-chain (#12 Layer 3), through the same Blockchain Gateway registration uses.
+        var chainGateway = builder.Configuration["StorageNode:BlockchainGatewayUrl"];
+        if (nodeOptions.EpochRoots.Enabled && !string.IsNullOrWhiteSpace(nodeOptions.EpochRoots.RegistryAddress) && !string.IsNullOrWhiteSpace(chainGateway))
+        {
+            builder.Services.TryAddSingleton(TimeProvider.System);
+            builder.Services.AddHttpClient<IEpochRootClient, EpochRootClient>(http =>
+            {
+                http.BaseAddress = new Uri(chainGateway);
+                http.Timeout = TimeSpan.FromSeconds(30);
+            });
+            builder.Services.AddSingleton<EpochRootSubmitter>();
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<EpochRootSubmitter>());
+        }
+
         // Storage RPCs only from registered members of this node's network (issue #140).
         if (nodeOptions.RequireCallerAuth)
         {
@@ -115,7 +129,11 @@ public static class StorageNodeApp
         var app = builder.Build();
 
         app.Services.GetRequiredService<LocalBlobStore>().EnsureRootExists();
-        app.Services.GetRequiredService<ManifestStore>().Initialize();
+        var manifest = app.Services.GetRequiredService<ManifestStore>();
+        manifest.Initialize();
+        // A missing or corrupt manifest is rebuilt from verified blobs before anything is served (#12 FR1.4).
+        ManifestRecovery.RebuildIfNeeded(manifest, app.Services.GetRequiredService<LocalBlobStore>(),
+            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(ManifestRecovery)));
         app.Services.GetRequiredService<Health.StorageWritableMonitor>().Check();
         app.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.Register(() =>
         {
@@ -160,6 +178,11 @@ public static class StorageNodeApp
         }
 
         features.Add(ProtocolFeatures.StorageIntegrityMerkleV1);
+        features.Add(ProtocolFeatures.StorageManifestWatchV1);
+        if (app.Services.GetService<EpochRootSubmitter>() is not null)
+        {
+            features.Add(ProtocolFeatures.StorageManifestEpochRootsV1);
+        }
 
         app.MapGet(NodeServices.Path, (NodeIdentity identity, Microsoft.Extensions.Options.IOptions<NodeNetworkOptions> network) =>
         {

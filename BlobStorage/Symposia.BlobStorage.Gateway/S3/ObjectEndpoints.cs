@@ -58,7 +58,7 @@ internal static class ObjectEndpoints
             ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Symposia.BlobStorage.Gateway.S3.Upload")
                 .LogWarning("Rejected PUT {Bucket}/{Key} from {AccessKey}: {Code} {Message}", bucket, key,
                     (ctx.Items[nameof(Auth.SigV4Context)] as Auth.SigV4Context)?.AccessKeyId, ex.Code, ex.Message);
-            return S3Xml.Error(ex.Status, ex.Code, ex.Message);
+            return S3Xml.Error(ex);
         }
 
         foreach (var (algorithm, value) in body.Computed.Where(c => c.Key != "md5"))
@@ -88,7 +88,16 @@ internal static class ObjectEndpoints
         var srcBucket = path[..slash];
         var srcKey = path[(slash + 1)..];
 
-        var dest = objects.Copy(ctx, srcBucket, srcKey, destBucket, destKey);
+        ObjectRecord? dest;
+        try
+        {
+            dest = objects.Copy(ctx, srcBucket, srcKey, destBucket, destKey);
+        }
+        catch (S3RequestRejectedException ex)
+        {
+            return S3Xml.Error(ex); // e.g. the destination's quota (#15)
+        }
+
         if (dest is null) return S3Xml.NoSuchKey(srcKey);
 
         return S3Xml.CopyObjectResponse(dest.ETag, dest.LastModified);

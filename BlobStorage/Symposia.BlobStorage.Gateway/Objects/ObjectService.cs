@@ -33,7 +33,8 @@ public enum ServeOutcome
 /// its own history entry here, the one hook point, and the adapters only map results to XML or JSON.
 /// </summary>
 public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry nodes, RepairQueue repairQueue, Quorum.QuorumWriter writer,
-    Quorum.TenantQuota quota, Health.GatewayMetrics metrics, Erasure.ErasureObjects erasure, ILogger<ObjectService> logger)
+    Quota.QuotaGate quota, Health.GatewayMetrics metrics, Erasure.ErasureObjects erasure, ILogger<ObjectService> logger,
+    Routing.RoutingCache? routing = null, Routing.ReplicaLocator? locator = null)
 {
     /// <summary>Reads an object (or a range of it) into the response, recording a view.</summary>
     public Task<ServeOutcome> GetAsync(HttpContext ctx, string bucket, string key)
@@ -56,11 +57,18 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
             bucket, key, History.HistoryCapture.ApiOf(ctx));
         var tenantId = ctx.Items["TenantId"] as string ?? "";
         var expected = S3.UploadBody.ExpectedLength(ctx.Request);
-        quota.EnsureRoom(tenantId, expected); // before placement or any node contact (#1 FR-2)
-        var (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected,
-            Placement.RegionAssignmentResolver.FromHeader(ctx.Request));
+        // Reserved before placement or any node contact (#1 FR-2, #15 FR4); released however the write ends.
+        ObjectRecord? record;
+        bool replaced;
+        using (quota.Reserve(tenantId, bucket, key, expected))
+        {
+            (record, replaced) = await writer.WriteObjectAsync(tenantId, bucket, key, contentType, body, ctx.RequestAborted, expected,
+                Placement.RegionAssignmentResolver.FromHeader(ctx.Request));
+        } // released the moment the commit has charged usage, so the bytes aren't counted twice (review: Lenny #3)
+
         if (record is not null)
         {
+            quota.AfterCommit(tenantId, bucket);
             Fill(written, record, replaced);
             Health.RequestLog.SelectedNode(ctx, string.Join(',', record.NodeIds));
         }
@@ -80,8 +88,15 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
 
         (read.Size, read.Etag, read.Cid) = (source.SizeBytes, source.ETag, source.Cid);
         var written = History.HistoryCapture.Mark(ctx, History.HistoryOperation.Insert, bucket, key, api);
+        // No bytes move, but the destination gains a logical object of the source's size (#15 FR2).
+        var tenantId = ctx.Items["TenantId"] as string ?? "";
         var copy = source with { Bucket = bucket, Key = key, LastModified = DateTimeOffset.UtcNow };
-        Fill(written, copy, store.PutObject(copy));
+        using (quota.Reserve(tenantId, bucket, key, source.SizeBytes))
+        {
+            Fill(written, copy, store.PutObject(copy));
+        }
+
+        quota.AfterCommit(tenantId, bucket);
         return copy;
     }
 
@@ -126,14 +141,33 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
         }
 
         // Try each replica (healthy ones first) until one starts streaming (#135); shared with Complete (#5).
-        var replicas = ReplicaReader.Order(nodes, record.NodeIds);
+        // Holders the routing cache knows of from nodes' own feeds join the index's list (#12 FR2.2): a copy the
+        // index hasn't caught up with yet is still a copy.
+        var listed = record.NodeIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var replicas = ReplicaReader.Order(nodes, routing is null ? listed : listed.Union(routing.Holders(record.Cid)));
         var notFound = 0;
-        var opened = await ReplicaReader.OpenAsync(replicas, request, logger, ctx.RequestAborted,
-            onNotFound: missing =>
+        void OnNotFound(NodeConnection missing)
+        {
+            notFound++;
+            routing?.Evict(missing.Id, record.Cid); // the node's word beats its feed
+            if (listed.Contains(missing.Id))
             {
-                notFound++;
                 repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes);
-            });
+            }
+        }
+
+        var opened = await ReplicaReader.OpenAsync(replicas, request, logger, ctx.RequestAborted, onNotFound: OnNotFound);
+        if (opened is null && locator is not null)
+        {
+            // Nothing listed answered: ask peer gateways, then the chain (FR2.6), before failing the read.
+            var located = await locator.LocateAsync(record.Cid, replicas.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase), ctx.RequestAborted);
+            if (located.Count > 0)
+            {
+                replicas = [.. replicas, .. located];
+                opened = await ReplicaReader.OpenAsync(located, request, logger, ctx.RequestAborted, onNotFound: OnNotFound);
+            }
+        }
+
         if (opened?.Node is not { } node || opened.Call is not { } call)
         {
             // Every replica says the blob is gone: lost, not merely unreachable (#8 FR7.2).
@@ -205,7 +239,7 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
                     if (ex.StatusCode == StatusCode.NotFound)
                     {
                         logger.LogWarning("Node {Url} returned NotFound for CID {Cid} mid-stream; flagging for repair.", node.Url, record.Cid);
-                        repairQueue.EnqueueMissingReplica(record, node.Id, store, nodes);
+                        OnNotFound(node);
                     }
                     else
                     {
@@ -222,7 +256,7 @@ public sealed class ObjectService(GatewayMetadataStore store, INodeRegistry node
                     var resume = new ReadBlobRequest { Cid = record.Cid, Offset = offset + sent, Length = total - sent };
                     var next = await ReplicaReader.OpenAsync(
                         replicas.Where(r => !tried.Contains(r.Id)).ToList(), resume, logger, ctx.RequestAborted,
-                        onNotFound: missing => repairQueue.EnqueueMissingReplica(record, missing.Id, store, nodes));
+                        onNotFound: OnNotFound);
                     if (next is null)
                     {
                         // Headers are already sent and no replica is left: the client gets a broken transfer and retries.

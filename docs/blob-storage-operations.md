@@ -66,6 +66,15 @@ In network mode, placement follows `redundancy-and-data-integrity.md` (BlobStora
 - **Bandwidth.** Repair traffic is capped per node at `Redundancy:BandwidthBudgetPercent` (25 %) of its `StorageNode:UploadBytesPerSecond`, or of `Redundancy:DefaultNodeUploadBytesPerSecond` when the node reports none. Stage 3 and 4 nodes get `RecoveryBandwidthBudgetPercent`.
 - **Challenges.** About every `Redundancy:ChallengeIntervalSeconds`, at random, a random replica must prove a random 64 KiB leaf against the Merkle root recorded at write time. Failures show in `/admin/nodes` as `challengeFailures` and `recommendedPenaltyStage`.
 
+## Metadata layers: manifests, routing and epoch roots
+
+BlobStorage #12 (`metadata-architecture.md`). Nothing on the metadata path uses Postgres or any shared database.
+
+- **Node manifest (Layer 1).** Each node's `manifest.db` is checked at startup. If it is missing or fails `PRAGMA quick_check`, it is moved aside as `manifest.db.corrupt-<time>` and rebuilt from the blobs on disk. Every file is re-hashed, and only blobs that match their CID come back, as Active. The log line `manifest_rebuilt` gives the counts. Startup takes as long as re-hashing the volume. Rebuilt blobs have no tenant references until they are written again.
+- **Change feed and routing cache (Layer 2).** Gateways subscribe to every node's manifest feed (`WatchManifest`, protocol feature `storage.manifest.watch.v1`). They keep an in-memory map of which nodes hold each CID. Reads use it alongside the metadata index, so a copy the index hasn't caught up with still serves. `GET /admin/routing` shows whether the cache is warm and how many CIDs each node feeds. The cache is rebuilt from the feeds on every start. Each node keeps `StorageNode:ManifestEventRetention` (100 000) events. A gateway further behind than that resyncs from a snapshot, and so does one whose count disagrees with a node's idle heartbeat.
+- **Fallbacks.** When no replica the gateway knows of answers, it asks `Gateway:Routing:PeerGateways` (`GET /internal/v1/routing/{cid}`, bearer `Gateway:Routing:PeerToken`, plus any of `AcceptedPeerTokens` while rotating; with no token the endpoint refuses everyone). Results that found nothing are cached for 30 s, and at most `ChainFallbackMaxNodes` (32) nodes are asked per lookup. After that, it asks registry nodes for an inclusion proof against their on-chain epoch root. Only node IDs cross between gateways. Cross-gateway visibility of buckets and keys needs a shared metadata index, which is tracked separately.
+- **Epoch roots (Layer 3).** Right after each epoch boundary, every storage node with `StorageNode:EpochRoots:RegistryAddress` set (the Node Host sets it from the network) freezes its Active manifest, signs the Merkle root and submits it to `EpochRootRegistry` through the Blockchain Gateway. Epochs are the network's telemetry epochs. A node that misses the epoch after the one being attested never submits late; it is non-attesting for that epoch. `POST /admin/routing/disputes {"node":"0x…","cid":"…","epoch":N}` decides by epoch N's on-chain root whether the node held the CID. Naming the epoch asserts the CID existed by then: a blob written after a node's latest root is legitimately absent from it. If the node loses, its routing entry is evicted and the failure is reported for penalties.
+
 ## Garbage collection
 
 BlobStorage #16. A delete is a **soft delete**. The object disappears from the API at once, but its bytes stay for the bucket's recovery window (`Gateway:Gc:RecoveryDays`, default 30). The bucket lifecycle may set 1–365 days for ePHI. Within the window, `POST /v1/buckets/{b}/objects/{k}?restore` brings the object back. Storage is billed, and counts toward quota, until GC confirms deletion from every replica. That moment is recorded as a `blob.physically_deleted` event.
@@ -75,6 +84,18 @@ BlobStorage #16. A delete is a **soft delete**. The object disappears from the A
 - GC deletes in priority order: replicas on slashed or terminated nodes first, then purges and expired multipart uploads, then stale replicas and orphans. At most `Gc:DeletesPerSecondPerNode` deletions go to each node per second.
 - A blob a node holds that nothing references is deleted only after `Gc:OrphanGraceHours` (48) from first sighting, **and** once the chain confirms it has no record. That confirmation doesn't exist yet, so orphans are detected and aged but never deleted. The node itself never deletes them either; it records them for reconciliation.
 - `GET /v1/gc` (tenant) and `GET /admin/gc` show objects pending physical deletion, their estimated purge time and placement warnings. `safetyRefusals` in `/admin/gc` should stay at 0. Anything else means GC was asked to delete protected data and refused.
+
+## Quotas
+
+BlobStorage #15 (`quota-management.md`). Tenants manage their own quotas through `/v1` (see `blob-api.md`). For operators:
+
+- **Upgrading.** Tenants that already have buckets or usage when this release first starts stay unlimited (not free tier) until billing sets a contracted limit.
+- **Free tier.** An account is provisioned the first time it is used. It starts with a platform-imposed limit of `Gateway:Quota:FreeTierStorageBytes` (10 GiB) and an egress allowance of `FreeTierEgressBytesPerMonth` (100 GiB, provisioned only; egress metering enforces it). Set `FreeTierStorageBytes` to 0 to start accounts unlimited. The value is fixed into each account when it is created, so changing it later affects only new accounts. `Gateway:TenantQuotaBytes:<tenant>` still pins a tenant's platform limit and wins over the stored one.
+- **Payment added.** The billing system calls `PUT /admin/tenants/{tenant}/quota {"platform_imposed_limit_bytes": <contracted, or null for none>}` (`X-Admin-Secret`). This takes the account off the free tier and unblocks its writes at once.
+- **Alerts.** Each crossing of `Gateway:Quota:AlertThresholdsPct` (75/90/100) logs one INFO, WARNING or CRITICAL alert per account and per bucket. Dropping back below a threshold re-arms it. Tenant webhook and email delivery come with tenant observability.
+- **Reservations.** Each write holds a lease of `ReservationLeaseSeconds` (120), renewed while it runs. A gateway that dies mid-upload has its reservations swept once the lease lapses.
+- **Peer routing endpoint.** Expose `/internal/v1/routing` only on the internal network, behind the TLS-terminating load balancer.
+- **One gateway per metadata database.** Reservations are atomic within one gateway's metadata index. Gateways with separate indexes keep separate counters, so race safety across gateways needs the shared metadata index (tracked separately).
 
 ## Tenants and credentials
 

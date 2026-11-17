@@ -148,10 +148,14 @@ public sealed class GatewayOptions
     public int ShutdownTimeoutSeconds { get; set; } = 30;
 
     /// <summary>
-    /// Per-tenant storage quotas in bytes (#1 FR-2): a write that would take the tenant past its quota is
-    /// refused with 507 before any node is contacted. Tenants not listed are unlimited.
+    /// Operator-set platform-imposed account limits in bytes (#1 FR-2, #15): for a listed tenant this wins over the
+    /// limit stored with its account (free tier or contracted). Tenants not listed get <see cref="QuotaOptions.FreeTierStorageBytes"/>
+    /// until the billing system sets their contracted limit.
     /// </summary>
     public Dictionary<string, long> TenantQuotaBytes { get; set; } = [];
+
+    /// <summary>Account and bucket quotas, reservations, alerts and the free tier (#15).</summary>
+    public QuotaOptions Quota { get; set; } = new();
 
     /// <summary>Copy counts, write quorum and placement (#7, #8).</summary>
     public RedundancyOptions Redundancy { get; set; } = new();
@@ -161,6 +165,9 @@ public sealed class GatewayOptions
 
     /// <summary>Garbage collection (#16).</summary>
     public GcOptions Gc { get; set; } = new();
+
+    /// <summary>The gossip-fed CID routing cache and its fallbacks (#12 Layer 2/3).</summary>
+    public RoutingOptions Routing { get; set; } = new();
 }
 
 public enum RedundancyMode
@@ -319,4 +326,61 @@ public sealed class CredentialAuthorityOptions
 
     /// <summary>Most use events kept locally while the Authority is unreachable before the oldest are dropped (with an error).</summary>
     public int AuditSpoolLimit { get; set; } = 1_000_000;
+}
+
+/// <summary>
+/// How the gateway finds replicas beyond its own metadata index (#12). Each storage node's manifest change feed
+/// keeps an in-memory CID → holders cache; on a miss the gateway asks its peer gateways, then checks nodes'
+/// inclusion proofs against their on-chain epoch roots.
+/// </summary>
+public sealed class RoutingOptions
+{
+    /// <summary>Subscribe to storage nodes' manifest change feeds (WatchManifest).</summary>
+    public bool WatchManifests { get; set; } = true;
+
+    /// <summary>Peer gateways' base URLs (e.g. <c>http://gw2:5181</c>) asked to resolve a CID this gateway can't (FR2.6).</summary>
+    public string[] PeerGateways { get; set; } = [];
+
+    /// <summary>
+    /// Bearer token peer gateways present to <c>/internal/v1/routing</c>, and this gateway presents to them.
+    /// Empty = the endpoint refuses every call (it is never open).
+    /// </summary>
+    public string PeerToken { get; set; } = "";
+
+    /// <summary>How long a peer gateway lookup may take before it's abandoned.</summary>
+    public int PeerTimeoutMilliseconds { get; set; } = 2000;
+
+    /// <summary>Ask nodes for inclusion proofs against their on-chain epoch roots when nothing else locates a CID (FR2.6, FR3.2).</summary>
+    public bool ChainFallback { get; set; } = true;
+
+    /// <summary>How many nodes the on-chain fallback asks for a proof at once.</summary>
+    public int ChainFallbackParallelism { get; set; } = 8;
+
+    /// <summary>At most this many nodes (chosen at random) are asked per lookup, so a miss doesn't scale with the fleet.</summary>
+    public int ChainFallbackMaxNodes { get; set; } = 32;
+
+    /// <summary>Further tokens accepted from peers alongside <see cref="PeerToken"/>, for rotating it without downtime.</summary>
+    public string[] AcceptedPeerTokens { get; set; } = [];
+}
+
+/// <summary>Quota management (#15, Requirements/BlobStorage/quota-management.md).</summary>
+public sealed class QuotaOptions
+{
+    /// <summary>The platform-imposed account limit a new account starts with (10 GiB); 0 = new accounts start unlimited.</summary>
+    public long FreeTierStorageBytes { get; set; } = 10L << 30;
+
+    /// <summary>The egress quota a new free-tier account is provisioned with (100 GiB/month); enforced by egress metering, not here.</summary>
+    public long FreeTierEgressBytesPerMonth { get; set; } = 100L << 30;
+
+    /// <summary>Utilization percentages that alert, once per crossing (75 INFO, 90 WARNING, 100 CRITICAL by default).</summary>
+    public int[] AlertThresholdsPct { get; set; } = [75, 90, 100];
+
+    /// <summary>
+    /// How long a write's reservation holds without being renewed. A live upload renews it every third of this, so it only
+    /// lapses when the write's gateway or client is gone (QA-22); the sweeper then returns the headroom.
+    /// </summary>
+    public int ReservationLeaseSeconds { get; set; } = 120;
+
+    /// <summary>How often lapsed reservations are swept.</summary>
+    public int SweepIntervalSeconds { get; set; } = 30;
 }
